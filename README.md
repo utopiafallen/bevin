@@ -62,3 +62,10 @@ Then open http://localhost:8080.
 
 - `GET /health` → `{"status":"ok","time":"..."}`
 - `POST /api/chat` → `{"user":"...","message":"..."}` → `{"reply":"..."}`
+
+## License
+
+AGPL-3.0 — see [LICENSE](LICENSE). Alcyona is a network service: the Affero
+clause means that anyone who modifies it and offers it over a network must
+publish those modifications.
+
