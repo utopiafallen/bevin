@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>alcyona</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+    input { width: 100%; box-sizing: border-box; padding: .5rem; font-size: 1rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>alcyona</h1>
+  <p class="muted">Skeleton UI. The real web UI replaces this directory.</p>
+  <p>Health: <span id="health">&#8230;</span></p>
+  <p>User handle: <input id="user" value="me"></p>
+  <form id="chat">
+    <input id="message" placeholder="Say something&#8230;" autocomplete="off">
+  </form>
+  <p id="reply"></p>
+  <script>
+    fetch('/health')
+      .then(r => r.json())
+      .then(j => document.getElementById('health').textContent = JSON.stringify(j))
+      .catch(e => document.getElementById('health').textContent = 'error: ' + e);
+    document.getElementById('chat').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const user = document.getElementById('user').value;
+      const message = document.getElementById('message').value;
+      const reply = document.getElementById('reply');
+      reply.textContent = '\u2026';
+      try {
+        const r = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({user, message}),
+        });
+        const j = await r.json();
+        reply.textContent = r.ok ? j.reply : ('error: ' + j.error);
+      } catch (err) { reply.textContent = 'error: ' + err; }
+    });
+  </script>
+</body>
+</html>
