@@ -112,7 +112,7 @@ function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("
       el("div",{class:"row"}, field("Reasoning 1-10", r10), field("Knowledge 1-10", k10), field("Speed 1-10", s10)),
       el("div",{class:"row"},
         el("div",{},el("button",{onclick:`testModel(${i})`},"Test connection")),
-        el("div",{},el("button",{onclick:`removeModel(${i})`},"Remove")));
+        el("div",{},el("button",{onclick:`removeModel(${i})`},"Remove"))));
     card.id="model_"+i;
     // wire value->state
     base.addEventListener("input",()=>S.models[i].base_url=base.value);

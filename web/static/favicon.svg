@@ -1,4 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="alcyona">
   <defs>
     <radialGradient id="favSun" cx="40%" cy="36%" r="68%">
-      <stop offset="0%" stop-color="#FF...[truncated]
+      <stop offset="0%" stop-color="#FFF3C9"/>
+      <stop offset="55%" stop-color="#F8CE55"/>
+      <stop offset="100%" stop-color="#ECB429"/>
+    </radialGradient>
+    <clipPath id="favFrame"><rect x="2" y="2" width="60" height="60" rx="16"/></clipPath>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#FFF3D2"/>
+  <g clip-path="url(#favFrame)">
+    <circle cx="30" cy="24" r="10.5" fill="url(#favSun)"/>
+    <ellipse cx="21" cy="60" rx="27" ry="20" fill="#BCD08F"/>
+    <ellipse cx="45" cy="63" rx="25" ry="18" fill="#8CAE54"/>
+  </g>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="none" stroke="#F2C23C" stroke-width="2"/>
+</svg>

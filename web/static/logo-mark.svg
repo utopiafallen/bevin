@@ -1,4 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="alcyona">
   <defs>
     <radialGradient id="alcyonaSun" cx="40%" cy="36%" r="68%">
-      <stop offset="0%" stop-color=...[truncated]
+      <stop offset="0%" stop-color="#FFF3C9"/>
+      <stop offset="55%" stop-color="#F8CE55"/>
+      <stop offset="100%" stop-color="#ECB429"/>
+    </radialGradient>
+  </defs>
+  <circle cx="31" cy="22" r="12.5" fill="url(#alcyonaSun)"/>
+  <ellipse cx="20" cy="68" rx="33" ry="26" fill="#BCD08F"/>
+  <ellipse cx="47" cy="72" rx="31" ry="24" fill="#8CAE54"/>
+</svg>
