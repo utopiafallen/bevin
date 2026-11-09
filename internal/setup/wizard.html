@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>alcyona — setup</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 760px; padding: 2rem 1rem; }
+  h1 { font-size: 1.4rem; }
+  .steps { display: flex; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .step { padding: .2rem .6rem; border: 1px solid #8884; border-radius: 999px; font-size: .8rem; }
+  .step.active { background: #4a7cff; color: #fff; border-color: #4a7cff; }
+  .card { border: 1px solid #8883; border-radius: 8px; padding: 1rem 1.2rem; margin-top: 1rem; }
+  label { display: block; margin: .7rem 0 .2rem; font-weight: 600; font-size: .85rem; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: .45rem; border: 1px solid #8885; border-radius: 6px; background: transparent; color: inherit; }
+  .row { display: flex; gap: .6rem; } .row > div { flex: 1; }
+  .model { border: 1px dashed #8884; border-radius: 8px; padding: .6rem .8rem; margin-top: .8rem; }
+  .btns { display: flex; gap: .5rem; margin-top: 1.2rem; flex-wrap: wrap; }
+  button { padding: .5rem .9rem; border: 1px solid #8885; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+  button.primary { background: #4a7cff; color: #fff; border-color: #4a7cff; }
+  .msg { margin-top: .8rem; font-size: .85rem; } .msg.err { color: #d33; } .msg.ok { color: #2a8; }
+  .small { font-size: .8rem; opacity: .8; }
+  .hidden { display: none; }
+  .kv { font-family: ui-monospace, monospace; font-size: .8rem; opacity: .85; }
+</style>
+</head>
+<body>
+<h1>alcyona — first-time setup</h1>
+<p class="small">Data dir: <span class="kv" id="datadir">{{.DataDir}}</span> &middot; the server speaks plain HTTP; put a reverse proxy in front for TLS.</p>
+<div class="steps" id="steps"></div>
+
+<div class="card">
+  <div id="body"></div>
+</div>
+
+<div class="btns">
+  <button id="back">Back</button>
+  <button id="next" class="primary">Next</button>
+  <button id="finalize" class="hidden">Finish &amp; start</button>
+  <button id="cancel">Cancel</button>
+</div>
+<div class="msg" id="msg"></div>
+
+<script>
+const STEPS = {{.Steps | jsonify}};
+let idx = 0;
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
+
+function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
+function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
+function field(label, input){ return el("div",{},el("label",{},label),input); }
+function inp(id, val, ph){ const i=el("input",{id, value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); return i; }
+
+// ---- per-step renderers ----
+function renderServer(){ return el("div",{},
+  el("h3",{}, "1. Server"),
+  el("p",{}, "Review the server basics (set via CLI flags; not editable here)."),
+  field("Data dir", el("span",{class:"kv"},document.getElementById("datadir").textContent)),
+  field("Bind / port", el("span",{class:"kv"},"0.0.0.0 : <port> (CLI)")),
+  el("p",{class:"small"},"Setup is token-gated and in-memory. Nothing is written until you finish.")
+);}
+function renderAdmin(){ const a=S.admin; return el("div",{},
+  el("h3",{}, "2. Identity & admin"),
+  el("p",{class:"small"},"The admin account is the server's own IdP (no external login). It is the only account that can create users."),
+  field("Handle", inp("ad_handle", a.handle, "admin")),
+  field("Display name", inp("ad_name", a.display_name, "Administrator")),
+  el("div",{class:"row"},
+    field("Password", inp("ad_pw", a.password, "min 8 chars")),
+    field("Confirm", inp("ad_pw2", a.password, "")))
+);}
+function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add at least one enabled model. Provider quirks are isolated in the server; you only fill endpoint details."));
+  S.models.forEach((m,i)=>{
+    const prov=el("select",{id:"m_prov_"+i});
+    ["openai","anthropic","llama"].forEach(p=>{const o=el("option",{value:p},p); if(m.provider===p)o.selected=true; prov.append(o);});
+    prov.addEventListener("change",()=>{S.models[i].provider=prov.value;});
+    const base=inp("m_base_"+i, m.base_url, "https://api.openai.com/v1");
+    const key=inp("m_key_"+i, m.api_key, "");
+    const mid=inp("m_id_"+i, m.model_id, "gpt-4o");
+    const disp=inp("m_disp_"+i, m.display_name, "");
+    const ctx=inp("m_ctx_"+i, m.max_context?"":"", "max context tokens (blank = auto)");
+    const slots=inp("m_slots_"+i, m.slots||"1", "1");
+    const r10=inp("m_r_"+i, m.metadata&&m.metadata.reasoning?"":"", "reasoning 1-10");
+    const k10=inp("m_k_"+i, m.metadata&&m.metadata.knowledge?"":"", "knowledge 1-10");
+    const s10=inp("m_s_"+i, m.metadata&&m.metadata.speed?"":"", "speed 1-10");
+    const en=el("input",{type:"checkbox"}); en.checked=!!m.enabled; en.addEventListener("change",()=>{S.models[i].enabled=en.checked;});
+    const card=el("div",{class:"model"},
+      el("div",{class:"row"},field("Provider",prov), field("Model ID",mid)),
+      field("Base URL", base),
+      field("API key", key),
+      field("Display name", disp),
+      el("div",{class:"row"}, field("Max context", ctx), field("Slots", slots),
+        el("div",{},el("label",{}, "Enabled"), en)),
+      el("div",{class:"row"}, field("Reasoning 1-10", r10), field("Knowledge 1-10", k10), field("Speed 1-10", s10)),
+      el("div",{class:"row"},
+        el("div",{},el("button",{onclick:`testModel(${i})`},"Test connection")),
+        el("div",{},el("button",{onclick:`removeModel(${i})`},"Remove")));
+    card.id="model_"+i;
+    // wire value->state
+    base.addEventListener("input",()=>S.models[i].base_url=base.value);
+    key.addEventListener("input",()=>S.models[i].api_key=key.value);
+    mid.addEventListener("input",()=>S.models[i].model_id=mid.value);
+    disp.addEventListener("input",()=>S.models[i].display_name=disp.value);
+    ctx.addEventListener("input",()=>S.models[i].max_context=ctx.value);
+    slots.addEventListener("input",()=>S.models[i].slots=parseInt(slots.value||"1",10));
+    r10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.reasoning=parseInt(r10.value||"0",10);});
+    k10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.knowledge=parseInt(k10.value||"0",10);});
+    s10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.speed=parseInt(s10.value||"0",10);});
+    d.append(card);
+  });
+  d.append(el("div",{class:"btns"},el("button",{onclick:"addModel"},"+ Add model")));
+  return d;
+}
+function renderAux(){ const d=el("div",{},el("h3",{}, "4. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models. Hidden from users. Leave empty to skip."));
+  S.aux.forEach((m,i)=>{
+    const card=el("div",{class:"model"},
+      field("Modality (vision|audio|video)", inp("a_mod_"+i, m.modality, "vision")),
+      field("Provider", inp("a_prov_"+i, m.provider, "llama")),
+      field("Base URL", inp("a_base_"+i, m.base_url, "")),
+      field("Model ID", inp("a_id_"+i, m.model_id, "")),
+      el("button",{onclick:`removeAux(${i})`},"Remove"));
+    ["modality","provider","base_url","model_id","api_key"].forEach(k=>{ const e=card.querySelector("#a_"+k+"_"+i); if(e) e.addEventListener("input",()=>S.aux[i][k]=e.value); });
+    d.append(card);
+  });
+  d.append(el("div",{class:"btns"},el("button",{onclick:"addAux"},"+ Add aux model")));
+  return d;
+}
+function renderEmbedder(){ const e=S.embedder; return el("div",{},
+  el("h3",{}, "5. Embedder"),
+  el("p",{class:"small"},"The local llama-server running embeddinggemma-2 (loopback). It is the single embedding pipeline for memories, history, and workspace retrieval."),
+  field("Base URL", inp("emb_base", e.base_url, "http://127.0.0.1:8081/v1"))
+);}
+function renderSidecars(){ const c=S.sidecars; return el("div",{},
+  el("h3",{}, "6. Embedder & sidecars"),
+  el("p",{class:"small"},"Leave an endpoint blank to auto-provision (download + launch, idempotent, forward-only). All sidecars bind to loopback. Stepping back / canceling never uninstalls."),
+  field("Qdrant endpoint", inp("sc_qdrant", c.qdrant, "http://127.0.0.1:6333 (blank = auto)")),
+  field("llama-server endpoint", inp("sc_llama", c.llama_server, "http://127.0.0.1:8081 (blank = auto)")),
+  field("ffmpeg path", inp("sc_ffmpeg", c.ffmpeg, "blank = use system or auto")),
+  el("div",{class:"btns"},el("button",{onclick:"testQdrant"},"Test Qdrant"), el("button",{onclick:"testLlama"},"Test llama-server"))
+);}
+function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
+  d.append(el("pre",{class:"kv"}, JSON.stringify(S, null, 2)));
+  d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
+  return d;
+}
+const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, embedder:renderEmbedder, sidecars:renderSidecars, review:renderReview };
+
+// ---- model list helpers ----
+function addModel(){ S.models.push({provider:"openai",base_url:"https://api.openai.com/v1",api_key:"",model_id:"",display_name:"",metadata:{},slots:1,enabled:true}); render(); }
+function removeModel(i){ S.models.splice(i,1); render(); }
+function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
+function removeAux(i){ S.aux.splice(i,1); render(); }
+async function testModel(i){ msg("Testing model "+i+"…",""); try{ const r=await api("POST","/setup/test-model",S.models[i]); if(r.ok) msg("Model OK — "+r.model_count+" model(s) found.","ok"); else msg("Test failed: "+r.error,"err"); }catch(e){ msg("Test error: "+e.message,"err"); } }
+async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
+async function testLlama(){ msg("Testing llama-server…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"llama-server",endpoint:S.sidecars.llama_server}); msg(r.ok?"llama-server reachable.":"llama-server not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
+
+// ---- nav ----
+function sync(id, v){ /* handled by per-field listeners */ }
+function render(){
+  document.getElementById("body").innerHTML="";
+  document.getElementById("body").append(RENDER[STEPS[idx]]());
+  const st=document.getElementById("steps"); st.innerHTML="";
+  STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); });
+  document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
+  document.getElementById("next").classList.toggle("hidden", STEPS[idx]!=="review");
+}
+async function api(method, path, body){ const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(path,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
+async function doNext(){
+  const step=STEPS[idx];
+  // gather per-step data from inputs into S (admin, embedder, sidecars via id-based reads)
+  if(step==="admin"){ S.admin.handle=q("#ad_handle").value; S.admin.display_name=q("#ad_name").value; S.admin.password=q("#ad_pw").value; if(q("#ad_pw").value!==q("#ad_pw2").value){msg("Passwords do not match","err");return;} }
+  if(step==="embedder"){ S.embedder.base_url=q("#emb_base").value; }
+  if(step==="sidecars"){ S.sidecars.qdrant=q("#sc_qdrant").value; S.sidecars.llama_server=q("#sc_llama").value; S.sidecars.ffmpeg=q("#sc_ffmpeg").value; }
+  try{
+    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:S.aux, embedder:S.embedder, sidecars:S.sidecars});
+    msg("");
+    if(step==="review") return;
+    idx=Math.min(idx+1, STEPS.length-1); render();
+  }catch(e){ msg(e.message,"err"); }
+}
+async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],embedder:{base_url:""},sidecars:{qdrant:"",llama_server:"",ffmpeg:""}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
+function q(s){ return document.querySelector(s); }
+
+document.getElementById("next").onclick=doNext;
+document.getElementById("back").onclick=doBack;
+document.getElementById("cancel").onclick=doCancel;
+document.getElementById("finalize").onclick=doFinalize;
+render();
+</script>
+</body>
+</html>

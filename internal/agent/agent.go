@@ -1,64 +1,170 @@
-// Package agent is Alcyona's harness: it turns a user message into a
-// model call with per-user context, and records the exchange locally.
+// Package agent is Alcyona's harness: it runs a conversation turn for a user —
+// persist the user message, call the conversation's active model, persist the
+// reply. The provider abstraction isolates each API's quirks; the harness never
+// special-cases a vendor.
+//
+// This is the functional v1 turn. The full agentic loop (memory/retrieval via
+// the Retriever seam, tool loop, per-model slot scheduler, dependency gating,
+// aux-model multimodal) layers on top in later revisions.
 package agent
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"sync"
 
-	"github.com/utopiafallen/alcyona-agent/internal/modelclient"
+	"github.com/utopiafallen/alcyona-agent/internal/config"
+	"github.com/utopiafallen/alcyona-agent/internal/provider"
 	"github.com/utopiafallen/alcyona-agent/internal/store"
 )
 
-// Agent orchestrates one conversation turn.
+const baseSystemPrompt = `You are Alcyona, a personal assistant. Be direct and concise.`
+
+// Agent runs conversation turns for users, using the enabled models from the
+// config. Per-user SQLite stores are opened lazily and cached.
 type Agent struct {
-	model *modelclient.Client
-	store *store.Store
+	cfg          *config.ServerConfig
+	dataDir      string
+	providers    map[string]provider.Provider // by model ID (enabled only)
+	defaultModel string
+
+	mu    sync.Mutex
+	users map[string]*store.UserStore
 }
 
-// New builds an Agent.
-func New(model *modelclient.Client, s *store.Store) *Agent {
-	return &Agent{model: model, store: s}
-}
-
-const baseSystemPrompt = `You are Alcyona, a personal assistant. Be direct and concise.
-You are building up long-term knowledge of this user across conversations;
-use what you know about them, and note durable facts you learn.`
-
-// TurnInput is one user turn from the web UI.
-type TurnInput struct {
-	UserHandle string
-	Message    string
-}
-
-// TurnOutput is the assistant's reply to one user turn.
-type TurnOutput struct {
-	Reply string
-}
-
-// Run executes one conversation turn for a user.
-func (a *Agent) Run(ctx context.Context, in TurnInput) (*TurnOutput, error) {
-	if _, err := a.store.GetOrCreateUser(in.UserHandle); err != nil {
-		return nil, err
+// New builds an Agent from a loaded config. It fails if no model is enabled.
+func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
+	a := &Agent{
+		cfg:       cfg,
+		dataDir:   dataDir,
+		providers: map[string]provider.Provider{},
+		users:     map[string]*store.UserStore{},
 	}
-
-	// TODO(conversations): load this user's recent conversation history
-	// from the store instead of starting each turn from a blank slate.
-	// TODO(memories): load this user's memories and fold them into the
-	// system prompt; after the turn, extract durable facts into memories.
-	msgs := []modelclient.Message{
-		{Role: "system", Content: baseSystemPrompt},
-		{Role: "user", Content: in.Message},
+	for _, m := range cfg.Models {
+		if !m.Enabled {
+			continue
+		}
+		p, err := provider.New(m.Provider, m.BaseURL, m.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("model %s: %w", m.ID, err)
+		}
+		a.providers[m.ID] = p
+		if a.defaultModel == "" {
+			a.defaultModel = m.ID
+		}
 	}
+	if len(a.providers) == 0 {
+		return nil, fmt.Errorf("no enabled models configured")
+	}
+	return a, nil
+}
 
-	reply, err := a.model.Chat(ctx, msgs)
+// DefaultModelID returns the default (first enabled) model ID.
+func (a *Agent) DefaultModelID() string { return a.defaultModel }
+
+// Models returns the enabled models (for the UI).
+func (a *Agent) Models() []config.Model {
+	var out []config.Model
+	for _, m := range a.cfg.Models {
+		if m.Enabled {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Close closes all open per-user stores.
+func (a *Agent) Close() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, us := range a.users {
+		_ = us.Close()
+	}
+	a.users = map[string]*store.UserStore{}
+}
+
+func (a *Agent) userStore(handle string) (*store.UserStore, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if us, ok := a.users[handle]; ok {
+		return us, nil
+	}
+	us, err := store.OpenUser(filepath.Join(a.dataDir, "users", handle))
 	if err != nil {
 		return nil, err
 	}
+	a.users[handle] = us
+	return us, nil
+}
 
-	// TODO(persist): write both messages to the conversations/messages tables.
+// EnsureConversation returns a conversation id, creating it (with a default
+// active model) when convID is empty.
+func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title string) (string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", err
+	}
+	if convID == "" {
+		if title == "" {
+			title = "New conversation"
+		}
+		c, err := us.CreateConversation(title, a.defaultModel)
+		if err != nil {
+			return "", err
+		}
+		return c.ID, nil
+	}
+	if _, err := us.GetConversation(convID); err != nil {
+		return "", err
+	}
+	return convID, nil
+}
 
-	// TODO(tools): if the reply requests a tool call, execute it against
-	// the tool registry and continue the loop with the tool result.
+// Turn runs one chat turn: persist the user message, call the active model with
+// the full conversation history, persist the assistant reply. Returns the reply
+// text and the conversation id.
+func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", "", err
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return "", "", err
+	}
+	p, ok := a.providers[conv.ActiveModelID]
+	if !ok {
+		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
+	}
 
-	return &TurnOutput{Reply: reply}, nil
+	// Persist the user message first, so history is always durable/consistent.
+	if _, err := us.AppendMessage(convID, string(provider.RoleUser), userText, nil, nil); err != nil {
+		return conv.ID, "", err
+	}
+	hist, err := us.ListMessages(convID)
+	if err != nil {
+		return conv.ID, "", err
+	}
+	msgs := make([]provider.Message, 0, len(hist))
+	for _, h := range hist {
+		role := provider.Role(h.Role)
+		if role == "" {
+			role = provider.RoleUser
+		}
+		msgs = append(msgs, provider.Message{Role: role, Text: h.Content})
+	}
+
+	res, err := p.Chat(ctx, conv.ActiveModelID, provider.ChatRequest{
+		System:   []provider.ContentPart{{Text: baseSystemPrompt}},
+		Messages: msgs,
+	})
+	if err != nil {
+		return conv.ID, "", err
+	}
+	modelID := conv.ActiveModelID
+	if _, err := us.AppendMessage(convID, string(provider.RoleAssistant), res.Text, &modelID, nil); err != nil {
+		return conv.ID, "", err
+	}
+	return conv.ID, res.Text, nil
 }
