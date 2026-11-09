@@ -29,7 +29,7 @@ func TestWizardTemplateRenders(t *testing.T) {
 	if len(out) < 100 {
 		t.Fatalf("page too short (%d bytes)", len(out))
 	}
-	if !strings.Contains(out, "first-time setup") {
+	if !strings.Contains(out, "First-time setup") {
 		t.Fatalf("page missing heading; head: %.200s", out)
 	}
 	if !strings.Contains(out, `["server"`) {

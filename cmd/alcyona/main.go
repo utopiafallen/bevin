@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/utopiafallen/alcyona-agent/internal/server"
 	"github.com/utopiafallen/alcyona-agent/internal/setup"
 	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/alcyona-agent/web"
 )
 
 func main() {
@@ -97,6 +99,16 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		})
+		// Serve the branding assets (theme, logo, font) in setup mode too, so
+		// the wizard shares the same branding as the normal-mode UI. These are
+		// explicit leaf routes (a "GET /" subtree would conflict with the
+		// /setup/* routes in Go's ServeMux).
+		if sub, err := fs.Sub(web.FS, "static"); err == nil {
+			serveBrandingAsset(mux, sub, "/brand.css", "brand.css", "text/css; charset=utf-8")
+			serveBrandingAsset(mux, sub, "/logo-mark.svg", "logo-mark.svg", "image/svg+xml")
+			serveBrandingAsset(mux, sub, "/favicon.svg", "favicon.svg", "image/svg+xml")
+			serveBrandingAsset(mux, sub, "/fonts/nunito-variable.woff2", "fonts/nunito-variable.woff2", "font/woff2")
+		}
 		router.Swap(mux)
 		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", displayHost(*bind), *port, token)
 	}
@@ -133,6 +145,21 @@ func setupToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// serveBrandingAsset registers a single GET route for one embedded branding
+// file (used in setup mode to share the logo/theme/font with the wizard). It
+// uses an explicit leaf path rather than a "GET /" subtree, which would
+// conflict with the /setup/* routes in Go's ServeMux.
+func serveBrandingAsset(mux *http.ServeMux, sub fs.FS, pattern, file, contentType string) {
+	b, err := fs.ReadFile(sub, file)
+	if err != nil {
+		return
+	}
+	mux.HandleFunc("GET "+pattern, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(b)
+	})
 }
 
 // displayHost picks a connectable host for operator-facing URLs. Bound to all

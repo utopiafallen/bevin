@@ -4,30 +4,48 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>alcyona — setup</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/brand.css">
+<script>
+  (function(){try{var t=localStorage.getItem("alcyona-theme");
+    if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+    document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light");}})();
+</script>
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 760px; padding: 2rem 1rem; }
-  h1 { font-size: 1.4rem; }
-  .steps { display: flex; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
-  .step { padding: .2rem .6rem; border: 1px solid #8884; border-radius: 999px; font-size: .8rem; }
-  .step.active { background: #4a7cff; color: #fff; border-color: #4a7cff; }
-  .card { border: 1px solid #8883; border-radius: 8px; padding: 1rem 1.2rem; margin-top: 1rem; }
-  label { display: block; margin: .7rem 0 .2rem; font-weight: 600; font-size: .85rem; }
-  input, select, textarea { width: 100%; box-sizing: border-box; padding: .45rem; border: 1px solid #8885; border-radius: 6px; background: transparent; color: inherit; }
-  .row { display: flex; gap: .6rem; } .row > div { flex: 1; }
-  .model { border: 1px dashed #8884; border-radius: 8px; padding: .6rem .8rem; margin-top: .8rem; }
-  .btns { display: flex; gap: .5rem; margin-top: 1.2rem; flex-wrap: wrap; }
-  button { padding: .5rem .9rem; border: 1px solid #8885; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
-  button.primary { background: #4a7cff; color: #fff; border-color: #4a7cff; }
-  .msg { margin-top: .8rem; font-size: .85rem; } .msg.err { color: #d33; } .msg.ok { color: #2a8; }
-  .small { font-size: .8rem; opacity: .8; }
-  .hidden { display: none; }
-  .kv { font-family: ui-monospace, monospace; font-size: .8rem; opacity: .85; }
+  /* wizard layout, on top of brand.css (Nunito + warm tokens) */
+  body { max-width: 760px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
+  .setup-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; margin: .3rem 0 0; }
+  .steps { display:flex; gap:.4rem; flex-wrap:wrap; margin: 1.1rem 0 .4rem; }
+  .step { padding:.2rem .7rem; border:1px solid var(--border); border-radius:999px; font-size:.8rem; font-weight:700; color:var(--text-muted); background:var(--surface); }
+  .step.done { color:var(--brand-strong); border-color:var(--brand-soft); background:var(--brand-softer); }
+  .step.active { background:var(--brand); color:var(--brand-contrast); border-color:transparent; }
+  .card { margin-top: 1rem; }
+  .model { border:1px dashed var(--border); border-radius:var(--radius); padding:.6rem .85rem; margin-top:.8rem; background:var(--surface-2); }
+  .row { display:flex; gap:.6rem; } .row > div { flex:1; }
+  .btns { display:flex; gap:.5rem; margin-top:1.2rem; flex-wrap:wrap; }
+  .btns button { font:inherit; font-weight:700; cursor:pointer; padding:.55rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); transition:background .15s; }
+  .btns button:hover { background:var(--surface-2); }
+  .btns button.primary { background:var(--brand); color:var(--brand-contrast); border-color:transparent; box-shadow:var(--shadow-sm); }
+  .btns button.primary:hover { background:var(--brand-hover); }
+  .btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
+  .msg { margin-top:.8rem; font-size:.85rem; font-weight:600; }
+  .msg.err { color:var(--danger); } .msg.ok { color:var(--ok); }
+  .small { font-size:.82rem; color:var(--text-muted); }
+  .hidden { display:none; }
+  .kv { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-2); padding:.1em .4em; border-radius:6px; }
+  pre.kv { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:.8rem; overflow:auto; margin:0; }
 </style>
 </head>
 <body>
-<h1>alcyona — first-time setup</h1>
-<p class="small">Data dir: <span class="kv" id="datadir">{{.DataDir}}</span> &middot; the server speaks plain HTTP; put a reverse proxy in front for TLS.</p>
+<button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
+  <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+  <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+</button>
+<div>
+  <a class="brand" href="/setup"><img src="/logo-mark.svg" alt="alcyona logo"> alcyona</a>
+  <div class="setup-title">First-time setup</div>
+</div>
+<p class="small">Data dir: <span class="kv" id="datadir">{{.DataDir}}</span> &middot; plain HTTP — put a reverse proxy in front for TLS.</p>
 <div class="steps" id="steps"></div>
 
 <div class="card">
@@ -37,8 +55,8 @@
 <div class="btns">
   <button id="back">Back</button>
   <button id="next" class="primary">Next</button>
-  <button id="finalize" class="hidden">Finish &amp; start</button>
-  <button id="cancel">Cancel</button>
+  <button id="finalize" class="primary hidden">Finish &amp; start</button>
+  <button id="cancel" class="ghost">Cancel</button>
 </div>
 <div class="msg" id="msg"></div>
 
@@ -187,6 +205,12 @@ document.getElementById("next").onclick=doNext;
 document.getElementById("back").onclick=doBack;
 document.getElementById("cancel").onclick=doCancel;
 document.getElementById("finalize").onclick=doFinalize;
+document.getElementById("themeToggle").addEventListener("click", function(){
+  var root=document.documentElement;
+  var next = root.getAttribute("data-theme")==="dark" ? "light" : "dark";
+  root.setAttribute("data-theme",next);
+  try{localStorage.setItem("alcyona-theme",next);}catch(e){}
+});
 render();
 </script>
 </body>
