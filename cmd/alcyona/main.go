@@ -98,13 +98,7 @@ func main() {
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		})
 		router.Swap(mux)
-		// The bind host (0.0.0.0) listens on all interfaces but is not itself
-		// connectable — show the operator a loopback URL for the local wizard.
-		host := *bind
-		if host == "0.0.0.0" || host == "::" {
-			host = "127.0.0.1"
-		}
-		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", host, *port, token)
+		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", displayHost(*bind), *port, token)
 	}
 
 	addr := net.JoinHostPort(*bind, strconv.Itoa(*port))
@@ -139,6 +133,37 @@ func setupToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// displayHost picks a connectable host for operator-facing URLs. Bound to all
+// interfaces (0.0.0.0 / ::) → the machine's real network IP (what other hosts
+// use to reach this server); a specific bind → that address. Falls back to
+// 127.0.0.1 if no outbound IP is detectable.
+func displayHost(bind string) string {
+	switch bind {
+	case "0.0.0.0", "::", "::0":
+		if ip, err := lanIP(); err == nil && ip != "" {
+			return ip
+		}
+		return "127.0.0.1"
+	default:
+		return bind
+	}
+}
+
+// lanIP returns the machine's outbound IP without sending real traffic — a UDP
+// "dial" only selects the local socket address from the routing table.
+func lanIP() (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return "", errors.New("unexpected local address type")
+	}
+	return addr.IP.String(), nil
 }
 
 // closeOnExit holds teardown funcs for handlers swapped in after startup
