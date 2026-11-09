@@ -98,7 +98,13 @@ func main() {
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		})
 		router.Swap(mux)
-		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", *bind, *port, token)
+		// The bind host (0.0.0.0) listens on all interfaces but is not itself
+		// connectable — show the operator a loopback URL for the local wizard.
+		host := *bind
+		if host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", host, *port, token)
 	}
 
 	addr := net.JoinHostPort(*bind, strconv.Itoa(*port))
