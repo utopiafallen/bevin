@@ -2,42 +2,132 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>alcyona</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
-    input { width: 100%; box-sizing: border-box; padding: .5rem; font-size: 1rem; }
-    .muted { color: #666; }
-  </style>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/brand.css">
+  <script>
+    // Apply the saved theme (or the system preference) before first paint.
+    (function () {
+      try {
+        var t = localStorage.getItem("alcyona-theme");
+        if (t !== "light" && t !== "dark") {
+          t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { document.documentElement.setAttribute("data-theme", "light"); }
+    })();
+  </script>
 </head>
 <body>
-  <h1>alcyona</h1>
-  <p class="muted">Skeleton UI. The real web UI replaces this directory.</p>
-  <p>Health: <span id="health">&#8230;</span></p>
-  <p>User handle: <input id="user" value="me"></p>
-  <form id="chat">
-    <input id="message" placeholder="Say something&#8230;" autocomplete="off">
-  </form>
-  <p id="reply"></p>
+  <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
+    <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="4"></circle>
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+    </svg>
+    <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+    </svg>
+  </button>
+
+  <div class="wrap">
+    <header class="topbar">
+      <a class="brand" href="/"><img src="/logo-mark.svg" alt="alcyona logo"> alcyona</a>
+      <span class="chip"><span class="dot"></span> brand preview</span>
+    </header>
+
+    <section class="card" style="margin-bottom:1rem;">
+      <div class="eyebrow">Personal assistant</div>
+      <h1 style="margin-top:.3rem;">Warm, calm, and yours.</h1>
+      <p class="muted">
+        A soft <strong style="color:var(--brand-strong)">yellow</strong> brand, set in <strong>Nunito</strong> —
+        rounded and friendly. Warm neutrals, a gentle sun over still water, light and dark themes.
+      </p>
+      <div style="display:flex; gap:.6rem; flex-wrap:wrap;">
+        <button class="btn btn-primary">Get started</button>
+        <button class="btn">Learn more</button>
+        <button class="btn btn-ghost">Sign in</button>
+      </div>
+    </section>
+
+    <section class="grid" style="margin-bottom:1rem;">
+      <div class="card">
+        <h3>Color</h3>
+        <div class="swatches">
+          <div class="swatch"><div class="fill" style="background:var(--brand)"></div><div class="meta">brand<br><code>#F2C23C</code></div></div>
+          <div class="swatch"><div class="fill" style="background:var(--brand-soft)"></div><div class="meta">brand soft<br><code>#FBE7A8</code></div></div>
+          <div class="swatch"><div class="fill" style="background:var(--brand-strong)"></div><div class="meta">brand ink<br><code>#A8791C</code></div></div>
+          <div class="swatch"><div class="fill" style="background:var(--accent)"></div><div class="meta">accent<br><code>#D97B4E</code></div></div>
+          <div class="swatch"><div class="fill" style="background:var(--bg); border-bottom:1px solid var(--border)"></div><div class="meta">background<br><code>#FDF8EE</code></div></div>
+          <div class="swatch"><div class="fill" style="background:var(--text)"></div><div class="meta">ink<br><code>#33291C</code></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Typography</h3>
+        <p style="font-weight:800; font-size:1.35rem; margin-bottom:.2rem;">Nunito 800</p>
+        <p style="font-weight:700; margin-bottom:.2rem;">Nunito 700 — headings</p>
+        <p style="font-weight:500; margin-bottom:.2rem;">Nunito 500 — emphasized text.</p>
+        <p class="muted">Nunito 400 — body copy is set on a relaxed 1.6 line height for a calm, readable feel.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>Conversation</h3>
+      <div class="msg msg-assistant">
+        <span class="who">alcyona</span>
+        <span class="bubble">Good morning. What would you like to get done today?</span>
+      </div>
+      <div class="msg msg-user">
+        <span class="who">you</span>
+        <span class="bubble">Help me plan my afternoon.</span>
+      </div>
+      <div class="msg msg-assistant">
+        <span class="who">alcyona</span>
+        <span class="bubble">Of course — a soft yellow, a warm font, and a little calm. Let's start.</span>
+      </div>
+      <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
+        <input id="message" placeholder="Say something&hellip;" autocomplete="off">
+        <button class="btn btn-primary" type="submit">Send</button>
+      </form>
+      <div id="chatLog"></div>
+    </section>
+
+    <p class="muted" style="text-align:center; margin-top:2rem; font-size:.85rem;">
+      alcyona &middot; soft yellow &middot; Nunito &middot; warm neutrals &middot; <span id="health">checking&hellip;</span>
+    </p>
+  </div>
+
   <script>
-    fetch('/health')
-      .then(r => r.json())
-      .then(j => document.getElementById('health').textContent = JSON.stringify(j))
-      .catch(e => document.getElementById('health').textContent = 'error: ' + e);
-    document.getElementById('chat').addEventListener('submit', async (e) => {
+    var root = document.documentElement;
+    var toggle = document.getElementById("themeToggle");
+    toggle.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("alcyona-theme", next); } catch (e) {}
+    });
+
+    fetch("/health").then(function (r) { return r.json(); })
+      .then(function (j) { document.getElementById("health").textContent = "health " + (j.status || "ok"); })
+      .catch(function (e) { document.getElementById("health").textContent = "preview (no server)"; });
+
+    var form = document.getElementById("chat");
+    var log = document.getElementById("chatLog");
+    function add(who, text) {
+      var m = document.createElement("div");
+      m.className = "msg " + (who === "you" ? "msg-user" : "msg-assistant");
+      m.innerHTML = '<span class="who">' + (who === "you" ? "you" : "alcyona") + '</span><span class="bubble"></span>';
+      m.querySelector(".bubble").textContent = text;
+      log.appendChild(m);
+    }
+    form.addEventListener("submit", function (e) {
       e.preventDefault();
-      const user = document.getElementById('user').value;
-      const message = document.getElementById('message').value;
-      const reply = document.getElementById('reply');
-      reply.textContent = '\u2026';
-      try {
-        const r = await fetch('/api/chat', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({user, message}),
-        });
-        const j = await r.json();
-        reply.textContent = r.ok ? j.reply : ('error: ' + j.error);
-      } catch (err) { reply.textContent = 'error: ' + err; }
+      var msg = document.getElementById("message").value.trim();
+      if (!msg) return;
+      add("you", msg);
+      document.getElementById("message").value = "";
+      // Echo back locally for the preview (no model backend wired in the skeleton).
+      setTimeout(function () { add("alcyona", "Heard you: \u201C" + msg + "\u201D \u2014 the agent will answer here once wired."); }, 250);
     });
   </script>
 </body>
