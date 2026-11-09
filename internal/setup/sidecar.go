@@ -65,13 +65,22 @@ func (sm *SidecarManager) Ensure(ctx context.Context, dataDir, kind, endpoint st
 }
 
 // EnsureAll provisions the required sidecars for a config, idempotently, all
-// bound to loopback.
+// bound to loopback. A blank endpoint is auto-provisioned and the resulting
+// (loopback) endpoint is recorded back into cfg so server.toml points at it.
 func (sm *SidecarManager) EnsureAll(ctx context.Context, cfg *config.ServerConfig) error {
-	if _, err := sm.Ensure(ctx, cfg.DataDir, KindQdrant, cfg.Sidecars.Qdrant); err != nil {
+	ep, err := sm.Ensure(ctx, cfg.DataDir, KindQdrant, cfg.Sidecars.Qdrant)
+	if err != nil {
 		return fmt.Errorf("qdrant: %w", err)
 	}
-	if _, err := sm.Ensure(ctx, cfg.DataDir, KindLlamaServer, cfg.Sidecars.LlamaServer); err != nil {
+	if strings.TrimSpace(cfg.Sidecars.Qdrant) == "" {
+		cfg.Sidecars.Qdrant = ep
+	}
+	ep, err = sm.Ensure(ctx, cfg.DataDir, KindLlamaServer, cfg.Sidecars.LlamaServer)
+	if err != nil {
 		return fmt.Errorf("llama-server: %w", err)
+	}
+	if strings.TrimSpace(cfg.Sidecars.LlamaServer) == "" {
+		cfg.Sidecars.LlamaServer = ep
 	}
 	if _, err := sm.Ensure(ctx, cfg.DataDir, KindFFmpeg, ""); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)

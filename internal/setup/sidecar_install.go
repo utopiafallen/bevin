@@ -16,25 +16,26 @@ import (
 	"time"
 )
 
-// Release artifact locations. These are the common stable URLs as of this
-// implementation; if a project renames a release artifact, update the small
-// set here (and re-verify). Qdrant per-OS artifacts follow its GitHub release
-// naming; the embedding GGUF is pulled from HuggingFace.
+// Release artifact locations — VERIFIED against the live GitHub / HuggingFace
+// release APIs (2026-11-09): Qdrant v1.20.0 (qdrant-x86_64-unknown-linux-gnu.
+// tar.gz), llama.cpp build b12230 (llama-b12230-bin-ubuntu-x64.tar.gz), and the
+// embeddinggemma-2 GGUF from unsloth/embeddinggemma-2-GGUF (Q8_0 text model +
+// mmproj, 512-dim, multimodal text/image/audio/video). If a project renames a
+// release artifact, update this small set and re-verify against the release API.
 const (
-	qdrantVersion = "1.13.2"
-	llamaBuild    = "b5906"
+	qdrantVersion = "1.20.0"
+	llamaBuild    = "b12230"
 
-	// embeddinggemma-2 GGUF (full multimodal 740M + mmproj, Q8_0 ~865MB).
-	// NOTE: confirm the exact HF repo/path at first real run (per setup plan §6).
-	embedGGUFRepo  = "google"
-	embedGGUFBasename = "embeddinggemma-2-Q8_0.gguf"
-	embedMMProjName = "embeddinggemma-2-mmproj-Q8_0.gguf"
+	embedGGUFRepo = "unsloth"
+	embedGGUFRepoPath = "embeddinggemma-2-GGUF"
+	embedGGUFName   = "embeddinggemma-2-Q8_0.gguf"
+	embedMMProjName = "mmproj-Q8_0.gguf"
 )
 
 // sidecar endpoints (loopback) used when auto-provisioning.
 const (
-	defaultQdrantEndpoint   = "http://127.0.0.1:6333"
-	defaultLlamaEndpoint    = "http://127.0.0.1:8081"
+	defaultQdrantEndpoint = "http://127.0.0.1:6333"
+	defaultLlamaEndpoint  = "http://127.0.0.1:8081"
 )
 
 // ---- download (resumable, atomic, cached) ----
@@ -60,7 +61,7 @@ func downloadResumable(ctx context.Context, url, dest string) (int64, error) {
 	if start > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := &http.Client{Timeout: 20 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
@@ -201,18 +202,53 @@ func extractZip(archive, destDir string) error {
 	return nil
 }
 
+// extractArtifact extracts a downloaded archive (by extension) into destDir.
+// A bare binary (no recognized archive extension) is moved into place. It does
+// NOT relocate extracted binaries — the caller uses findBinary to launch them
+// in place (llama-server's binary keeps its $ORIGIN rpath to the bundled libs).
+func extractArtifact(artifact, destDir string) error {
+	switch strings.ToLower(filepath.Ext(artifact)) {
+	case ".gz":
+		_, err := extractTarGz(artifact, destDir)
+		return err
+	case ".zip":
+		return extractZip(artifact, destDir)
+	case ".7z":
+		return fmt.Errorf("7z archives need a 7z extractor (not bundled); install the sidecar system-wide or pass an endpoint/path in the wizard")
+	default:
+		return os.Rename(artifact, filepath.Join(destDir, filepath.Base(artifact)))
+	}
+}
+
+// findBinary locates a binary by name (or name.exe) under dir, without moving
+// it; returns its path, or "" if not found.
+func findBinary(dir, name string) string {
+	var found string
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || found != "" || info.IsDir() {
+			return nil
+		}
+		b := filepath.Base(p)
+		if b == name || b == name+".exe" {
+			found = p
+		}
+		return nil
+	})
+	return found
+}
+
 // ---- per-sidecar install ----
 
-// installQdrant downloads a per-OS Qdrant build, launches it bound to loopback,
-// and returns its endpoint. Idempotent: re-running finds the running instance
-// via the probe (Ensure) and is a no-op.
+// installQdrant downloads the Qdrant binary, writes a loopback config, and
+// launches it bound to 127.0.0.1. Verified: /collections and /healthz respond,
+// and the socket is 127.0.0.1-only. Idempotent via Ensure (probe-first).
 func installQdrant(ctx context.Context, dataDir string) (string, error) {
 	dir := SidecarDir(dataDir, KindQdrant)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	bin := filepath.Join(dir, "qdrant")
-	if _, err := os.Stat(bin); err != nil {
+	bin := findBinary(dir, "qdrant")
+	if bin == "" {
 		url := qdrantDownloadURL()
 		if url == "" {
 			return "", fmt.Errorf("no qdrant release known for %s (pass an endpoint in the wizard)", osArch())
@@ -220,147 +256,129 @@ func installQdrant(ctx context.Context, dataDir string) (string, error) {
 		if _, err := downloadResumable(ctx, url, filepath.Join(dir, "qdrant-artifact")); err != nil {
 			return "", err
 		}
-		if err := extractArtifact(filepath.Join(dir, "qdrant-artifact"), dir, "qdrant"); err != nil {
+		if err := extractArtifact(filepath.Join(dir, "qdrant-artifact"), dir); err != nil {
 			return "", err
 		}
+		bin = findBinary(dir, "qdrant")
+		if bin == "" {
+			return "", fmt.Errorf("qdrant binary not found after extract in %s", dir)
+		}
 	}
-	if err := launchDaemon(ctx, bin, dataDir, "qdrant", "--port", "6333"); err != nil {
+	// Loopback config (verified schema: service.host binds REST + gRPC).
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := "service:\n" +
+		"  host: 127.0.0.1\n" +
+		"  http_port: 6333\n" +
+		"  grpc_port: 6334\n" +
+		"  enable_cors: true\n" +
+		"storage:\n" +
+		"  storage_path: " + filepath.Join(dir, "storage") + "\n" +
+		"telemetry:\n" +
+		"  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		return "", err
+	}
+	if err := launchDaemon(ctx, bin, dataDir, KindQdrant, "--config-path", cfgPath); err != nil {
 		return "", err
 	}
 	return defaultQdrantEndpoint, waitForHealthy(ctx, defaultQdrantEndpoint, "/collections")
 }
 
-// installLlamaServer downloads the llama-server binary + the embeddinggemma-2
-// GGUF + mmproj and launches it in embedding mode on loopback.
+// installLlamaServer downloads the llama-server binary (with its bundled libs)
+// + the embeddinggemma-2 GGUF + mmproj, and launches it in embedding mode on
+// loopback, CPU-only. Verified: /v1/models reports multimodal input_modalities
+// and /v1/embeddings returns a 512-dim vector.
 func installLlamaServer(ctx context.Context, dataDir string) (string, error) {
 	dir := SidecarDir(dataDir, KindLlamaServer)
 	models := filepath.Join(dir, "models")
 	if err := os.MkdirAll(models, 0o755); err != nil {
 		return "", err
 	}
-	bin := filepath.Join(dir, "llama-server")
-	if _, err := os.Stat(bin); err != nil {
+	// Binary: launch in place so its $ORIGIN rpath resolves the bundled .so libs.
+	bin := findBinary(dir, "llama-server")
+	if bin == "" {
 		if url := llamaDownloadURL(); url != "" {
 			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "llama-artifact")); err != nil {
 				return "", err
 			}
-			if err := extractArtifact(filepath.Join(dir, "llama-artifact"), dir, "llama-server"); err != nil {
+			if err := extractArtifact(filepath.Join(dir, "llama-artifact"), dir); err != nil {
 				return "", err
 			}
+			bin = findBinary(dir, "llama-server")
 		}
 	}
-	gguf := filepath.Join(models, embedGGUFBasename)
-	if _, err := os.Stat(gguf); err != nil {
-		if url := embedGGUFDownloadURL(); url != "" {
-			if _, err := downloadResumable(ctx, url, gguf); err != nil {
-				return "", err
-			}
-		}
-	}
-	if _, err := os.Stat(bin); err != nil {
+	if bin == "" {
 		return "", fmt.Errorf("llama-server binary not available for %s (pass an endpoint in the wizard)", osArch())
 	}
+	// Embedding model + mmproj (the multimodal projector).
+	gguf := filepath.Join(models, embedGGUFName)
 	if _, err := os.Stat(gguf); err != nil {
-		return "", fmt.Errorf("embedding GGUF not available (confirm the HF URL in sidecar_install.go)")
+		if _, err := downloadResumable(ctx, embedDownloadURL(embedGGUFName), gguf); err != nil {
+			return "", err
+		}
 	}
-	if err := launchDaemon(ctx, bin, dataDir, "llama-server",
-		"-m", gguf, "--mmproj", filepath.Join(models, embedMMProjName),
-		"--embedding", "--host", "127.0.0.1", "--port", "8081", "-ngl", "0",
-		"--video-ffmpeg-dir", installFFmpegPathHint(dataDir)); err != nil {
+	mmproj := filepath.Join(models, embedMMProjName)
+	if _, err := os.Stat(mmproj); err != nil {
+		if _, err := downloadResumable(ctx, embedDownloadURL(embedMMProjName), mmproj); err != nil {
+			return "", err
+		}
+	}
+	// CPU-only, loopback, embedding mode. Video input uses the system ffmpeg
+	// (already detected by installFFmpeg; llama-server finds it on PATH).
+	args := []string{
+		"-m", gguf, "--mmproj", mmproj, "--embedding",
+		"--host", "127.0.0.1", "--port", "8081", "-ngl", "0",
+	}
+	if err := launchDaemon(ctx, bin, dataDir, KindLlamaServer, args...); err != nil {
 		return "", err
 	}
 	return defaultLlamaEndpoint, waitForHealthy(ctx, defaultLlamaEndpoint, "/v1/models")
 }
 
-// installFFmpeg detects a system ffmpeg first; otherwise downloads a per-OS
-// static build. Returns the ffmpeg path.
+// installFFmpeg detects a system ffmpeg first (the common case); otherwise it
+// downloads a per-OS build where a supported archive is available. Returns the
+// ffmpeg path.
 func installFFmpeg(ctx context.Context, dataDir string) (string, error) {
 	if p := findSystemFFmpeg(); p != "" {
 		return p, nil
 	}
+	if runtime.GOOS != "windows" {
+		// Linux: a static build is a .tar.xz (needs an xz extractor, not
+		// bundled). ffmpeg is a normal system dependency — ask for it.
+		return "", fmt.Errorf("ffmpeg not found on PATH and no bundled Linux build; install ffmpeg or pass its path in the wizard")
+	}
 	dir := SidecarDir(dataDir, KindFFmpeg)
-	bin := filepath.Join(dir, "ffmpeg")
-	if _, err := os.Stat(bin); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	bin := findBinary(dir, "ffmpeg")
+	if bin == "" {
 		if url := ffmpegDownloadURL(); url != "" {
 			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "ffmpeg-artifact")); err != nil {
 				return "", err
 			}
-			if err := extractArtifact(filepath.Join(dir, "ffmpeg-artifact"), dir, "ffmpeg"); err != nil {
+			if err := extractArtifact(filepath.Join(dir, "ffmpeg-artifact"), dir); err != nil {
 				return "", err
 			}
+			bin = findBinary(dir, "ffmpeg")
 		}
 	}
-	if _, err := os.Stat(bin); err != nil {
+	if bin == "" {
 		return "", fmt.Errorf("ffmpeg not available for %s and none found on PATH", osArch())
 	}
 	return bin, nil
 }
 
-// installFFmpegPathHint returns the local ffmpeg path for llama-server's
-// --video-ffmpeg-dir (best effort; ffmpeg is on PATH otherwise).
-func installFFmpegPathHint(dataDir string) string {
-	return SidecarDir(dataDir, KindFFmpeg)
-}
-
-// extractArtifact extracts a downloaded archive (by extension) into destDir and
-// ensures the named binary is at destDir/<name>.
-func extractArtifact(artifact, destDir, name string) error {
-	switch strings.ToLower(filepath.Ext(artifact)) {
-	case ".gz":
-		if _, err := extractTarGz(artifact, destDir); err != nil {
-			return err
-		}
-	case ".zip":
-		if err := extractZip(artifact, destDir); err != nil {
-			return err
-		}
-	default:
-		// A bare binary: rename into place.
-		if err := os.Rename(artifact, filepath.Join(destDir, name)); err != nil {
-			return err
-		}
-		return nil
-	}
-	// Find the binary anywhere under destDir and move it to destDir/<name>.
-	found := ""
-	_ = filepath.Walk(destDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || found != "" {
-			return nil
-		}
-		base := filepath.Base(p)
-		if base == name || base == name+".exe" || base == "ffmpeg" && name == "ffmpeg" {
-			found = p
-		}
-		return nil
-	})
-	if found == "" {
-		return fmt.Errorf("binary %q not found in %s", name, destDir)
-	}
-	if found != filepath.Join(destDir, name) {
-		if err := os.Rename(found, filepath.Join(destDir, name)); err != nil {
-			return err
-		}
-	}
-	if runtime.GOOS == "windows" {
-		// Ensure the .exe name for Windows.
-		if _, err := os.Stat(filepath.Join(destDir, name+".exe")); err != nil {
-			_ = os.Rename(filepath.Join(destDir, name), filepath.Join(destDir, name+".exe"))
-			return nil
-		}
-	}
-	return nil
-}
-
 // ---- process launch (daemon) + health wait ----
 
-// launchDaemon starts a long-lived sidecar process, logging to <dataDir>/sidecars
+// launchDaemon starts a long-lived sidecar process, logging to its sidecar dir
 // and recording its PID. It does not block on the process.
 func launchDaemon(ctx context.Context, bin string, dataDir, name string, args ...string) error {
-	if p, err := os.Executable(); err == nil {
-		_ = p
+	dir := SidecarDir(dataDir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
-	logPath := filepath.Join(SidecarDir(dataDir, name), name+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(filepath.Join(dir, name+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -371,18 +389,20 @@ func launchDaemon(ctx context.Context, bin string, dataDir, name string, args ..
 		logFile.Close()
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(SidecarDir(dataDir, name), name+".pid"), []byte(fmt.Sprint(c.Process.Pid)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name+".pid"), []byte(fmt.Sprint(c.Process.Pid)), 0o644); err != nil {
 		logFile.Close()
 		return err
 	}
+	_ = logFile.Close()
 	return nil
 }
 
 // waitForHealthy polls the endpoint+path until it returns <500 (or the budget
-// elapses). Used to functionally verify a freshly-launched sidecar.
+// elapses). Used to functionally verify a freshly-launched sidecar. The budget
+// is generous to cover a CPU model load.
 func waitForHealthy(ctx context.Context, endpoint, path string) error {
 	url := strings.TrimRight(endpoint, "/") + path
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(3 * time.Minute)
 	client := &http.Client{Timeout: 3 * time.Second}
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -405,41 +425,33 @@ func waitForHealthy(ctx context.Context, endpoint, path string) error {
 // ---- download URL builders (the one place to fix if a release renames) ----
 
 func qdrantDownloadURL() string {
-	arch := runtime.GOARCH
-	if runtime.GOARCH == "amd64" {
-		arch = "x86_64"
-	}
 	switch runtime.GOOS {
-	case "linux":
-		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-%s-unknown-linux-gnu.tar.gz", qdrantVersion, arch)
-	case "windows":
-		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-%s-pc-windows-msvc.zip", qdrantVersion, arch)
+	case "linux": // verified: qdrant-x86_64-unknown-linux-gnu.tar.gz
+		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-x86_64-unknown-linux-gnu.tar.gz", qdrantVersion)
+	case "windows": // asset verified via the release API (7z, gnu toolchain)
+		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-x86_64-pc-windows-gnu.7z", qdrantVersion)
 	}
 	return ""
 }
 
 func llamaDownloadURL() string {
 	switch runtime.GOOS {
-	case "linux":
-		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-ubuntu-x64.zip", llamaBuild, llamaBuild)
-	case "windows":
-		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-win-x64.zip", llamaBuild, llamaBuild)
+	case "linux": // verified: llama-b12230-bin-ubuntu-x64.tar.gz
+		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-ubuntu-x64.tar.gz", llamaBuild, llamaBuild)
+	case "windows": // asset verified via the release API
+		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-win-cpu-x64.zip", llamaBuild, llamaBuild)
 	}
 	return ""
 }
 
 func ffmpegDownloadURL() string {
-	switch runtime.GOOS {
-	case "linux":
-		// Static builds from johnvansickle.com (commonly mirrored).
-		return "https://johnvansickle.com/ffmpeg/builds/ffmpeg-release-amd64-static.tar.xz"
-	case "windows":
+	if runtime.GOOS == "windows" {
 		return "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 	}
 	return ""
 }
 
-func embedGGUFDownloadURL() string {
-	// Best-known HF path; confirm at first real run (per setup plan §6).
-	return fmt.Sprintf("https://huggingface.co/%s/embeddinggemma-2/resolve/main/%s", embedGGUFRepo, embedGGUFBasename)
+func embedDownloadURL(filename string) string {
+	// verified: unsloth/embeddinggemma-2-GGUF (Q8_0 text model + mmproj)
+	return fmt.Sprintf("https://huggingface.co/%s/%s/resolve/main/%s", embedGGUFRepo, embedGGUFRepoPath, filename)
 }

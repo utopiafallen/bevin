@@ -154,11 +154,10 @@ func (m *Manager) SetEmbedder(e config.Embedder) error {
 	return nil
 }
 
-// SetSidecars stores the sidecar endpoints step.
+// SetSidecars stores the sidecar endpoints step. A blank endpoint means
+// "auto-provision" — the SidecarManager downloads + launches it on loopback and
+// records the resulting endpoint into the config at Finalize.
 func (m *Manager) SetSidecars(sc config.Sidecars) error {
-	if strings.TrimSpace(sc.Qdrant) == "" {
-		return errors.New("qdrant endpoint is required")
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.Answers.Sidecars = sc
@@ -185,9 +184,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	if strings.TrimSpace(a.Embedder.BaseURL) == "" {
 		return nil, errors.New("embedder base_url is required")
 	}
-	if strings.TrimSpace(a.Sidecars.Qdrant) == "" {
-		return nil, errors.New("qdrant endpoint is required")
-	}
+	// Sidecar endpoints may be blank → auto-provisioned in EnsureAll below.
 
 	secret, err := config.GenerateSessionSecret()
 	if err != nil {

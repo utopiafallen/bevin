@@ -4,3 +4,11 @@ bin/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# sidecar / runtime artifacts (never in the repo)
+storage/
+sidecars/
+snapshots/
+.qdrant-initialized
+*.log
+*.part
