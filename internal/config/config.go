@@ -24,6 +24,11 @@ const (
 	AgentFileName  = "agent.toml"
 )
 
+// ConfigVersion is the schema version of server.toml. Bump it when a release
+// changes the schema and add a matching step in migrate() so older configs are
+// upgraded in place on load; Load refuses a config newer than this build.
+const ConfigVersion = 1
+
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
 
@@ -32,7 +37,8 @@ const DefaultMaxWorkspaceSize = int64(5 * 1024 * 1024 * 1024)
 
 // ServerConfig is the admin-tier configuration (server.toml).
 type ServerConfig struct {
-	DataDir          string     `toml:"data_dir"`
+	Version int `toml:"version"`
+	DataDir string     `toml:"data_dir"`
 	Bind             string     `toml:"bind"`
 	Logging          Logging    `toml:"logging"`
 	Auth             Auth       `toml:"auth"`
@@ -124,7 +130,10 @@ func Exists(dir string) bool {
 	return err == nil
 }
 
-// Load reads and validates server.toml from the data dir.
+// Load reads and validates server.toml from the data dir. A config whose
+// version is newer than this build is refused; an older config is migrated in
+// place to the current schema (the migrated version is persisted the next time
+// the config is saved).
 func Load(dir string) (*ServerConfig, error) {
 	dir = filepath.Clean(dir)
 	b, err := os.ReadFile(Path(dir))
@@ -135,6 +144,12 @@ func Load(dir string) (*ServerConfig, error) {
 	if err := toml.Unmarshal(b, &cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ServerFileName, err)
 	}
+	if cfg.Version > ConfigVersion {
+		return nil, fmt.Errorf("server.toml version %d is newer than this alcyona build (v%d) — upgrade alcyona", cfg.Version, ConfigVersion)
+	}
+	if err := migrate(&cfg); err != nil {
+		return nil, err
+	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = dir
 	}
@@ -142,6 +157,25 @@ func Load(dir string) (*ServerConfig, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// migrate upgrades a parsed config from its stored version up to ConfigVersion.
+// Each release that changes the schema adds one numbered step; the loop applies
+// them in order so a config several versions old is walked forward one step at
+// a time.
+func migrate(c *ServerConfig) error {
+	for c.Version < ConfigVersion {
+		switch c.Version {
+		case 0:
+			// v0 -> v1: the schema gained the "version" field. v0 configs were
+			// already structurally valid v1, so no field transform is needed —
+			// just stamp the version. Future schema changes add cases here.
+			c.Version = 1
+		default:
+			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
+		}
+	}
+	return nil
 }
 
 // Save writes server.toml atomically with 0600 permissions (it holds secrets).
@@ -153,6 +187,7 @@ func Save(dir string, cfg *ServerConfig) error {
 	if cfg.DataDir == "" {
 		cfg.DataDir = dir
 	}
+	cfg.Version = ConfigVersion
 	b, err := toml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -248,4 +283,38 @@ func GenerateSessionSecret() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ResolveDisplayName maps a (possibly overloaded) display name to the concrete
+// Model a conversation should use. Several configured models may share one
+// display name (many-to-one); among the ENABLED models with that display name,
+// it returns the one with the most idle execution capacity.
+//
+// idleSlots reports a model's currently idle slots (from the per-model slot
+// scheduler); pass nil before that exists to fall back to total slot capacity,
+// then catalog order (ties keep the earlier model). The conversation stores the
+// returned Model and keeps it fixed for the rest of the conversation, re-running
+// resolution only when the user picks a different model, at which point the new
+// choice is what gets resolved.
+func ResolveDisplayName(models []Model, displayName string, idleSlots func(Model) int) (Model, bool) {
+	var candidates []Model
+	for _, m := range models {
+		if m.Enabled && m.DisplayName == displayName {
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) == 0 {
+		return Model{}, false
+	}
+	best, bestScore := candidates[0], -1
+	for i, m := range candidates {
+		score := m.Slots
+		if idleSlots != nil {
+			score = idleSlots(m)
+		}
+		if i == 0 || score > bestScore {
+			best, bestScore = m, score
+		}
+	}
+	return best, true
 }

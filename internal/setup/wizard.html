@@ -44,7 +44,7 @@
   .score-row { display:flex; align-items:center; gap:.55rem; }
   .score-row .score { flex:1; }
   .score-val { font-family:var(--font-mono); font-size:.78rem; font-weight:700; min-width:1.6em; text-align:center; color:var(--text-muted); }
-  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; background:var(--surface); border:1px solid var(--border); outline:none; cursor:pointer; }
+  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; border:1px solid var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
   input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   input.score::-moz-range-thumb { width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   /* enabled toggle — a switch */
@@ -55,6 +55,26 @@
   .toggle input:checked + .track { background:var(--ok); border-color:var(--ok); }
   .toggle input:checked + .track .thumb { transform:translateX(18px); background:#fff; }
   .toggle .lbl { font-size:.85rem; font-weight:600; }
+  /* add/edit model form — split into two labelled halves */
+  .config-half { border:1px solid var(--border); border-radius:var(--radius); padding:.8rem 1rem; margin-top:.8rem; background:var(--surface); }
+  .config-half > h4 { margin:0 0 .7rem; font-size:.8rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
+  .form-btns { display:flex; justify-content:center; gap:.6rem; margin-top:.85rem; }
+  .form-btns button { font:inherit; font-weight:700; cursor:pointer; padding:.5rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); }
+  .form-btns button.primary { background:var(--brand); color:var(--brand-contrast); border-color:transparent; box-shadow:var(--shadow-sm); }
+  .form-btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
+  .form-err { margin-top:.55rem; font-size:.82rem; font-weight:600; color:var(--danger); }
+  .field-help { font-size:.78rem; color:var(--text-muted); margin:.15rem 0 .1rem; }
+  input.ctx-disabled { opacity:.65; cursor:not-allowed; }
+  /* model list table */
+  .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
+  .model-table th, .model-table td { text-align:left; padding:.42rem .5rem; border-bottom:1px solid var(--border); }
+  .model-table th { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
+  .model-table .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
+  .model-table .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
+  .model-table .reorder button:disabled { opacity:.35; cursor:default; }
+  .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
+  .model-table .row-btn:hover { background:var(--surface-2); }
+  .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
 </style>
 </head>
 <body>
@@ -85,7 +105,7 @@
 const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
 let idx = 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -109,44 +129,85 @@ function renderAdmin(){ const a=S.admin; return el("div",{},
     pwfield("Password", "ad_pw", a.password, "min 8 chars"),
     pwfield("Confirm", "ad_pw2", a.password, ""))
 );}
-function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add the chat models users can switch between in the UI. Add at least one."));
-  S.models.forEach((m,i)=>{
-    const base=inp("m_base_"+i, m.base_url, "https://api.openai.com/v1");
-    const key=inp("m_key_"+i, m.api_key, "blank for a local llama-server");
-    const provLabel = m.provider ? el("span",{class:"kv"}, m.provider) : el("span",{class:"small"},"— press Detect —");
-    const sel=el("select",{id:"m_sel_"+i});
-    (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID + (mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
-    sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext) m.max_context=String(mm.MaxContext); render(); });
-    const ctx=inp("m_ctx_"+i, m.max_context??"", "blank = auto");
-    const disp=inp("m_disp_"+i, m.display_name, "");
-    m.metadata=m.metadata||{};
-    const rS=scoreSlider("Reasoning (1-10)","m_r_"+i, m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; });
-    const kS=scoreSlider("Knowledge (1-10)","m_k_"+i, m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; });
-    const sS=scoreSlider("Speed (1-10)","m_s_"+i, m.metadata.speed||5, (v)=>{ m.metadata.speed=v; });
-    const en=el("label",{class:"toggle"});
-    const enCb=el("input",{type:"checkbox"});
-    enCb.checked=!!m.enabled;
-    enCb.addEventListener("change",()=>{ m.enabled=enCb.checked; });
-    en.append(enCb, el("span",{class:"track"},el("span",{class:"thumb"})), el("span",{class:"lbl"},"Enabled"));
-    base.addEventListener("input",()=>m.base_url=base.value);
-    key.addEventListener("input",()=>m.api_key=key.value);
-    ctx.addEventListener("input",()=>m.max_context=ctx.value);
-    disp.addEventListener("input",()=>m.display_name=disp.value);
-    const card=el("div",{class:"model"},
-      el("p",{class:"small"},"Enter the API base URL (and key if it needs one), then press Detect — the server identifies the provider and lists the models with their context lengths."),
-      el("div",{class:"row"}, field("Base URL",base), field("API key",key)),
-      el("div",{class:"row"}, field("Provider",provLabel), field("Model",sel)),
-      el("div",{class:"row"}, field("Max context",ctx), field("Display name",disp)),
-      el("p",{class:"small"},"How the agent should weigh this model — soft hints, not hard limits."),
-      rS, kS, sS,
-      el("div",{class:"row"}, el("div",{},en), el("div",{class:"btns"},
-        el("button",{class:"primary", onclick:`detectModel(${i})`},"Detect"),
-        el("button",{class:"ghost", onclick:`removeModel(${i})`},"Remove"))));
-    card.id="model_"+i;
-    d.append(card);
-  });
-  d.append(el("div",{class:"btns"},el("button",{onclick:"addModel()"},"+ Add model")));
+function renderModels(){
+  const d=el("div",{},
+    el("h3",{}, "3. Main models"),
+    el("p",{class:"small"},"Configure the chat models users can switch between. Fill the form, press Detect to identify the provider and list its models, then Add it. The list order below is the order users see when choosing a model."));
+  d.append(renderModelForm());
+  d.append(renderModelList());
   return d;
+}
+function renderModelForm(){
+  const m=S.modelDraft, editing=S.editingIndex!==-1;
+  const f=el("div",{});
+  // half A: provider configuration
+  const halfA=el("div",{class:"config-half"}, el("h4",{}, "Provider configuration"));
+  const base=inp("mf_base", m.base_url, "https://api.openai.com");
+  const key=inp("mf_key", m.api_key, "blank for a local llama-server");
+  const provLabel=m.provider?el("span",{class:"kv"},m.provider):el("span",{class:"small"},"— press Detect —");
+  const sel=el("select",{id:"mf_sel"});
+  (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
+  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
+  const ctx=el("input",{id:"mf_ctx", value:m.max_context||"", class:m.context_auto?"ctx-disabled":null});
+  if(m.context_auto) ctx.setAttribute("disabled","");
+  ctx.addEventListener("input",()=>{ m.max_context=ctx.value; m.context_auto=false; S.formError=null; });
+  halfA.append(
+    el("div",{class:"row"}, field("Base URL",base), field("API key",key)),
+    el("div",{class:"row"}, field("Provider",provLabel), field("Model",sel)),
+    field("Max context", ctx),
+    el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."));
+  // centered Cancel/Clear + Detect buttons
+  halfA.append(el("div",{class:"form-btns"},
+    el("button",{class:"ghost", onclick:"cancelEdit()"}, editing?"Cancel":"Clear"),
+    el("button",{class:"primary", onclick:"detectModel()"},"Detect")));
+  if(S.formError) halfA.append(el("p",{class:"form-err"}, S.formError));
+  f.append(halfA);
+  // half B: in-agent UI configuration (what users see)
+  const halfB=el("div",{class:"config-half"}, el("h4",{}, "In-agent UI (what users see)"));
+  const disp=inp("mf_disp", m.display_name, "");
+  const en=el("label",{class:"toggle"});
+  const enCb=el("input",{type:"checkbox"});
+  enCb.checked=!!m.enabled;
+  enCb.addEventListener("change",()=>{ m.enabled=enCb.checked; S.formError=null; });
+  en.append(enCb, el("span",{class:"track"},el("span",{class:"thumb"})));
+  halfB.append(
+    el("div",{class:"row"}, field("Display name",disp), field("Enable for users",en)),
+    el("p",{class:"field-help"},"Shown to users to help them pick a model for a conversation — informational only; it does not change how the agent runs."),
+    scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }),
+    scoreSlider("Knowledge (1-10)","mf_k", m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; }),
+    scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }));
+  f.append(halfB);
+  // the save button
+  f.append(el("div",{class:"btns"}, el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
+  // wire the inputs
+  base.addEventListener("input",()=>{ m.base_url=base.value; S.formError=null; });
+  key.addEventListener("input",()=>{ m.api_key=key.value; S.formError=null; });
+  disp.addEventListener("input",()=>{ m.display_name=disp.value; S.formError=null; });
+  return f;
+}
+function renderModelList(){
+  const w=el("div",{});
+  if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
+  const t=el("table",{class:"model-table"});
+  t.append(el("thead",{}, el("tr",{},
+    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
+  const tb=el("tbody",{});
+  S.models.forEach((m,i)=>{
+    const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
+    const dn=el("button",{title:"Move down", onclick:`reorderModel(${i},1)`}, "\u25bc"); if(i===S.models.length-1) dn.setAttribute("disabled","");
+    tb.append(el("tr",{},
+      el("td",{}, el("div",{class:"reorder"}, up, dn)),
+      el("td",{}, m.display_name||"(unnamed)"),
+      el("td",{}, m.provider||"—"),
+      el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
+      el("td",{}, m.max_context?m.max_context:"auto"),
+      el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
+      el("td",{}, m.enabled?"yes":"no"),
+      el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
+  });
+  t.append(tb);
+  w.append(t);
+  return w;
 }
 function renderAux(){ const d=el("div",{},el("h3",{}, "4. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models. Hidden from users. Leave empty to skip."));
   S.aux.forEach((m,i)=>{
@@ -182,15 +243,56 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
 }
 const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, embedder:renderEmbedder, sidecars:renderSidecars, review:renderReview };
 
-// ---- model list helpers ----
-function addModel(){ S.models.push({provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}); render(); }
-function removeModel(i){ S.models.splice(i,1); render(); }
+// ---- model form helpers ----
+function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}; }
+function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
+function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
+function suggestedFix(err){
+  const e=String(err).toLowerCase();
+  if(e.includes("401")||e.includes("403")||e.includes("unauthorized")||e.includes("forbidden")) return "check the API key.";
+  if(e.includes("404")) return "check the base URL (the /models path was not found there).";
+  if(e.includes("timeout")||e.includes("deadline")||e.includes("refused")||e.includes("connection")||e.includes("no such host")) return "check the base URL is reachable from this machine (correct host, port, and network).";
+  if(e.includes("no models")) return "the endpoint is reachable but listed no models — check the base URL.";
+  if(e.includes("could not parse")) return "the endpoint did not return a recognized /models list — check the base URL.";
+  return "check the base URL (and API key if the provider needs one).";
+}
+function saveModel(){
+  const m=S.modelDraft;
+  if(!m.base_url){ S.formError="Base URL is required."; render(); return; }
+  if(!m.model_id){ S.formError="Pick a model — press Detect to list the provider's models."; render(); return; }
+  if(!m.display_name){ S.formError="Display name is required (what users will see)."; render(); return; }
+  if(!m.max_context){ S.formError="Max context is required — the provider did not expose it, so enter it manually."; render(); return; }
+  const wasEditing=S.editingIndex!==-1;
+  const toSave=deepCopy(m); delete toSave._models;
+  if(!wasEditing){ S.models.push(toSave); } else { const idx=Math.min(S.editingIndex,S.models.length); S.models.splice(idx,0,toSave); }
+  resetDraft(); render(); msg(wasEditing?"Model saved.":"Model added.","ok");
+}
+function editModel(i){
+  S.editOriginal=deepCopy(S.models[i]);
+  S.modelDraft=deepCopy(S.models[i]);
+  S.editingIndex=i; S.models.splice(i,1); S.formError=null;
+  render();
+  const b=document.getElementById("mf_base"); if(b) b.scrollIntoView({behavior:"smooth",block:"center"});
+}
+function cancelEdit(){
+  if(S.editingIndex!==-1 && S.editOriginal){
+    const idx=Math.min(S.editingIndex,S.models.length);
+    S.models.splice(idx,0,S.editOriginal);
+  }
+  resetDraft(); render();
+}
+function reorderModel(i,dir){
+  const j=i+dir;
+  if(j<0||j>=S.models.length) return;
+  [S.models[i],S.models[j]]=[S.models[j],S.models[i]];
+  render();
+}
 // score slider — a progress bar whose fill goes red (1) → yellow (5) → green (10)
 function scoreColor(v){ const hue = v<=5 ? (v-1)/4*60 : 60+(v-5)/5*60; return "hsl("+hue+",70%,45%)"; }
-function scoreFill(input){ const v=parseInt(input.value,10)||1; const pct=(v-1)/9*100; input.style.background="linear-gradient(to right,"+scoreColor(v)+" "+pct+"%, var(--surface) "+pct+"%)"; }
+function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setProperty("--val",(v-1)/9); input.style.setProperty("--score-color",scoreColor(v)); }
 function scoreSlider(label, id, val, onChange){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
 // detect — call the probe endpoint, learn the provider, list the models + context lengths
-async function detectModel(i){ const m=S.models[i]; if(!m.base_url){ msg("Enter the API base URL first.","err"); return; } msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext) m.max_context=String(r.models[0].MaxContext); } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ msg("Detect failed: "+e.message,"err"); } }
+async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext){ m.max_context=String(r.models[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
 function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
 function removeAux(i){ S.aux.splice(i,1); render(); }
 async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }

@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -164,5 +166,80 @@ func TestAgentRoundTrip(t *testing.T) {
 	}
 	if b.DefaultModelID != "m1" {
 		t.Fatalf("round-trip default model = %q", b.DefaultModelID)
+	}
+}
+
+func TestConfigVersioning(t *testing.T) {
+	dir := t.TempDir()
+	// A v0 config (no "version" field) is migrated forward to the current
+	// version on load.
+	v0 := `[auth]
+mode = "internal"
+session_secret = "deadbeef"
+
+[[models]]
+id = "m1"
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-test"
+model_id = "ornith"
+display_name = "Ornith"
+max_context = 200000
+slots = 2
+enabled = true
+`
+	if err := os.WriteFile(Path(dir), []byte(v0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load v0 config: %v", err)
+	}
+	if got.Version != ConfigVersion {
+		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
+	}
+	// Saving a migrated config stamps the current version on disk.
+	if err := Save(dir, got); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(Path(dir))
+	if !strings.Contains(string(b), "version = "+strconv.Itoa(ConfigVersion)) {
+		t.Fatalf("saved config missing version stamp:\n%s", b)
+	}
+	// A config newer than this build is refused. (The version key must precede
+	// any table header to be top-level — that is also where Save writes it.)
+	if err := os.WriteFile(Path(dir), []byte("version = 999\n"+v0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Fatal("expected an error for a config newer than the build")
+	}
+}
+
+func TestResolveDisplayName(t *testing.T) {
+	models := []Model{
+		{ID: "a", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 1, Enabled: true},
+		{ID: "b", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 4, Enabled: true},
+		{ID: "c", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 2, Enabled: false},
+	}
+	// No availability callback -> fall back to total slot capacity (b has 4).
+	got, ok := ResolveDisplayName(models, "Fast", nil)
+	if !ok || got.ID != "b" {
+		t.Fatalf("fallback = %+v ok=%v, want b", got, ok)
+	}
+	// With an availability callback reporting idle slots, the idle model wins
+	// even though it has fewer total slots.
+	idle := map[string]int{"a": 1, "b": 0}
+	got2, _ := ResolveDisplayName(models, "Fast", func(m Model) int { return idle[m.ID] })
+	if got2.ID != "a" {
+		t.Fatalf("idle = %q, want a (b is busy)", got2.ID)
+	}
+	// A display name with only disabled models -> not found.
+	if _, ok := ResolveDisplayName([]Model{{ID: "z", DisplayName: "Off", Enabled: false}}, "Off", nil); ok {
+		t.Fatal("disabled-only display name should not resolve")
+	}
+	// Unknown display name -> not found.
+	if _, ok := ResolveDisplayName(models, "Nope", nil); ok {
+		t.Fatal("unknown display name should not resolve")
 	}
 }

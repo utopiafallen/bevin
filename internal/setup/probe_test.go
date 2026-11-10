@@ -1,27 +1,24 @@
 package setup
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/utopiafallen/alcyona-agent/internal/provider"
 )
 
-// classifyFromJSON unmarshals a /models list and runs it through classify, so
-// the tests exercise both the JSON shape and the detection logic.
-func classifyFromJSON(t *testing.T, raw string) (string, []provider.ModelInfo) {
+// classifyRaw runs classify on a raw /models JSON body.
+func classifyRaw(t *testing.T, raw string) (string, []provider.ModelInfo, error) {
 	t.Helper()
-	var pl probeList
-	if err := json.Unmarshal([]byte(raw), &pl); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	return classify(&pl)
+	return classify([]byte(raw))
 }
 
 func TestClassifyAnthropic(t *testing.T) {
 	// Anthropic's /v1/models list carries first_id / last_id / has_more and
 	// per-model max_input_tokens.
-	kind, models := classifyFromJSON(t, `{"data":[{"id":"claude-3-5-sonnet-20241022","max_input_tokens":200000}],"has_more":false,"first_id":"claude-3-5-sonnet-20241022","last_id":"claude-3-5-haiku-20241022"}`)
+	kind, models, err := classifyRaw(t, `{"data":[{"id":"claude-3-5-sonnet-20241022","max_input_tokens":200000}],"has_more":false,"first_id":"claude-3-5-sonnet","last_id":"claude-3-haiku"}`)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
 	if kind != "anthropic" {
 		t.Fatalf("kind = %q, want anthropic", kind)
 	}
@@ -33,7 +30,10 @@ func TestClassifyAnthropic(t *testing.T) {
 func TestClassifyLlama(t *testing.T) {
 	// llama.cpp's /v1/models items carry an architecture block + meta.n_ctx
 	// (the context length), and no first_id / last_id / has_more.
-	kind, models := classifyFromJSON(t, `{"object":"list","data":[{"id":"LiquidAI/LFM3-VL-2B-GGUF:Q8_0","architecture":{"input_modalities":["text","image","video"],"output_modalities":["text"]},"meta":{"n_ctx":128000,"n_embd":2048}}]}`)
+	kind, models, err := classifyRaw(t, `{"object":"list","data":[{"id":"LiquidAI/LFM3-VL-2B-GGUF:Q8_0","architecture":{"input_modalities":["text","image","video"],"output_modalities":["text"]},"meta":{"n_ctx":128000,"n_embd":2048}}]}`)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
 	if kind != "llama" {
 		t.Fatalf("kind = %q, want llama", kind)
 	}
@@ -45,7 +45,10 @@ func TestClassifyLlama(t *testing.T) {
 func TestClassifyOpenAI(t *testing.T) {
 	// OpenAI's /v1/models list is {object:"list", data:[{id,object}]} with no
 	// architecture / first_id. Context lengths come from the best-effort map.
-	kind, models := classifyFromJSON(t, `{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"some-unknown-model","object":"model"}]}`)
+	kind, models, err := classifyRaw(t, `{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"some-unknown-model","object":"model"}]}`)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
 	if kind != "openai" {
 		t.Fatalf("kind = %q, want openai", kind)
 	}
@@ -61,8 +64,27 @@ func TestClassifyOpenAI(t *testing.T) {
 }
 
 func TestClassifyEmpty(t *testing.T) {
-	kind, _ := classifyFromJSON(t, `{"data":[]}`)
-	if kind != "" {
-		t.Fatalf("kind = %q, want empty for a list with no models", kind)
+	_, _, err := classifyRaw(t, `{"data":[]}`)
+	if err == nil {
+		t.Fatalf("want an error for a list with no models")
+	}
+}
+
+func TestClassifyContextForgiving(t *testing.T) {
+	// n_ctx at the top level of the model (not in a meta block).
+	_, models, err := classifyRaw(t, `{"data":[{"id":"m","n_ctx":32768}]}`)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if models[0].MaxContext != 32768 {
+		t.Fatalf("MaxContext = %d, want 32768", models[0].MaxContext)
+	}
+	// context_length nested several levels deep.
+	_, models2, err := classifyRaw(t, `{"data":[{"id":"m","limits":{"window":{"context_length":8192}}}]}`)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if models2[0].MaxContext != 8192 {
+		t.Fatalf("MaxContext = %d, want 8192", models2[0].MaxContext)
 	}
 }
