@@ -34,6 +34,10 @@
   .hidden { display:none; }
   .kv { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-2); padding:.1em .4em; border-radius:6px; }
   pre.kv { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:.8rem; overflow:auto; margin:0; }
+  .pw-wrap { display:flex; gap:.4rem; align-items:center; }
+  .pw-wrap input { flex:1; }
+  .pw-toggle { font:inherit; font-size:.78rem; font-weight:700; white-space:nowrap; padding:.3rem .6rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text-muted); cursor:pointer; }
+  .pw-toggle:hover { background:var(--surface-2); }
 </style>
 </head>
 <body>
@@ -70,6 +74,7 @@ function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
 function field(label, input){ return el("div",{},el("label",{},label),input); }
 function inp(id, val, ph){ const i=el("input",{id, value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); return i; }
+function pwfield(label, id, val, ph){ const i=el("input",{id, type:"password", value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); const b=el("button",{type:"button", class:"pw-toggle"}, "Show"); b.onclick=function(){ const show=i.type==="password"; i.type=show?"text":"password"; b.textContent=show?"Hide":"Show"; b.setAttribute("aria-pressed", show?"true":"false"); }; const wrap=el("div",{class:"pw-wrap"},i,b); return el("div",{},el("label",{},label),wrap); }
 
 // ---- per-step renderers ----
 function renderServer(){ return el("div",{},
@@ -84,8 +89,8 @@ function renderAdmin(){ const a=S.admin; return el("div",{},
   field("Handle", inp("ad_handle", a.handle, "admin")),
   field("Display name", inp("ad_name", a.display_name, "Administrator")),
   el("div",{class:"row"},
-    field("Password", inp("ad_pw", a.password, "min 8 chars")),
-    field("Confirm", inp("ad_pw2", a.password, "")))
+    pwfield("Password", "ad_pw", a.password, "min 8 chars"),
+    pwfield("Confirm", "ad_pw2", a.password, ""))
 );}
 function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add at least one enabled model. Provider quirks are isolated in the server; you only fill endpoint details."));
   S.models.forEach((m,i)=>{
