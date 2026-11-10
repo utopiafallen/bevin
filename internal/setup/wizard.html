@@ -92,7 +92,7 @@ function renderAdmin(){ const a=S.admin; return el("div",{},
     pwfield("Password", "ad_pw", a.password, "min 8 chars"),
     pwfield("Confirm", "ad_pw2", a.password, ""))
 );}
-function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add at least one enabled model. Provider quirks are isolated in the server; you only fill endpoint details."));
+function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add the main text models you'll use for chat — the ones users can switch between. For each: pick a provider (OpenAI, Anthropic, or a local llama-server) and its endpoint (base URL, API key — blank for local — and the model id to send). The server handles each provider's wire format, so you only supply endpoint details. Add at least one enabled model. The 1-10 scores are soft hints for how the agent weighs each model (reasoning / knowledge / speed)."));
   S.models.forEach((m,i)=>{
     const prov=el("select",{id:"m_prov_"+i});
     ["openai","anthropic","llama"].forEach(p=>{const o=el("option",{value:p},p); if(m.provider===p)o.selected=true; prov.append(o);});
@@ -131,7 +131,7 @@ function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("
     s10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.speed=parseInt(s10.value||"0",10);});
     d.append(card);
   });
-  d.append(el("div",{class:"btns"},el("button",{onclick:"addModel"},"+ Add model")));
+  d.append(el("div",{class:"btns"},el("button",{onclick:"addModel()"},"+ Add model")));
   return d;
 }
 function renderAux(){ const d=el("div",{},el("h3",{}, "4. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models. Hidden from users. Leave empty to skip."));
@@ -145,7 +145,7 @@ function renderAux(){ const d=el("div",{},el("h3",{}, "4. Aux perception models 
     ["modality","provider","base_url","model_id","api_key"].forEach(k=>{ const e=card.querySelector("#a_"+k+"_"+i); if(e) e.addEventListener("input",()=>S.aux[i][k]=e.value); });
     d.append(card);
   });
-  d.append(el("div",{class:"btns"},el("button",{onclick:"addAux"},"+ Add aux model")));
+  d.append(el("div",{class:"btns"},el("button",{onclick:"addAux()"},"+ Add aux model")));
   return d;
 }
 function renderEmbedder(){ const e=S.embedder; return el("div",{},
@@ -159,7 +159,7 @@ function renderSidecars(){ const c=S.sidecars; return el("div",{},
   field("Qdrant endpoint", inp("sc_qdrant", c.qdrant, "http://127.0.0.1:6333 (blank = auto)")),
   field("llama-server endpoint", inp("sc_llama", c.llama_server, "http://127.0.0.1:8081 (blank = auto)")),
   field("ffmpeg path", inp("sc_ffmpeg", c.ffmpeg, "blank = use system or auto")),
-  el("div",{class:"btns"},el("button",{onclick:"testQdrant"},"Test Qdrant"), el("button",{onclick:"testLlama"},"Test llama-server"))
+  el("div",{class:"btns"},el("button",{onclick:"testQdrant()"},"Test Qdrant"), el("button",{onclick:"testLlama()"},"Test llama-server"))
 );}
 function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
   d.append(el("pre",{class:"kv"}, JSON.stringify(S, null, 2)));
