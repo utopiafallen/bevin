@@ -44,17 +44,20 @@
   .score-row { display:flex; align-items:center; gap:.55rem; }
   .score-row .score { flex:1; }
   .score-val { font-family:var(--font-mono); font-size:.78rem; font-weight:700; min-width:1.6em; text-align:center; color:var(--text-muted); }
-  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; border:1px solid var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
+  /* slider — no border on the input (box-shadow inset for the visual border), so the
+     gradient's 100% == the element width and the fill's right edge lands on the thumb's
+     center (the thumb is inset by its own radius, 9px, from each end) */
+  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; border:none; box-shadow: inset 0 0 0 1px var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
   input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   input.score::-moz-range-thumb { width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
-  /* enabled toggle — a switch */
-  .toggle { position:relative; display:inline-flex; align-items:center; gap:.55rem; cursor:pointer; user-select:none; }
-  .toggle input { position:absolute; opacity:0; width:0; height:0; }
-  .toggle .track { position:relative; width:42px; height:24px; border-radius:12px; background:var(--surface); border:1px solid var(--border); transition:background .15s, border-color .15s; flex:none; }
-  .toggle .thumb { position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:var(--text-muted); transition:transform .15s, background .15s; }
-  .toggle input:checked + .track { background:var(--ok); border-color:var(--ok); }
-  .toggle input:checked + .track .thumb { transform:translateX(18px); background:#fff; }
-  .toggle .lbl { font-size:.85rem; font-weight:600; }
+  input.score:disabled { opacity:.5; cursor:not-allowed; }
+  /* Enable for users — a Yes/No segmented button that fills the field width */
+  .yesno { display:flex; width:100%; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+  .yesno button { flex:1; font:inherit; font-weight:700; padding:.5rem; border:none; background:var(--surface); color:var(--text-muted); cursor:pointer; transition:background .15s; }
+  .yesno button + button { border-left:1px solid var(--border); }
+  .yesno button.sel { background:var(--brand); color:var(--brand-contrast); }
+  .yesno button:not(.sel):hover { background:var(--surface-2); }
+  .yesno button:disabled { opacity:.5; cursor:not-allowed; }
   /* add/edit model form — split into two labelled halves */
   .config-half { border:1px solid var(--border); border-radius:var(--radius); padding:.8rem 1rem; margin-top:.8rem; background:var(--surface); }
   .config-half > h4 { margin:0 0 .7rem; font-size:.8rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
@@ -105,7 +108,7 @@
 const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
 let idx = 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -145,44 +148,62 @@ function renderModelForm(){
   const base=inp("mf_base", m.base_url, "https://api.openai.com");
   const key=inp("mf_key", m.api_key, "blank for a local llama-server");
   const provLabel=m.provider?el("span",{class:"kv"},m.provider):el("span",{class:"small"},"— press Detect —");
-  const sel=el("select",{id:"mf_sel"});
-  (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
-  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
-  const ctx=el("input",{id:"mf_ctx", value:m.max_context||"", class:m.context_auto?"ctx-disabled":null});
-  if(m.context_auto) ctx.setAttribute("disabled","");
-  ctx.addEventListener("input",()=>{ m.max_context=ctx.value; m.context_auto=false; S.formError=null; });
+  // Detect / Clear centered under the base URL + API key (the association is clear)
   halfA.append(
     el("div",{class:"row"}, field("Base URL",base), field("API key",key)),
-    el("div",{class:"row"}, field("Provider",provLabel), field("Model",sel)),
-    field("Max context", ctx),
-    el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."));
-  // centered Cancel/Clear + Detect buttons
-  halfA.append(el("div",{class:"form-btns"},
-    el("button",{class:"ghost", onclick:"cancelEdit()"}, editing?"Cancel":"Clear"),
-    el("button",{class:"primary", onclick:"detectModel()"},"Detect")));
+    el("div",{class:"form-btns"},
+      el("button",{class:"ghost", onclick:"cancelEdit()"}, editing?"Cancel":"Clear"),
+      el("button",{class:"primary", onclick:"detectModel()"},"Detect")),
+    field("Provider", provLabel)
+  );
   if(S.formError) halfA.append(el("p",{class:"form-err"}, S.formError));
   f.append(halfA);
   // half B: in-agent UI configuration (what users see)
   const halfB=el("div",{class:"config-half"}, el("h4",{}, "In-agent UI (what users see)"));
-  const disp=inp("mf_disp", m.display_name, "");
-  const en=el("label",{class:"toggle"});
-  const enCb=el("input",{type:"checkbox"});
-  enCb.checked=!!m.enabled;
-  enCb.addEventListener("change",()=>{ m.enabled=enCb.checked; S.formError=null; });
-  en.append(enCb, el("span",{class:"track"},el("span",{class:"thumb"})));
+  // Model (the provider's model id)
+  const sel=el("select",{id:"mf_sel"});
+  if(!(m._models||[]).length){ sel.append(el("option",{value:""},"— press Detect —")); }
+  (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
+  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
+  // Max context
+  const ctx=el("input",{id:"mf_ctx", value:m.max_context||"", class:m.context_auto?"ctx-disabled":null});
+  if(m.context_auto) ctx.setAttribute("disabled","");
+  ctx.addEventListener("input",()=>{ m.max_context=ctx.value; m.context_auto=false; S.formError=null; });
+  // Display name — a combobox (text input + a datalist of the existing display names).
+  // Picking an existing name inherits its R/K/S + enabled state and locks them, so all
+  // models sharing a display name stay consistent.
+  const disp=el("input",{id:"mf_disp", value:m.display_name||"", list:"disp_names", autocomplete:"off"});
+  const dl=el("datalist",{id:"disp_names"});
+  [...new Set(S.models.map(x=>(x.display_name||"").trim()).filter(Boolean))].forEach(n=>{ dl.append(el("option",{value:n})); });
+  // Enable for users — a Yes/No segmented button
+  const locked=(m.lockedTo!==null && m.lockedTo!==undefined);
+  const en=el("div",{class:"yesno"});
+  const yesB=el("button",{type:"button", class:m.enabled?"sel":""}, "Yes");
+  const noB=el("button",{type:"button", class:!m.enabled?"sel":""}, "No");
+  if(locked){ yesB.setAttribute("disabled",""); noB.setAttribute("disabled",""); }
+  yesB.addEventListener("click",()=>{ if(locked)return; m.enabled=true; S.formError=null; render(); });
+  noB.addEventListener("click",()=>{ if(locked)return; m.enabled=false; S.formError=null; render(); });
+  en.append(yesB,noB);
   halfB.append(
-    el("div",{class:"row"}, field("Display name",disp), field("Enable for users",en)),
-    el("p",{class:"field-help"},"Shown to users to help them pick a model for a conversation — informational only; it does not change how the agent runs."),
-    scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }),
-    scoreSlider("Knowledge (1-10)","mf_k", m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; }),
-    scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }));
+    field("Model", sel),
+    field("Max context", ctx),
+    el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."),
+    el("div",{class:"row"},
+      field("Display name", el("div",{}, disp, dl)),
+      field("Enable for users", en)),
+    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
+    scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }, locked),
+    scoreSlider("Knowledge (1-10)","mf_k", m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; }, locked),
+    scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }, locked)
+  );
   f.append(halfB);
   // the save button
   f.append(el("div",{class:"btns"}, el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
   // wire the inputs
   base.addEventListener("input",()=>{ m.base_url=base.value; S.formError=null; });
   key.addEventListener("input",()=>{ m.api_key=key.value; S.formError=null; });
-  disp.addEventListener("input",()=>{ m.display_name=disp.value; S.formError=null; });
+  disp.addEventListener("input",()=>{ m.display_name=disp.value; });
+  disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });
   return f;
 }
 function renderModelList(){
@@ -244,9 +265,22 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
 const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, embedder:renderEmbedder, sidecars:renderSidecars, review:renderReview };
 
 // ---- model form helpers ----
-function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}; }
+function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}; }
 function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
 function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
+// lock the R/K/S + enabled to a display name's pre-existing values (so every model
+// sharing a display name stays consistent); unlock when the name is new (keeps the
+// current R/K/S + enabled)
+function syncDispLock(){
+  const m=S.modelDraft;
+  const name=(m.display_name||"").trim();
+  const match=S.models.find(x=>(x.display_name||"").trim()===name);
+  if(match){
+    if(m.lockedTo!==name){ m.metadata=deepCopy(match.metadata); m.enabled=match.enabled; m.lockedTo=name; }
+  } else if(m.lockedTo!==null && m.lockedTo!==undefined){
+    m.lockedTo=null; // unlock — keep the current R/K/S + enabled
+  }
+}
 function suggestedFix(err){
   const e=String(err).toLowerCase();
   if(e.includes("401")||e.includes("403")||e.includes("unauthorized")||e.includes("forbidden")) return "check the API key.";
@@ -271,6 +305,7 @@ function editModel(i){
   S.editOriginal=deepCopy(S.models[i]);
   S.modelDraft=deepCopy(S.models[i]);
   S.editingIndex=i; S.models.splice(i,1); S.formError=null;
+  syncDispLock(); // lock the R/K/S + enabled if this display name is shared with another model
   render();
   const b=document.getElementById("mf_base"); if(b) b.scrollIntoView({behavior:"smooth",block:"center"});
 }
@@ -290,7 +325,7 @@ function reorderModel(i,dir){
 // score slider — a progress bar whose fill goes red (1) → yellow (5) → green (10)
 function scoreColor(v){ const hue = v<=5 ? (v-1)/4*60 : 60+(v-5)/5*60; return "hsl("+hue+",70%,45%)"; }
 function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setProperty("--val",(v-1)/9); input.style.setProperty("--score-color",scoreColor(v)); }
-function scoreSlider(label, id, val, onChange){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
+function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
 // detect — call the probe endpoint, learn the provider, list the models + context lengths
 async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext){ m.max_context=String(r.models[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
 function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
