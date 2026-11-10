@@ -38,6 +38,9 @@ func TestWizardTemplateRenders(t *testing.T) {
 	if !strings.Contains(out, `"port":5656`) {
 		t.Fatalf("page missing server port; head: %.200s", out)
 	}
+	if !strings.Contains(out, `q("#ad_handle").placeholder`) {
+		t.Fatalf("page missing admin handle placeholder fallback; head: %.200s", out)
+	}
 }
 
 type fakeSidecars struct {
