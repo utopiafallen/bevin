@@ -38,6 +38,23 @@
   .pw-wrap input { flex:1; }
   .pw-toggle { font:inherit; font-size:.78rem; font-weight:700; white-space:nowrap; padding:.3rem .6rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text-muted); cursor:pointer; }
   .pw-toggle:hover { background:var(--surface-2); }
+  /* score sliders — a progress bar whose fill goes red (1) → yellow (5) → green (10) */
+  .score-field { margin-top:.55rem; }
+  .score-field > label { display:block; font-size:.82rem; font-weight:600; margin-bottom:.25rem; }
+  .score-row { display:flex; align-items:center; gap:.55rem; }
+  .score-row .score { flex:1; }
+  .score-val { font-family:var(--font-mono); font-size:.78rem; font-weight:700; min-width:1.6em; text-align:center; color:var(--text-muted); }
+  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; background:var(--surface); border:1px solid var(--border); outline:none; cursor:pointer; }
+  input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
+  input.score::-moz-range-thumb { width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
+  /* enabled toggle — a switch */
+  .toggle { position:relative; display:inline-flex; align-items:center; gap:.55rem; cursor:pointer; user-select:none; }
+  .toggle input { position:absolute; opacity:0; width:0; height:0; }
+  .toggle .track { position:relative; width:42px; height:24px; border-radius:12px; background:var(--surface); border:1px solid var(--border); transition:background .15s, border-color .15s; flex:none; }
+  .toggle .thumb { position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:var(--text-muted); transition:transform .15s, background .15s; }
+  .toggle input:checked + .track { background:var(--ok); border-color:var(--ok); }
+  .toggle input:checked + .track .thumb { transform:translateX(18px); background:#fff; }
+  .toggle .lbl { font-size:.85rem; font-weight:600; }
 </style>
 </head>
 <body>
@@ -92,43 +109,40 @@ function renderAdmin(){ const a=S.admin; return el("div",{},
     pwfield("Password", "ad_pw", a.password, "min 8 chars"),
     pwfield("Confirm", "ad_pw2", a.password, ""))
 );}
-function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add the main text models you'll use for chat — the ones users can switch between. For each: pick a provider (OpenAI, Anthropic, or a local llama-server) and its endpoint (base URL, API key — blank for local — and the model id to send). The server handles each provider's wire format, so you only supply endpoint details. Add at least one enabled model. The 1-10 scores are soft hints for how the agent weighs each model (reasoning / knowledge / speed)."));
+function renderModels(){ const d=el("div",{},el("h3",{}, "3. Main models"), el("p",{class:"small"},"Add the chat models users can switch between in the UI. Add at least one."));
   S.models.forEach((m,i)=>{
-    const prov=el("select",{id:"m_prov_"+i});
-    ["openai","anthropic","llama"].forEach(p=>{const o=el("option",{value:p},p); if(m.provider===p)o.selected=true; prov.append(o);});
-    prov.addEventListener("change",()=>{S.models[i].provider=prov.value;});
     const base=inp("m_base_"+i, m.base_url, "https://api.openai.com/v1");
-    const key=inp("m_key_"+i, m.api_key, "");
-    const mid=inp("m_id_"+i, m.model_id, "gpt-4o");
+    const key=inp("m_key_"+i, m.api_key, "blank for a local llama-server");
+    const provLabel = m.provider ? el("span",{class:"kv"}, m.provider) : el("span",{class:"small"},"— press Detect —");
+    const sel=el("select",{id:"m_sel_"+i});
+    (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID + (mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
+    sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext) m.max_context=String(mm.MaxContext); render(); });
+    const ctx=inp("m_ctx_"+i, m.max_context??"", "blank = auto");
     const disp=inp("m_disp_"+i, m.display_name, "");
-    const ctx=inp("m_ctx_"+i, m.max_context?"":"", "max context tokens (blank = auto)");
-    const slots=inp("m_slots_"+i, m.slots||"1", "1");
-    const r10=inp("m_r_"+i, m.metadata&&m.metadata.reasoning?"":"", "reasoning 1-10");
-    const k10=inp("m_k_"+i, m.metadata&&m.metadata.knowledge?"":"", "knowledge 1-10");
-    const s10=inp("m_s_"+i, m.metadata&&m.metadata.speed?"":"", "speed 1-10");
-    const en=el("input",{type:"checkbox"}); en.checked=!!m.enabled; en.addEventListener("change",()=>{S.models[i].enabled=en.checked;});
+    m.metadata=m.metadata||{};
+    const rS=scoreSlider("Reasoning (1-10)","m_r_"+i, m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; });
+    const kS=scoreSlider("Knowledge (1-10)","m_k_"+i, m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; });
+    const sS=scoreSlider("Speed (1-10)","m_s_"+i, m.metadata.speed||5, (v)=>{ m.metadata.speed=v; });
+    const en=el("label",{class:"toggle"});
+    const enCb=el("input",{type:"checkbox"});
+    enCb.checked=!!m.enabled;
+    enCb.addEventListener("change",()=>{ m.enabled=enCb.checked; });
+    en.append(enCb, el("span",{class:"track"},el("span",{class:"thumb"})), el("span",{class:"lbl"},"Enabled"));
+    base.addEventListener("input",()=>m.base_url=base.value);
+    key.addEventListener("input",()=>m.api_key=key.value);
+    ctx.addEventListener("input",()=>m.max_context=ctx.value);
+    disp.addEventListener("input",()=>m.display_name=disp.value);
     const card=el("div",{class:"model"},
-      el("div",{class:"row"},field("Provider",prov), field("Model ID",mid)),
-      field("Base URL", base),
-      field("API key", key),
-      field("Display name", disp),
-      el("div",{class:"row"}, field("Max context", ctx), field("Slots", slots),
-        el("div",{},el("label",{}, "Enabled"), en)),
-      el("div",{class:"row"}, field("Reasoning 1-10", r10), field("Knowledge 1-10", k10), field("Speed 1-10", s10)),
-      el("div",{class:"row"},
-        el("div",{},el("button",{onclick:`testModel(${i})`},"Test connection")),
-        el("div",{},el("button",{onclick:`removeModel(${i})`},"Remove"))));
+      el("p",{class:"small"},"Enter the API base URL (and key if it needs one), then press Detect — the server identifies the provider and lists the models with their context lengths."),
+      el("div",{class:"row"}, field("Base URL",base), field("API key",key)),
+      el("div",{class:"row"}, field("Provider",provLabel), field("Model",sel)),
+      el("div",{class:"row"}, field("Max context",ctx), field("Display name",disp)),
+      el("p",{class:"small"},"How the agent should weigh this model — soft hints, not hard limits."),
+      rS, kS, sS,
+      el("div",{class:"row"}, el("div",{},en), el("div",{class:"btns"},
+        el("button",{class:"primary", onclick:`detectModel(${i})`},"Detect"),
+        el("button",{class:"ghost", onclick:`removeModel(${i})`},"Remove"))));
     card.id="model_"+i;
-    // wire value->state
-    base.addEventListener("input",()=>S.models[i].base_url=base.value);
-    key.addEventListener("input",()=>S.models[i].api_key=key.value);
-    mid.addEventListener("input",()=>S.models[i].model_id=mid.value);
-    disp.addEventListener("input",()=>S.models[i].display_name=disp.value);
-    ctx.addEventListener("input",()=>S.models[i].max_context=ctx.value);
-    slots.addEventListener("input",()=>S.models[i].slots=parseInt(slots.value||"1",10));
-    r10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.reasoning=parseInt(r10.value||"0",10);});
-    k10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.knowledge=parseInt(k10.value||"0",10);});
-    s10.addEventListener("input",()=>{S.models[i].metadata=S.models[i].metadata||{};S.models[i].metadata.speed=parseInt(s10.value||"0",10);});
     d.append(card);
   });
   d.append(el("div",{class:"btns"},el("button",{onclick:"addModel()"},"+ Add model")));
@@ -169,11 +183,16 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
 const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, embedder:renderEmbedder, sidecars:renderSidecars, review:renderReview };
 
 // ---- model list helpers ----
-function addModel(){ S.models.push({provider:"openai",base_url:"https://api.openai.com/v1",api_key:"",model_id:"",display_name:"",metadata:{},slots:1,enabled:true}); render(); }
+function addModel(){ S.models.push({provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true}); render(); }
 function removeModel(i){ S.models.splice(i,1); render(); }
+// score slider — a progress bar whose fill goes red (1) → yellow (5) → green (10)
+function scoreColor(v){ const hue = v<=5 ? (v-1)/4*60 : 60+(v-5)/5*60; return "hsl("+hue+",70%,45%)"; }
+function scoreFill(input){ const v=parseInt(input.value,10)||1; const pct=(v-1)/9*100; input.style.background="linear-gradient(to right,"+scoreColor(v)+" "+pct+"%, var(--surface) "+pct+"%)"; }
+function scoreSlider(label, id, val, onChange){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
+// detect — call the probe endpoint, learn the provider, list the models + context lengths
+async function detectModel(i){ const m=S.models[i]; if(!m.base_url){ msg("Enter the API base URL first.","err"); return; } msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext) m.max_context=String(r.models[0].MaxContext); } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ msg("Detect failed: "+e.message,"err"); } }
 function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
 function removeAux(i){ S.aux.splice(i,1); render(); }
-async function testModel(i){ msg("Testing model "+i+"…",""); try{ const r=await api("POST","/setup/test-model",S.models[i]); if(r.ok) msg("Model OK — "+r.model_count+" model(s) found.","ok"); else msg("Test failed: "+r.error,"err"); }catch(e){ msg("Test error: "+e.message,"err"); } }
 async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
 async function testLlama(){ msg("Testing llama-server…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"llama-server",endpoint:S.sidecars.llama_server}); msg(r.ok?"llama-server reachable.":"llama-server not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
 

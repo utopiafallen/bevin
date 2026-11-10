@@ -49,6 +49,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/cancel", h.cancel)
 	mux.HandleFunc("/setup/test-model", h.testModel)
 	mux.HandleFunc("/setup/test-sidecar", h.testSidecar)
+	mux.HandleFunc("/setup/probe-model", h.probeModel)
 	mux.HandleFunc("/setup/finalize", h.finalize)
 }
 
@@ -217,6 +218,33 @@ func (h *Handler) testSidecar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
+}
+
+// probeModel detects the provider kind for a base URL (testing the /models
+// signature) + lists the models it serves, with context lengths where the API
+// exposes them. Gated on the setup token like the other setup endpoints.
+func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var p struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := probeEndpoint(r.Context(), p.BaseURL, p.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
 }
 
 func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {
