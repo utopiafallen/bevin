@@ -67,6 +67,7 @@
   .form-btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
   .form-err { margin-top:.55rem; font-size:.82rem; font-weight:600; color:var(--danger); }
   .field-help { font-size:.78rem; color:var(--text-muted); margin:.15rem 0 .1rem; }
+  .scores-header { margin:.9rem 0 .1rem; font-size:.78rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
   input.ctx-disabled { opacity:.65; cursor:not-allowed; }
   /* model list table */
   .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
@@ -186,12 +187,17 @@ function renderModelForm(){
   en.append(yesB,noB);
   halfB.append(
     field("Model", sel),
-    field("Max context", ctx),
-    el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."),
+    // Max context — the help text sits under the label (above the input)
+    el("div",{},
+      el("label",{},"Max context"),
+      el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."),
+      ctx),
     el("div",{class:"row"},
       field("Display name", el("div",{}, disp, dl)),
       field("Enable for users", en)),
     el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
+    el("h5",{class:"scores-header"},"Scores (1-10)"),
+    el("p",{class:"field-help"},"Help the user gauge a model's strengths when picking one for a conversation — informational only; it does not change how the agent runs."),
     scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }, locked),
     scoreSlider("Knowledge (1-10)","mf_k", m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; }, locked),
     scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }, locked)
