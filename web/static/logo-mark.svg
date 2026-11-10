@@ -6,7 +6,10 @@
       <stop offset="100%" stop-color="#ECB429"/>
     </radialGradient>
   </defs>
-  <circle cx="31" cy="22" r="12.5" fill="url(#alcyonaSun)"/>
-  <ellipse cx="20" cy="68" rx="33" ry="26" fill="#BCD08F"/>
-  <ellipse cx="47" cy="72" rx="31" ry="24" fill="#8CAE54"/>
+  <circle cx="31" cy="24" r="14.5" fill="url(#alcyonaSun)"/>
+  <g fill="none" stroke="#DFA23A" stroke-linecap="round">
+    <path d="M 12 42 Q 20 39 28 42 T 44 42" stroke-width="3.5" opacity="0.4"/>
+    <path d="M 9 48 Q 19 44 29 48 T 49 48" stroke-width="4" opacity="0.65"/>
+    <path d="M 6 54 Q 18 49.5 30 54 T 54 54" stroke-width="4.5" opacity="0.9"/>
+  </g>
 </svg>

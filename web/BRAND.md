@@ -2,21 +2,22 @@
 
 A warm, calm, personal-assistant identity. The word *alcyona* evokes the
 halcyon (kingfisher), the calm sea, and the Pleiades star Alcyone — so the
-brand reads as **a soft, golden morning over gentle green hills**.
+brand reads as **a soft, golden morning over calm, rolling waves**.
 
 ## Feel
 Warm · inviting · calm · friendly. Never cold/corporate, never loud.
 
 ## Logo
-- **Mark** — a soft sun (radial gradient, warm center → golden edge) over two
-  rolling green hills. `web/static/logo-mark.svg` (no background — for the
+- **Mark** — a soft sun (radial gradient, warm center → golden edge) over a layer
+  of three warm amber waves. `web/static/logo-mark.svg` (no background — for the
   header, on any surface) and `web/static/favicon.svg` (the mark in a warm
   cream rounded square — for the browser tab / app icon).
 - **Wordmark** — `alcyona` in **Nunito 800**, lowercase, tight tracking
   (`letter-spacing: -0.02em`), in `--text`. Rendered as HTML text next to the
   mark (not baked into the SVG), so it themes with the page.
 - The mark stays legible down to ~16px (favicon). The sun is brand yellow;
-  the hills are warm greens (`--hill` `#8CAE54`, `--hill-soft` `#BCD08F`).
+  the waves are warm amber (`#DFA23A`), layered back-to-front with growing
+  width, boldness, and opacity so the water reads as waves.
 
 ## Color
 Soft warm yellow is the brand color. It's a *fill* color (buttons, highlights,
@@ -39,7 +40,6 @@ for contrast. Neutrals are warm (cream/taupe/espresso), not cool gray.
 | `--text-muted` | `#8A7B64` | `#AC9F88` | secondary text |
 | `--border` | `#EBDFC7` | `#3A3327` | hairlines, borders |
 | `--ok` / `--warn` / `--danger` | `#6E9E52` / `#D9971F` / `#C4552E` | `#8FC46A` / `#F0B840` / `#E8703F` | status |
-| `--hill` / `--hill-soft` | `#8CAE54` / `#BCD08F` | `#9BBF5F` / `#3A4526` | secondary green (the logo's hills) |
 
 ## Typography
 - **Family:** Nunito (variable, self-hosted at `web/static/fonts/nunito-variable.woff2`,

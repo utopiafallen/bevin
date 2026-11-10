@@ -42,8 +42,6 @@
   --ok: #6E9E52;
   --warn: #D9971F;
   --danger: #C4552E;
-  --hill: #8CAE54;
-  --hill-soft: #BCD08F;
 
   --radius: 14px;
   --radius-lg: 20px;
@@ -76,8 +74,6 @@
   --ok: #8FC46A;
   --warn: #F0B840;
   --danger: #E8703F;
-  --hill: #9BBF5F;
-  --hill-soft: #3A4526;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
