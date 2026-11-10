@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/config"
+	"github.com/utopiafallen/bevin/internal/config"
 )
 
 // Sidecar kind names.

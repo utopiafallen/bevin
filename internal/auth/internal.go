@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 // Provider is the authentication seam. v1 is the internal (self-IdP)

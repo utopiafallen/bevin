@@ -1,6 +1,6 @@
 // Package provider isolates the wire details of each model API (OpenAI,
 // Anthropic Messages, llama.cpp) behind a single Provider interface, so the
-// rest of alcyona never special-cases a vendor. Each implementation maps the
+// rest of bevin never special-cases a vendor. Each implementation maps the
 // neutral types defined here to its own request/response shape.
 package provider
 

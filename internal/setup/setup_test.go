@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/auth"
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/auth"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 func jsonReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }

@@ -1,4 +1,4 @@
-module github.com/utopiafallen/alcyona-agent
+module github.com/utopiafallen/bevin
 
 go 1.27
 

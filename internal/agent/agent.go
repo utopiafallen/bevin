@@ -1,4 +1,4 @@
-// Package agent is Alcyona's harness: it runs a conversation turn for a user —
+// Package agent is Bevin's harness: it runs a conversation turn for a user —
 // persist the user message, call the conversation's active model, persist the
 // reply. The provider abstraction isolates each API's quirks; the harness never
 // special-cases a vendor.
@@ -14,12 +14,12 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/provider"
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
-const baseSystemPrompt = `You are Alcyona, a personal assistant. Be direct and concise.`
+const baseSystemPrompt = `You are Bevin, a personal assistant. Be direct and concise.`
 
 // Agent runs conversation turns for users, using the enabled models from the
 // config. Per-user SQLite stores are opened lazily and cached.

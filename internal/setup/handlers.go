@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/provider"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/provider"
 )
 
 //go:embed wizard.html
@@ -58,7 +58,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 func (h *Handler) gate(w http.ResponseWriter, r *http.Request) bool {
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		if c, err := r.Cookie("alcyona_setup"); err == nil {
+		if c, err := r.Cookie("bevin_setup"); err == nil {
 			token = c.Value
 		}
 	}
@@ -67,7 +67,7 @@ func (h *Handler) gate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if r.URL.Query().Get("token") != "" {
-		http.SetCookie(w, &http.Cookie{Name: "alcyona_setup", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: "bevin_setup", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	}
 	return true
 }

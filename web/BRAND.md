@@ -1,8 +1,7 @@
-# alcyona — Brand
+# bevin — Brand
 
-A warm, calm, personal-assistant identity. The word *alcyona* evokes the
-halcyon (kingfisher), the calm sea, and the Pleiades star Alcyone — so the
-brand reads as **a soft, golden morning over calm, rolling waves**.
+A warm, calm, personal-assistant identity: **a soft, golden morning over calm,
+rolling waves** — welcoming, unhurried, and yours.
 
 ## Feel
 Warm · inviting · calm · friendly. Never cold/corporate, never loud.
@@ -12,7 +11,7 @@ Warm · inviting · calm · friendly. Never cold/corporate, never loud.
   of three warm amber waves. `web/static/logo-mark.svg` (no background — for the
   header, on any surface) and `web/static/favicon.svg` (the mark in a warm
   cream rounded square — for the browser tab / app icon).
-- **Wordmark** — `alcyona` in **Nunito 800**, lowercase, tight tracking
+- **Wordmark** — `bevin` in **Nunito 800**, lowercase, tight tracking
   (`letter-spacing: -0.02em`), in `--text`. Rendered as HTML text next to the
   mark (not baked into the SVG), so it themes with the page.
 - The mark stays legible down to ~16px (favicon). The sun is brand yellow;
@@ -53,7 +52,7 @@ for contrast. Neutrals are warm (cream/taupe/espresso), not cool gray.
 CSS custom properties in `web/static/brand.css`:
 - `:root` = **light**; `[data-theme="dark"]` = **dark**.
 - Default follows the OS (`prefers-color-scheme`); a toggle sets
-  `data-theme` on `<html>` and persists `localStorage["alcyona-theme"]`.
+  `data-theme` on `<html>` and persists `localStorage["bevin-theme"]`.
 - Set the theme **before first paint** (small inline `<head>` script) to avoid
   a flash.
 

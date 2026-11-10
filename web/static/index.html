@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>alcyona</title>
+  <title>bevin</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/brand.css">
   <script>
     // Apply the saved theme (or the system preference) before first paint.
     (function () {
       try {
-        var t = localStorage.getItem("alcyona-theme");
+        var t = localStorage.getItem("bevin-theme");
         if (t !== "light" && t !== "dark") {
           t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
         }
@@ -32,7 +32,7 @@
 
   <div class="wrap">
     <header class="topbar">
-      <a class="brand" href="/"><img src="/logo-mark.svg" alt="alcyona logo"> alcyona</a>
+      <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
       <span class="chip"><span class="dot"></span> brand preview</span>
     </header>
 
@@ -75,7 +75,7 @@
     <section class="card">
       <h3>Conversation</h3>
       <div class="msg msg-assistant">
-        <span class="who">alcyona</span>
+        <span class="who">bevin</span>
         <span class="bubble">Good morning. What would you like to get done today?</span>
       </div>
       <div class="msg msg-user">
@@ -83,7 +83,7 @@
         <span class="bubble">Help me plan my afternoon.</span>
       </div>
       <div class="msg msg-assistant">
-        <span class="who">alcyona</span>
+        <span class="who">bevin</span>
         <span class="bubble">Of course — a soft yellow, a warm font, and a little calm. Let's start.</span>
       </div>
       <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
@@ -94,7 +94,7 @@
     </section>
 
     <p class="muted" style="text-align:center; margin-top:2rem; font-size:.85rem;">
-      alcyona &middot; soft yellow &middot; Nunito &middot; warm neutrals &middot; <span id="health">checking&hellip;</span>
+      bevin &middot; soft yellow &middot; Nunito &middot; warm neutrals &middot; <span id="health">checking&hellip;</span>
     </p>
   </div>
 
@@ -104,7 +104,7 @@
     toggle.addEventListener("click", function () {
       var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
       root.setAttribute("data-theme", next);
-      try { localStorage.setItem("alcyona-theme", next); } catch (e) {}
+      try { localStorage.setItem("bevin-theme", next); } catch (e) {}
     });
 
     fetch("/health").then(function (r) { return r.json(); })
@@ -116,7 +116,7 @@
     function add(who, text) {
       var m = document.createElement("div");
       m.className = "msg " + (who === "you" ? "msg-user" : "msg-assistant");
-      m.innerHTML = '<span class="who">' + (who === "you" ? "you" : "alcyona") + '</span><span class="bubble"></span>';
+      m.innerHTML = '<span class="who">' + (who === "you" ? "you" : "bevin") + '</span><span class="bubble"></span>';
       m.querySelector(".bubble").textContent = text;
       log.appendChild(m);
     }
@@ -127,7 +127,7 @@
       add("you", msg);
       document.getElementById("message").value = "";
       // Echo back locally for the preview (no model backend wired in the skeleton).
-      setTimeout(function () { add("alcyona", "Heard you: \u201C" + msg + "\u201D \u2014 the agent will answer here once wired."); }, 250);
+      setTimeout(function () { add("bevin", "Heard you: \u201C" + msg + "\u201D \u2014 the agent will answer here once wired."); }, 250);
     });
   </script>
 </body>

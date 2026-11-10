@@ -14,7 +14,7 @@ import (
 // OpenAI-compatible wire but adds llama's multimodal content parts (image /
 // audio / video) and reads the real modalities from /v1/models. Video needs
 // ffmpeg on the server side (--video-fps / --video-ffmpeg-dir); that is an
-// operator concern, not an alcyona one.
+// operator concern, not an bevin one.
 type Llama struct {
 	BaseURL string // e.g. http://127.0.0.1:8080/v1
 	APIKey  string

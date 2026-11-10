@@ -14,11 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/agent"
-	"github.com/utopiafallen/alcyona-agent/internal/auth"
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/store"
-	"github.com/utopiafallen/alcyona-agent/web"
+	"github.com/utopiafallen/bevin/internal/agent"
+	"github.com/utopiafallen/bevin/internal/auth"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/store"
+	"github.com/utopiafallen/bevin/web"
 )
 
 // Router is a swappable http.Handler for the in-process setup→normal transition.

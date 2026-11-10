@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/provider"
+	"github.com/utopiafallen/bevin/internal/provider"
 )
 
 // probeClient is a short-timeout client for endpoint probing, so a dead or

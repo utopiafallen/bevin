@@ -1,4 +1,4 @@
-// Command alcyona is the single-binary Alcyona assistant server: a web UI +
+// Command bevin is the single-binary Bevin assistant server: a web UI +
 // agent harness over an external model, with all state kept locally (per-user
 // SQLite). On first run (no server.toml) it serves the token-gated setup
 // wizard; after setup it serves the normal app — switching in-process, no
@@ -22,12 +22,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/auth"
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/server"
-	"github.com/utopiafallen/alcyona-agent/internal/setup"
-	"github.com/utopiafallen/alcyona-agent/internal/store"
-	"github.com/utopiafallen/alcyona-agent/web"
+	"github.com/utopiafallen/bevin/internal/auth"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/server"
+	"github.com/utopiafallen/bevin/internal/setup"
+	"github.com/utopiafallen/bevin/internal/store"
+	"github.com/utopiafallen/bevin/web"
 )
 
 func main() {
@@ -39,7 +39,7 @@ func main() {
 	flag.Parse()
 
 	if *port <= 0 {
-		fmt.Fprintln(os.Stderr, "alcyona: -port is required (no default)")
+		fmt.Fprintln(os.Stderr, "bevin: -port is required (no default)")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -49,18 +49,18 @@ func main() {
 	if dataDir == "" {
 		dataDir, err = config.DefaultDataDir()
 		if err != nil {
-			log.Fatalf("alcyona: cannot resolve binary dir: %v", err)
+			log.Fatalf("bevin: cannot resolve binary dir: %v", err)
 		}
 	} else {
 		dataDir, err = config.CleanPath(dataDir)
 		if err != nil {
-			log.Fatalf("alcyona: bad -data: %v", err)
+			log.Fatalf("bevin: bad -data: %v", err)
 		}
 	}
 
 	srvStore, err := store.OpenServer(dataDir)
 	if err != nil {
-		log.Fatalf("alcyona: open server store: %v", err)
+		log.Fatalf("bevin: open server store: %v", err)
 	}
 	defer srvStore.Close()
 	prov := auth.NewInternalProvider(srvStore, time.Duration(config.DefaultSessionTTLSeconds)*time.Second)
@@ -71,27 +71,27 @@ func main() {
 		// Normal mode: server.toml already exists.
 		app, err := server.NewNormal(dataDir, srvStore, prov)
 		if err != nil {
-			log.Fatalf("alcyona: start: %v", err)
+			log.Fatalf("bevin: start: %v", err)
 		}
 		defer app.Close()
 		router.Swap(app)
-		log.Printf("alcyona: normal mode (data %s)", dataDir)
+		log.Printf("bevin: normal mode (data %s)", dataDir)
 	} else {
 		// Setup mode: no server.toml yet. Serve only the wizard + /health.
 		token, err := setupToken()
 		if err != nil {
-			log.Fatalf("alcyona: setup token: %v", err)
+			log.Fatalf("bevin: setup token: %v", err)
 		}
 		mgr := setup.New(dataDir, *bind, *port, srvStore, prov, setup.NewSidecarManager(nil, nil))
 		h := setup.NewHandler(mgr, token, func() {
 			app, err := server.NewNormal(dataDir, srvStore, prov)
 			if err != nil {
-				log.Printf("alcyona: transition to normal mode failed: %v", err)
+				log.Printf("bevin: transition to normal mode failed: %v", err)
 				return
 			}
 			registerClose(app.Close)
 			router.Swap(app)
-			log.Printf("alcyona: setup complete — now in normal mode")
+			log.Printf("bevin: setup complete — now in normal mode")
 		})
 		mux := http.NewServeMux()
 		h.Routes(mux)
@@ -110,7 +110,7 @@ func main() {
 			serveBrandingAsset(mux, sub, "/fonts/nunito-variable.woff2", "fonts/nunito-variable.woff2", "font/woff2")
 		}
 		router.Swap(mux)
-		fmt.Printf("\nalcyona: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", displayHost(*bind), *port, token)
+		fmt.Printf("\nbevin: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", displayHost(*bind), *port, token)
 	}
 
 	addr := net.JoinHostPort(*bind, strconv.Itoa(*port))
@@ -119,19 +119,19 @@ func main() {
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("alcyona: listening on %s", addr)
+		log.Printf("bevin: listening on %s", addr)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 	select {
 	case <-ctx.Done():
-		log.Println("alcyona: shutting down")
+		log.Println("bevin: shutting down")
 	case err := <-errCh:
-		log.Fatalf("alcyona: server: %v", err)
+		log.Fatalf("bevin: server: %v", err)
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Printf("alcyona: shutdown: %v", err)
+		log.Printf("bevin: shutdown: %v", err)
 	}
 	for _, f := range closeOnExit {
 		f()

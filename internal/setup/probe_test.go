@@ -3,7 +3,7 @@ package setup
 import (
 	"testing"
 
-	"github.com/utopiafallen/alcyona-agent/internal/provider"
+	"github.com/utopiafallen/bevin/internal/provider"
 )
 
 // classifyRaw runs classify on a raw /models JSON body.

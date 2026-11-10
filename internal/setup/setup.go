@@ -13,10 +13,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/utopiafallen/alcyona-agent/internal/auth"
-	"github.com/utopiafallen/alcyona-agent/internal/config"
-	"github.com/utopiafallen/alcyona-agent/internal/provider"
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/auth"
+	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 // AdminAnswers is the identity step: the admin is always the self-IdP account.

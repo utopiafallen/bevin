@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>alcyona — setup</title>
+<title>bevin — setup</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/brand.css">
 <script>
-  (function(){try{var t=localStorage.getItem("alcyona-theme");
+  (function(){try{var t=localStorage.getItem("bevin-theme");
     if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
     document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light");}})();
 </script>
@@ -87,7 +87,7 @@
   <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
 </button>
 <div>
-  <a class="brand" href="/setup"><img src="/logo-mark.svg" alt="alcyona logo"> alcyona</a>
+  <a class="brand" href="/setup"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
   <div class="setup-title">First-time setup</div>
 </div>
 <p class="small">plain HTTP — put a reverse proxy in front for TLS &middot; Setup is token-gated and in-memory; nothing is written until you finish.</p>
@@ -376,7 +376,7 @@ document.getElementById("themeToggle").addEventListener("click", function(){
   var root=document.documentElement;
   var next = root.getAttribute("data-theme")==="dark" ? "light" : "dark";
   root.setAttribute("data-theme",next);
-  try{localStorage.setItem("alcyona-theme",next);}catch(e){}
+  try{localStorage.setItem("bevin-theme",next);}catch(e){}
 });
 render();
 </script>

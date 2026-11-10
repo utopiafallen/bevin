@@ -1,6 +1,6 @@
-# alcyona
+# bevin
 
-A general-purpose personal assistant agent in a single Go binary. Alcyona
+A general-purpose personal assistant agent in a single Go binary. Bevin
 learns about each user over time from conversations and completed tasks.
 It is primarily driven through a web UI and keeps all state locally in a
 single SQLite file.
@@ -20,7 +20,7 @@ history, per-user memory, tools, and streaming are TODO.
 ## Layout
 
 ```
-cmd/alcyona/           entry point: flags, wiring, graceful shutdown
+cmd/bevin/           entry point: flags, wiring, graceful shutdown
 internal/config/       runtime configuration (flags + env)
 internal/store/        SQLite persistence + schema
 internal/modelclient/  OpenAI-compatible chat client
@@ -32,18 +32,18 @@ web/                   embedded web UI assets
 ## Build
 
 ```
-make build            # bin/alcyona
-make build-linux      # bin/alcyona-linux-amd64
-make build-windows    # bin/alcyona-windows-amd64.exe
+make build            # bin/bevin
+make build-linux      # bin/bevin-linux-amd64
+make build-windows    # bin/bevin-windows-amd64.exe
 make test
 ```
 
 ## Run
 
 ```
-ALCYONA_MODEL_BASE_URL=http://localhost:11434/v1 \
-ALCYONA_MODEL_NAME=llama3.1 \
-./bin/alcyona -addr :8080
+BEVIN_MODEL_BASE_URL=http://localhost:11434/v1 \
+BEVIN_MODEL_NAME=llama3.1 \
+./bin/bevin -addr :8080
 ```
 
 Then open http://localhost:8080.
@@ -52,11 +52,11 @@ Then open http://localhost:8080.
 
 | Flag    | Env                    | Default                    | Meaning                          |
 |---------|------------------------|----------------------------|----------------------------------|
-| `-addr` | `ALCYONA_ADDR`         | `:8080`                    | HTTP listen address              |
-| `-data` | `ALCYONA_DATA_DIR`     | `~/.alcyona`               | state directory                  |
-|         | `ALCYONA_MODEL_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL     |
-|         | `ALCYONA_MODEL_API_KEY`  | (empty)                    | API key for the model            |
-|         | `ALCYONA_MODEL_NAME`     | `local-model`              | model identifier                 |
+| `-addr` | `BEVIN_ADDR`         | `:8080`                    | HTTP listen address              |
+| `-data` | `BEVIN_DATA_DIR`     | `~/.bevin`               | state directory                  |
+|         | `BEVIN_MODEL_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL     |
+|         | `BEVIN_MODEL_API_KEY`  | (empty)                    | API key for the model            |
+|         | `BEVIN_MODEL_NAME`     | `local-model`              | model identifier                 |
 
 ## API (skeleton)
 
@@ -65,7 +65,7 @@ Then open http://localhost:8080.
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE). Alcyona is a network service: the Affero
+AGPL-3.0 — see [LICENSE](LICENSE). Bevin is a network service: the Affero
 clause means that anyone who modifies it and offers it over a network must
 publish those modifications.
 

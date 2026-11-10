@@ -1,9 +1,9 @@
-// Package store persists Alcyona's local state in SQLite (pure-Go driver, no
+// Package store persists Bevin's local state in SQLite (pure-Go driver, no
 // cgo). There are two stores:
 //
 //   - ServerStore: server-level state in server.db (user registry S1,
 //     credentials, auth sessions).
-//   - UserStore: one user's learned state in users/<handle>/alcyona.db
+//   - UserStore: one user's learned state in users/<handle>/bevin.db
 //     (conversations, messages, memories, tasks, skills, workspaces, profile).
 //
 // One SQLite file per user gives structural isolation. Both run in WAL mode
@@ -27,18 +27,18 @@ import (
 
 const currentSchemaVersion = 1
 
-// UserStore is a single user's learned state (users/<handle>/alcyona.db).
+// UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
 	db  *sql.DB
 	dir string
 }
 
-// OpenUser opens (creating if needed) a user's alcyona.db under dir.
+// OpenUser opens (creating if needed) a user's bevin.db under dir.
 func OpenUser(dir string) (*UserStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "alcyona.db"))
+	db, err := sql.Open("sqlite", filepath.Join(dir, "bevin.db"))
 	if err != nil {
 		return nil, err
 	}

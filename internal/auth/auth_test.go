@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 func TestArgon2RoundTrip(t *testing.T) {

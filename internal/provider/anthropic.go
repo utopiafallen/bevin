@@ -19,7 +19,7 @@ const (
 // wire differs materially from OpenAI: system is a top-level field (not a
 // message role), max_tokens is required, auth is via x-api-key, and content is
 // a block list (text / image / tool_use / tool_result). It has no embeddings
-// endpoint — the alcyona embedder is always the local llama-server.
+// endpoint — the bevin embedder is always the local llama-server.
 type Anthropic struct {
 	BaseURL string // e.g. https://api.anthropic.com
 	APIKey  string
@@ -382,7 +382,7 @@ func (a *Anthropic) Models(ctx context.Context) ([]ModelInfo, error) {
 	return out, nil
 }
 
-// Embed is not supported by Anthropic; the alcyona embedder is always the
+// Embed is not supported by Anthropic; the bevin embedder is always the
 // local llama-server. Present to satisfy the Provider interface.
 func (a *Anthropic) Embed(ctx context.Context, model string, inputs []string) ([][]float32, error) {
 	return nil, fmt.Errorf("%s: embeddings are not supported (use the local llama-server embedder)", a.Name())

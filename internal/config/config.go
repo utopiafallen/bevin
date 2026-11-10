@@ -1,4 +1,4 @@
-// Package config loads and writes alcyona's TOML configuration.
+// Package config loads and writes bevin's TOML configuration.
 //
 // Configuration is TOML files only — no environment variables. Two tiers live
 // on disk: server.toml (admin tier, at the data-dir root; holds secrets so it
@@ -110,7 +110,7 @@ type Embedder struct {
 }
 
 // Sidecars holds endpoints/paths of external sidecar processes. In production
-// these bind to loopback so only alcyona (behind the reverse proxy) reaches
+// these bind to loopback so only bevin (behind the reverse proxy) reaches
 // them.
 type Sidecars struct {
 	Qdrant      string `toml:"qdrant" json:"qdrant"`
@@ -145,7 +145,7 @@ func Load(dir string) (*ServerConfig, error) {
 		return nil, fmt.Errorf("parse %s: %w", ServerFileName, err)
 	}
 	if cfg.Version > ConfigVersion {
-		return nil, fmt.Errorf("server.toml version %d is newer than this alcyona build (v%d) — upgrade alcyona", cfg.Version, ConfigVersion)
+		return nil, fmt.Errorf("server.toml version %d is newer than this bevin build (v%d) — upgrade bevin", cfg.Version, ConfigVersion)
 	}
 	if err := migrate(&cfg); err != nil {
 		return nil, err

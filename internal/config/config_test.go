@@ -103,11 +103,11 @@ func TestValidate(t *testing.T) {
 
 func TestCleanPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
-	got, err := CleanPath("~/alcyona")
+	got, err := CleanPath("~/bevin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(home, "alcyona"); got != want {
+	if want := filepath.Join(home, "bevin"); got != want {
 		t.Fatalf("CleanPath = %q want %q", got, want)
 	}
 	rel, err := CleanPath("sub/dir")

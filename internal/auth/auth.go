@@ -1,5 +1,5 @@
 // Package auth is the identity/auth seam. v1 is the internal provider
-// (alcyona acts as its own IdP — the "admin is always self-IdP" rule): users
+// (bevin acts as its own IdP — the "admin is always self-IdP" rule): users
 // are admin-provisioned (no self-service registration), passwords are
 // argon2id hashes, and sessions are opaque signed tokens in a cookie. A future
 // OAuth (authentik) provider implements the same Provider interface.
@@ -13,11 +13,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/utopiafallen/alcyona-agent/internal/store"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
-// SessionCookie is the name of the alcyona session cookie.
-const SessionCookie = "alcyona_session"
+// SessionCookie is the name of the bevin session cookie.
+const SessionCookie = "bevin_session"
 
 // ErrInvalidCredentials is the standard login failure.
 var ErrInvalidCredentials = errors.New("invalid credentials")
