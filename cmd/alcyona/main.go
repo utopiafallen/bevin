@@ -82,7 +82,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("alcyona: setup token: %v", err)
 		}
-		mgr := setup.New(dataDir, srvStore, prov, setup.NewSidecarManager(nil, nil))
+		mgr := setup.New(dataDir, *bind, *port, srvStore, prov, setup.NewSidecarManager(nil, nil))
 		h := setup.NewHandler(mgr, token, func() {
 			app, err := server.NewNormal(dataDir, srvStore, prov)
 			if err != nil {

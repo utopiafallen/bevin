@@ -22,7 +22,7 @@ func jsonReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
 func TestWizardTemplateRenders(t *testing.T) {
 	var buf bytes.Buffer
-	if err := wizardTmpl.Execute(&buf, map[string]any{"DataDir": "/tmp/x", "Steps": stepOrder}); err != nil {
+	if err := wizardTmpl.Execute(&buf, map[string]any{"DataDir": "/tmp/x", "Server": map[string]any{"bind": "0.0.0.0", "port": 5656, "dataDir": "/tmp/x"}, "Steps": stepOrder}); err != nil {
 		t.Fatalf("template execute: %v", err)
 	}
 	out := buf.String()
@@ -34,6 +34,9 @@ func TestWizardTemplateRenders(t *testing.T) {
 	}
 	if !strings.Contains(out, `["server"`) {
 		t.Fatalf("page missing STEPS JSON; head: %.200s", out)
+	}
+	if !strings.Contains(out, `"port":5656`) {
+		t.Fatalf("page missing server port; head: %.200s", out)
 	}
 }
 
@@ -62,7 +65,7 @@ func newTestSetup(t *testing.T) (*Manager, *fakeSidecars, string) {
 	prov := auth.NewInternalProvider(srv, time.Hour)
 	fs := &fakeSidecars{}
 	sm := NewSidecarManager(fs.probe, fs.install)
-	return New(dir, srv, prov, sm), fs, dir
+	return New(dir, "0.0.0.0", 5656, srv, prov, sm), fs, dir
 }
 
 func validAnswers(m *Manager) {

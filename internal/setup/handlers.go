@@ -76,7 +76,7 @@ func (h *Handler) page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = wizardTmpl.Execute(w, map[string]any{"DataDir": h.mgr.dataDir, "Steps": stepOrder})
+	_ = wizardTmpl.Execute(w, map[string]any{"DataDir": h.mgr.dataDir, "Server": map[string]any{"bind": h.mgr.bind, "port": h.mgr.port, "dataDir": h.mgr.dataDir}, "Steps": stepOrder})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

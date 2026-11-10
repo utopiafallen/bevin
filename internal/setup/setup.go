@@ -47,6 +47,8 @@ type SetupState struct {
 // Manager drives the wizard. It is safe for concurrent use.
 type Manager struct {
 	dataDir string
+	bind    string
+	port    int
 	srv     *store.ServerStore
 	prov    auth.Provider
 	sidecars *SidecarManager
@@ -59,11 +61,11 @@ type Manager struct {
 // New builds a setup Manager. srv/prov are the live server store + auth
 // provider (so Finalize can seed the admin into the same store the server
 // uses); sidecars provisions the local sidecar processes.
-func New(dataDir string, srv *store.ServerStore, prov auth.Provider, sidecars *SidecarManager) *Manager {
+func New(dataDir, bind string, port int, srv *store.ServerStore, prov auth.Provider, sidecars *SidecarManager) *Manager {
 	if sidecars == nil {
 		sidecars = NewSidecarManager(nil, nil)
 	}
-	return &Manager{dataDir: dataDir, srv: srv, prov: prov, sidecars: sidecars}
+	return &Manager{dataDir: dataDir, bind: bind, port: port, srv: srv, prov: prov, sidecars: sidecars}
 }
 
 // IsSetup reports whether server.toml already exists (i.e. setup is done).
@@ -192,7 +194,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	}
 	cfg := &config.ServerConfig{
 		DataDir:          m.dataDir,
-		Bind:             "0.0.0.0",
+		Bind:             m.bind,
 		Logging:          config.Logging{Level: "info"},
 		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds},
 		Models:           a.Models,
