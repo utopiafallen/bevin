@@ -243,3 +243,38 @@ func TestResolveDisplayName(t *testing.T) {
 		t.Fatal("unknown display name should not resolve")
 	}
 }
+
+func TestModelAvailable(t *testing.T) {
+	cases := []struct {
+		name    string
+		m       Model
+		want    bool
+	}{
+		{"enabled + not auto-disabled", Model{Enabled: true}, true},
+		{"enabled + auto-disabled", Model{Enabled: true, AutoDisabled: true}, false},
+		{"disabled + not auto-disabled", Model{Enabled: false}, false},
+		{"disabled + auto-disabled", Model{Enabled: false, AutoDisabled: true}, false},
+	}
+	for _, c := range cases {
+		if got := c.m.Available(); got != c.want {
+			t.Errorf("%s: Available() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestResolveDisplayNameAutoDisabled(t *testing.T) {
+	models := []Model{
+		{ID: "a", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 1, Enabled: true},
+		{ID: "b", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 4, Enabled: true, AutoDisabled: true},
+	}
+	// b is auto-disabled, so a (the only available one) wins even though it has
+	// fewer slots.
+	got, ok := ResolveDisplayName(models, "Fast", nil)
+	if !ok || got.ID != "a" {
+		t.Fatalf("got = %+v ok=%v, want a (b auto-disabled)", got, ok)
+	}
+	// A display name with only auto-disabled models -> not found.
+	if _, ok := ResolveDisplayName([]Model{{ID: "z", DisplayName: "Off", Enabled: true, AutoDisabled: true}}, "Off", nil); ok {
+		t.Fatal("auto-disabled-only display name should not resolve")
+	}
+}

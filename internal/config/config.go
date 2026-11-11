@@ -80,7 +80,12 @@ type Model struct {
 	MaxContext  int      `toml:"max_context" json:"max_context"`
 	Slots       int      `toml:"slots" json:"slots"`
 	Enabled     bool     `toml:"enabled" json:"enabled"`
-	Metadata    Metadata `toml:"metadata" json:"metadata"`
+	// AutoDisabled is set by the agent when the provider reports this model is
+	// unavailable (e.g. the model was deleted/renamed upstream) and cleared when
+	// a later attempt succeeds. It is independent of the admin's Enabled flag:
+	// a model is usable only when Enabled && !AutoDisabled.
+	AutoDisabled bool     `toml:"auto_disabled" json:"auto_disabled"`
+	Metadata     Metadata `toml:"metadata" json:"metadata"`
 }
 
 // Metadata is the admin choice-metadata surfaced to help users pick a model
@@ -90,6 +95,12 @@ type Metadata struct {
 	Knowledge int `toml:"knowledge" json:"knowledge"`
 	Speed     int `toml:"speed" json:"speed"`
 }
+
+// Available reports whether the model is usable by the agent: admin-enabled and
+// not auto-disabled (e.g. the provider reported it unavailable). The two flags
+// are independent, so an admin can disable a model while the auto-disable state
+// is tracked separately.
+func (m Model) Available() bool { return m.Enabled && !m.AutoDisabled }
 
 // AuxModel is an admin-set perception model (vision/audio/video), hidden from
 // the user and used mid-conversation to comprehend a non-text asset.
@@ -287,8 +298,9 @@ func GenerateSessionSecret() (string, error) {
 
 // ResolveDisplayName maps a (possibly overloaded) display name to the concrete
 // Model a conversation should use. Several configured models may share one
-// display name (many-to-one); among the ENABLED models with that display name,
-// it returns the one with the most idle execution capacity.
+// display name (many-to-one); among the AVAILABLE models (Enabled and not
+// auto-disabled) with that display name, it returns the one with the most idle
+// execution capacity.
 //
 // idleSlots reports a model's currently idle slots (from the per-model slot
 // scheduler); pass nil before that exists to fall back to total slot capacity,
@@ -299,7 +311,7 @@ func GenerateSessionSecret() (string, error) {
 func ResolveDisplayName(models []Model, displayName string, idleSlots func(Model) int) (Model, bool) {
 	var candidates []Model
 	for _, m := range models {
-		if m.Enabled && m.DisplayName == displayName {
+		if m.Available() && m.DisplayName == displayName {
 			candidates = append(candidates, m)
 		}
 	}
