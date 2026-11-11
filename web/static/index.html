@@ -34,6 +34,7 @@
     <header class="topbar">
       <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
       <span class="chip"><span class="dot"></span> brand preview</span>
+      <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/setup" style="display:none;" title="Edit models &amp; config (admin)">Models</a>
     </header>
 
     <section class="card" style="margin-bottom:1rem;">
@@ -110,6 +111,15 @@
     fetch("/health").then(function (r) { return r.json(); })
       .then(function (j) { document.getElementById("health").textContent = "health " + (j.status || "ok"); })
       .catch(function (e) { document.getElementById("health").textContent = "preview (no server)"; });
+
+    // Reveal the admin model-editor link if the session user is an admin.
+    fetch("/api/me").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (j && j.role === "admin") {
+          var el = document.getElementById("adminSetupLink");
+          if (el) el.style.display = "";
+        }
+      }).catch(function () {});
 
     var form = document.getElementById("chat");
     var log = document.getElementById("chatLog");

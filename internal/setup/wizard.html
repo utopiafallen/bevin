@@ -89,6 +89,8 @@
   .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
   .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px; }
   .model-table .baseurl { max-width:160px; }
+  .model-table .badge-unavail { display:inline-block; font-size:.7rem; font-weight:700; color:var(--danger); background:color-mix(in srgb, var(--danger) 14%, transparent); padding:.08rem .42rem; border-radius:999px; }
+  .form-notice { font-size:.82rem; color:var(--text); background:color-mix(in srgb, var(--warn) 14%, transparent); border:1px solid var(--warn); padding:.5rem .7rem; border-radius:var(--radius); margin:.6rem 0; }
 </style>
 </head>
 <body>
@@ -118,8 +120,11 @@
 <script>
 const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
-let idx = 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {} };
+const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
+// In edit mode the routes are namespaced under /admin and the admin-identity
+// step is skipped (the admin already exists), so start on the models step.
+let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -213,6 +218,7 @@ function renderModelForm(){
       field("Display name", el("div",{}, disp, dl)),
       field("Enable for users", en)),
     el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
+    (m.auto_disabled ? el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.") : null),
     el("h5",{class:"scores-header"},"Scores (1-10)"),
     el("p",{class:"field-help"},"Help the user gauge a model's strengths when picking one for a conversation — informational only; it does not change how the agent runs."),
     scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }, locked),
@@ -267,7 +273,7 @@ function renderModelList(){
       el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
       el("td",{}, m.max_context?m.max_context:"auto"),
       el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
-      el("td",{}, m.enabled?"yes":"no"),
+      el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
       el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
   });
   t.append(tb);
@@ -309,7 +315,7 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
 const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, embedder:renderEmbedder, sidecars:renderSidecars, review:renderReview };
 
 // ---- model form helpers ----
-function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}; }
+function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}; }
 // base-URL normalization for "is this the same provider?" comparisons — match the
 // server probe, which treats scheme/host variants and a trailing /v1 as the same
 // endpoint (it tries /models and /v1/models). Trim, drop trailing slashes, drop /v1.
@@ -354,6 +360,11 @@ function saveModel(){
   if(!m.max_context){ S.formError="Max context is required — the provider did not expose it, so enter it manually."; render(); return; }
   const wasEditing=S.editingIndex!==-1;
   const toSave=deepCopy(m); delete toSave._models;
+  // max_context is a string in the draft (from the input); the server's config
+  // expects an int, so normalize it before the model enters S.models.
+  const mc=parseInt(toSave.max_context,10);
+  if(!Number.isFinite(mc) || mc<=0){ S.formError="Max context must be a positive integer (tokens)."; render(); return; }
+  toSave.max_context=mc;
   if(!wasEditing){ S.models.push(toSave); } else { const idx=Math.min(S.editingIndex,S.models.length); S.models.splice(idx,0,toSave); }
   resetDraft(); render(); msg(wasEditing?"Model saved.":"Model added.","ok");
 }
@@ -402,7 +413,7 @@ function render(){
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
   refreshScoreFills();
 }
-async function api(method, path, body){ const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(path,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
+async function api(method, path, body){ const url = IS_EDIT ? "/admin" + path : path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, embedder, sidecars via id-based reads)
@@ -418,7 +429,7 @@ async function doNext(){
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
 async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],embedder:{base_url:""},sidecars:{qdrant:"",llama_server:"",ffmpeg:""}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
-async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
+async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); if(IS_EDIT){ msg("Done — config saved; the agent will pick up the changes.","ok"); document.getElementById("body").innerHTML="<h3>Config updated</h3><p>Your model changes are saved. <a href='/'>Back to bevin</a></p>"; } else { msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; } document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
 function q(s){ return document.querySelector(s); }
 
 document.getElementById("next").onclick=doNext;

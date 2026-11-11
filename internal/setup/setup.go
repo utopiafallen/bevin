@@ -115,6 +115,57 @@ func (m *Manager) clearStep(step string) {
 	}
 }
 
+// LoadFromConfig populates the wizard state from an existing server.toml so the
+// wizard can be re-run in normal mode to edit the config. It preserves the
+// existing session secret, auth, and sidecar endpoints (only the editable
+// fields — models, aux, embedder — are surfaced for editing).
+func (m *Manager) LoadFromConfig() error {
+	cfg, err := config.Load(m.dataDir)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.Answers = Answers{
+		Models:   cfg.Models,
+		Aux:      cfg.Aux,
+		Embedder: cfg.Embedder,
+		Sidecars: cfg.Sidecars,
+	}
+	return nil
+}
+
+// FinalizeEdit commits an edited config in normal mode: it updates the models,
+// aux, and embedder on the existing server.toml (preserving the session secret,
+// auth, bind, port, and sidecar endpoints) without re-seeding the admin.
+func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg, err := config.Load(m.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	a := m.state.Answers
+	if err := validateModels(a.Models); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(a.Embedder.BaseURL) == "" {
+		return nil, errors.New("embedder base_url is required")
+	}
+	cfg.Models = a.Models
+	cfg.Aux = a.Aux
+	cfg.Embedder = a.Embedder
+	cfg.Sidecars = a.Sidecars
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := config.Save(m.dataDir, cfg); err != nil {
+		return nil, err
+	}
+	m.finished = true
+	return cfg, nil
+}
+
 // SetAdmin stores + validates the identity step.
 func (m *Manager) SetAdmin(a AdminAnswers) error {
 	if err := validateAdmin(a); err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/agent"
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
 	"github.com/utopiafallen/bevin/web"
 )
@@ -53,6 +54,8 @@ type App struct {
 	ag   *agent.Agent
 	mux  *http.ServeMux
 	ttl  time.Duration
+	dataDir string
+	edit *setup.Manager
 }
 
 // NewNormal builds the normal-mode app from a loaded config.
@@ -65,7 +68,8 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second}
+	edit := setup.New(dataDir, cfg.Bind, 0, srv, prov, nil)
+	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit}
 	a.routes()
 	return a, nil
 }
@@ -85,10 +89,28 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /api/models", a.requireAuth(a.models))
 	mux.HandleFunc("POST /api/conversations", a.requireAuth(a.createConversation))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.requireAuth(a.sendMessage))
+	// Normal-mode edit: re-run the setup wizard to edit the live config, gated
+	// on an admin session.
+	edit := setup.NewEditHandler(a.edit, a.adminGate)
+	edit.Routes(mux)
 	if sub, err := fs.Sub(web.FS, "static"); err == nil {
 		mux.Handle("GET /", http.FileServerFS(sub))
 	}
 	a.mux = mux
+}
+
+// adminGate authenticates the request and returns the user's role (empty on
+// failure). Used by the normal-mode edit routes to require an admin.
+func (a *App) adminGate(r *http.Request) (string, bool) {
+	tok, err := auth.SessionToken(r)
+	if err != nil {
+		return "", false
+	}
+	u, err := a.prov.UserFromToken(r.Context(), tok)
+	if err != nil {
+		return "", false
+	}
+	return u.Role, true
 }
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {

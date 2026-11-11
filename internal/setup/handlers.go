@@ -53,6 +53,205 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/finalize", h.finalize)
 }
 
+// adminGate is a pluggable auth check for the normal-mode edit routes. It
+// returns the authenticated user's role (empty on failure); the caller
+// requires "admin".
+type adminGate func(r *http.Request) (role string, ok bool)
+
+// EditHandler serves the setup wizard in normal mode (to edit the live config).
+// It is gated on an admin session (via the gate function) rather than the
+// one-time setup token, and finalizes via FinalizeEdit (no re-seed, no
+// secret regeneration).
+type EditHandler struct {
+	mgr  *Manager
+	gate adminGate
+}
+
+// NewEditHandler builds the normal-mode edit handler. gate authenticates the
+// request and returns the user's role.
+func NewEditHandler(mgr *Manager, gate adminGate) *EditHandler {
+	return &EditHandler{mgr: mgr, gate: gate}
+}
+
+func (h *EditHandler) admin(w http.ResponseWriter, r *http.Request) bool {
+	role, ok := h.gate(r)
+	if !ok || role != "admin" {
+		http.Error(w, "admin required", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// Routes registers the normal-mode edit routes on mux.
+func (h *EditHandler) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("/admin/setup", h.page)
+	mux.HandleFunc("/admin/setup/state", h.state)
+	mux.HandleFunc("/admin/setup/advance", h.advance)
+	mux.HandleFunc("/admin/setup/back", h.back)
+	mux.HandleFunc("/admin/setup/cancel", h.cancel)
+	mux.HandleFunc("/admin/setup/test-model", h.testModel)
+	mux.HandleFunc("/admin/setup/probe-model", h.probeModel)
+	mux.HandleFunc("/admin/setup/finalize", h.finalize)
+}
+
+func (h *EditHandler) page(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if err := h.mgr.LoadFromConfig(); err != nil {
+		http.Error(w, "failed to load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = wizardTmpl.Execute(w, map[string]any{"DataDir": h.mgr.dataDir, "Server": map[string]any{"bind": h.mgr.bind, "port": h.mgr.port, "dataDir": h.mgr.dataDir}, "Steps": stepOrder, "Edit": true})
+}
+
+func (h *EditHandler) state(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := h.mgr.LoadFromConfig(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"setup":   true,
+		"answers": h.mgr.Answers(),
+		"steps":   stepOrder,
+		"data_dir": h.mgr.dataDir,
+		"edit":    true,
+	})
+}
+
+func (h *EditHandler) advance(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var p advancePayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var err error
+	switch p.Step {
+	case "server", "admin", "review":
+		// review-only / pre-filled in edit mode
+	case "models":
+		err = h.mgr.SetModels(p.Models)
+	case "aux":
+		err = h.mgr.SetAux(p.Aux)
+	case "embedder":
+		err = h.mgr.SetEmbedder(p.Embedder)
+	case "sidecars":
+		err = h.mgr.SetSidecars(p.Sidecars)
+	default:
+		err = fmt.Errorf("unknown step %q", p.Step)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *EditHandler) back(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var p struct {
+		Step string `json:"step"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&p)
+	h.mgr.StepBack(p.Step)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *EditHandler) cancel(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.mgr.Cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *EditHandler) testModel(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	var m config.Model
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := provider.New(strings.ToLower(m.Provider), m.BaseURL, m.APIKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	models, err := p.Models(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model_count": len(models), "models": models})
+}
+
+func (h *EditHandler) probeModel(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var p struct {
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := probeEndpoint(r.Context(), p.BaseURL, p.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
+}
+
+func (h *EditHandler) finalize(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg, err := h.mgr.FinalizeEdit(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data_dir": cfg.DataDir})
+}
+
 // gate checks the one-time setup token (query param, echoed into a cookie on
 // first load).
 func (h *Handler) gate(w http.ResponseWriter, r *http.Request) bool {

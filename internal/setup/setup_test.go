@@ -215,6 +215,54 @@ func TestDownloadResumable(t *testing.T) {
 	}
 }
 
+func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	validAnswers(m)
+	cfg, err := m.Finalize(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Load the config into the wizard state (normal-mode edit).
+	if err := m.LoadFromConfig(); err != nil {
+		t.Fatal(err)
+	}
+	a := m.Answers()
+	if len(a.Models) != 1 || a.Models[0].ID != "m1" {
+		t.Fatalf("expected 1 model m1, got %+v", a.Models)
+	}
+	// Edit: add a second model + mark the first auto-disabled (simulating the
+	// agent's runtime auto-disable).
+	edited := append([]config.Model{}, a.Models...)
+	edited[0].AutoDisabled = true
+	edited = append(edited, config.Model{
+		ID: "m2", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "***",
+		ModelID: "gpt-4o-mini", DisplayName: "GPT-4o mini", MaxContext: 128000, Slots: 1, Enabled: true,
+	})
+	if err := m.SetModels(edited); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := m.FinalizeEdit(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg2.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(cfg2.Models))
+	}
+	// The session secret is preserved (not regenerated) on edit.
+	if cfg2.Auth.SessionSecret != cfg.Auth.SessionSecret {
+		t.Fatal("session secret should be preserved on edit")
+	}
+	// The auto-disabled state survives the edit (m1 was auto-disabled).
+	for _, m := range cfg2.Models {
+		if m.ID == "m1" && !m.AutoDisabled {
+			t.Fatal("auto-disabled state should be preserved on edit")
+		}
+		if m.ID == "m2" && m.AutoDisabled {
+			t.Fatal("new model should not be auto-disabled")
+		}
+	}
+}
+
 func TestSetupHandler(t *testing.T) {
 	m, _, _ := newTestSetup(t)
 	transitioned := false
