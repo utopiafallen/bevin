@@ -87,6 +87,7 @@
   .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
   .model-table .row-btn:hover { background:var(--surface-2); }
   .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
+  .model-table .baseurl { display:block; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -155,11 +156,15 @@ function renderModelForm(){
   // half A: provider configuration
   const halfA=el("div",{class:"config-half"}, el("h4",{}, "Provider configuration"));
   const base=inp("mf_base", m.base_url, "https://api.openai.com");
+  // combobox — once a provider has been added, re-select its base URL from the datalist
+  base.setAttribute("list","mf_base_urls");
+  const baseDl=el("datalist",{id:"mf_base_urls"});
+  [...new Set(S.models.map(x=>(x.base_url||"").trim()).filter(Boolean))].forEach(u=>{ baseDl.append(el("option",{value:u})); });
   const key=inp("mf_key", m.api_key, "blank for a local llama-server");
   const provLabel=m.provider?el("span",{class:"kv"},m.provider):el("span",{class:"small"},"— press Detect —");
   // Detect / Clear centered under the base URL + API key (the association is clear)
   halfA.append(
-    el("div",{class:"row"}, field("Base URL",base), field("API key",key)),
+    el("div",{class:"row"}, field("Base URL", el("div",{}, base, baseDl)), field("API key",key)),
     el("div",{class:"form-btns"},
       el("button",{class:"ghost", onclick:"cancelEdit()"}, editing?"Cancel":"Clear"),
       el("button",{class:"primary", onclick:"detectModel()"},"Detect")),
@@ -171,9 +176,12 @@ function renderModelForm(){
   const halfB=el("div",{class:"config-half"}, el("h4",{}, "In-agent UI (what users see)"));
   // Model (the provider's model id)
   const sel=el("select",{id:"mf_sel"});
-  if(!(m._models||[]).length){ sel.append(el("option",{value:""},"— press Detect —")); }
-  (m._models||[]).forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); });
-  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=(m._models||[]).find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
+  const allModels=m._models||[];
+  const available=allModels.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); // hide models already added for this provider
+  if(!allModels.length){ sel.append(el("option",{value:""},"— press Detect —")); }
+  else if(!available.length){ sel.append(el("option",{value:"", disabled:true, selected:true}, "all "+allModels.length+" model(s) from this provider are already added")); }
+  else { available.forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); }); }
+  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=allModels.find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
   // Max context
   const ctx=el("input",{id:"mf_ctx", value:m.max_context||"", class:m.context_auto?"ctx-disabled":null});
   if(m.context_auto) ctx.setAttribute("disabled","");
@@ -225,7 +233,7 @@ function renderModelList(){
   if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
   const t=el("table",{class:"model-table"});
   t.append(el("thead",{}, el("tr",{},
-    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
+    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
   const tb=el("tbody",{});
   S.models.forEach((m,i)=>{
     const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
@@ -234,6 +242,7 @@ function renderModelList(){
       el("td",{}, el("div",{class:"reorder"}, up, dn)),
       el("td",{}, m.display_name||"(unnamed)"),
       el("td",{}, m.provider||"—"),
+      el("td",{}, el("span",{class:"kv baseurl", title:m.base_url||""}, m.base_url||"—")),
       el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
       el("td",{}, m.max_context?m.max_context:"auto"),
       el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
@@ -280,6 +289,12 @@ const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, au
 
 // ---- model form helpers ----
 function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}; }
+// base-URL normalization for "is this the same provider?" comparisons — match the
+// server probe, which treats scheme/host variants and a trailing /v1 as the same
+// endpoint (it tries /models and /v1/models). Trim, drop trailing slashes, drop /v1.
+function normBase(u){ return (u||"").trim().replace(/\/+$/,"").replace(/\/v1$/i,""); }
+// is this model id already added for this base URL (i.e. already in the model list for this provider)?
+function modelAlreadyAdded(id, base){ return S.models.some(x => x.model_id===id && normBase(x.base_url)===normBase(base)); }
 function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
 function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
 // lock the R/K/S + enabled to a display name's pre-existing values (so every model
@@ -343,7 +358,7 @@ function refreshScoreFills(){ requestAnimationFrame(function(){ document.querySe
 let _scoreResize=null; window.addEventListener("resize",function(){ if(_scoreResize)clearTimeout(_scoreResize); _scoreResize=setTimeout(refreshScoreFills,120); });
 function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
 // detect — call the probe endpoint, learn the provider, list the models + context lengths
-async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext){ m.max_context=String(r.models[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
+async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); if(avail.length && !avail.some(x=>x.ID===m.model_id)){ m.model_id=avail[0].ID; if(avail[0].MaxContext){ m.max_context=String(avail[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
 function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
 function removeAux(i){ S.aux.splice(i,1); render(); }
 async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
