@@ -48,8 +48,8 @@
      gradient's 100% == the element width and the fill's right edge lands on the thumb's
      center (the thumb is inset by its own radius, 9px, from each end) */
   input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; border:none; box-shadow: inset 0 0 0 1px var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
-  input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
-  input.score::-moz-range-thumb { width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
+  input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
+  input.score::-moz-range-thumb { box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   input.score:disabled { opacity:.5; cursor:not-allowed; }
   /* Enable for users — a Yes/No segmented button that fills the field width */
   .yesno { display:flex; width:100%; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
@@ -330,7 +330,9 @@ function reorderModel(i,dir){
 }
 // score slider — a progress bar whose fill goes red (1) → yellow (5) → green (10)
 function scoreColor(v){ const hue = v<=5 ? (v-1)/4*60 : 60+(v-5)/5*60; return "hsl("+hue+",70%,45%)"; }
-function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setProperty("--val",(v-1)/9); input.style.setProperty("--score-color",scoreColor(v)); }
+function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setProperty("--score-color",scoreColor(v)); const f=(v-1)/9; input.style.setProperty("--val",f); const W=input.clientWidth; if(W>0){ input.style.setProperty("--pos",(f*(W-18)+9)+"px"); } }
+function refreshScoreFills(){ requestAnimationFrame(function(){ document.querySelectorAll("input.score").forEach(scoreFill); }); }
+let _scoreResize=null; window.addEventListener("resize",function(){ if(_scoreResize)clearTimeout(_scoreResize); _scoreResize=setTimeout(refreshScoreFills,120); });
 function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
 // detect — call the probe endpoint, learn the provider, list the models + context lengths
 async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; if(r.models.length && !r.models.some(x=>x.ID===m.model_id)){ m.model_id=r.models[0].ID; if(r.models[0].MaxContext){ m.max_context=String(r.models[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
@@ -348,6 +350,7 @@ function render(){
   STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); });
   document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
+  refreshScoreFills();
 }
 async function api(method, path, body){ const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(path,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 async function doNext(){
