@@ -44,10 +44,18 @@
   .score-row { display:flex; align-items:center; gap:.55rem; }
   .score-row .score { flex:1; }
   .score-val { font-family:var(--font-mono); font-size:.78rem; font-weight:700; min-width:1.6em; text-align:center; color:var(--text-muted); }
-  /* slider — no border on the input (box-shadow inset for the visual border), so the
-     gradient's 100% == the element width and the fill's right edge lands on the thumb's
-     center (the thumb is inset by its own radius, 9px, from each end) */
-  input.score { -webkit-appearance:none; appearance:none; width:100%; height:10px; border-radius:6px; border:none; box-shadow: inset 0 0 0 1px var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
+  /* slider — the fill's right edge must land on the thumb center. Two non-obvious
+     resets, both of which used to break alignment in real browsers:
+     (1) padding:0 — the global `input` rule sets padding:0.6rem 0.85rem, so the
+         thumb otherwise travels on the narrower CONTENT box (inset ~13.6px) while
+         the fill gradient spans the full border box, giving a value-dependent
+         offset (fill short at low, long at high).
+     (2) no border (box-shadow inset for the visual border) — a real 1px border
+         (border-box) shifts the gradient's 100% vs the thumb's travel range by 2px.
+     With padding:0 + no border, the thumb (18px, box-sizing:border-box) travels the
+     full clientWidth, so the JS-computed fill position (see scoreFill) lands on the
+     thumb center at every value + width. */
+  input.score { -webkit-appearance:none; appearance:none; padding:0; width:100%; height:10px; border-radius:6px; border:none; box-shadow: inset 0 0 0 1px var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
   input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   input.score::-moz-range-thumb { box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
   input.score:disabled { opacity:.5; cursor:not-allowed; }
