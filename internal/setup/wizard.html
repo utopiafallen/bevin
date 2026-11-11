@@ -407,8 +407,9 @@ function sync(id, v){ /* handled by per-field listeners */ }
 function render(){
   document.getElementById("body").innerHTML="";
   document.getElementById("body").append(RENDER[STEPS[idx]]());
-  const st=document.getElementById("steps"); st.innerHTML="";
-  STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); });
+  const st=document.getElementById("steps");
+  if(IS_EDIT){ st.style.display="none"; } else { st.style.display=""; st.innerHTML="";
+    STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); }); }
   document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
   refreshScoreFills();
