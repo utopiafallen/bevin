@@ -13,7 +13,7 @@
 </script>
 <style>
   /* wizard layout, on top of brand.css (Nunito + warm tokens) */
-  body { max-width: 760px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
+  body { max-width: 920px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
   .setup-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; margin: .3rem 0 0; }
   .steps { display:flex; gap:.4rem; flex-wrap:wrap; margin: 1.1rem 0 .4rem; }
   .step { padding:.2rem .7rem; border:1px solid var(--border); border-radius:999px; font-size:.8rem; font-weight:700; color:var(--text-muted); background:var(--surface); }
@@ -79,7 +79,7 @@
   input.ctx-disabled { opacity:.65; cursor:not-allowed; }
   /* model list table */
   .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
-  .model-table th, .model-table td { text-align:left; padding:.42rem .5rem; border-bottom:1px solid var(--border); }
+  .model-table th, .model-table td { text-align:left; padding:.36rem .45rem; border-bottom:1px solid var(--border); }
   .model-table th { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
   .model-table .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
   .model-table .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
@@ -87,7 +87,8 @@
   .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
   .model-table .row-btn:hover { background:var(--surface-2); }
   .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
-  .model-table .baseurl { display:block; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px; }
+  .model-table .baseurl { max-width:160px; }
 </style>
 </head>
 <body>
@@ -118,7 +119,7 @@
 const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
 let idx = 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""} };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], embedder: {base_url:""}, sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -222,10 +223,30 @@ function renderModelForm(){
   // the save button
   f.append(el("div",{class:"btns"}, el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
   // wire the inputs
-  base.addEventListener("input",()=>{ m.base_url=base.value; S.formError=null; });
+  base.addEventListener("input",()=>{
+    m.base_url=base.value; S.formError=null;
+    const nb=(base.value||"").trim();
+    if(nb && isKnownProvider(nb) && normBase(nb)!==normBase(_lastAutoBase)){
+      _lastAutoBase=base.value;
+      const cached=S.detectedCache[normBase(nb)];
+      if(cached){
+        // re-use the previously detected result — no re-fetch
+        m._models=cached.models; m.provider=cached.provider;
+        const avail=cached.models.filter(x=>!modelAlreadyAdded(x.ID, m.base_url));
+        m.model_id=avail.length?avail[0].ID:"";
+        if(m.model_id){ const sel=cached.models.find(x=>x.ID===m.model_id); if(sel&&sel.MaxContext){ m.max_context=String(sel.MaxContext); m.context_auto=true; } }
+        render();
+      } else {
+        detectModel();
+      }
+    } else {
+      _lastAutoBase=base.value;
+    }
+  });
   key.addEventListener("input",()=>{ m.api_key=key.value; S.formError=null; });
   disp.addEventListener("input",()=>{ m.display_name=disp.value; });
   disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });
+  _lastAutoBase=m.base_url; // sync so re-rendering the form doesn't auto-detect the current value
   return f;
 }
 function renderModelList(){
@@ -240,7 +261,7 @@ function renderModelList(){
     const dn=el("button",{title:"Move down", onclick:`reorderModel(${i},1)`}, "\u25bc"); if(i===S.models.length-1) dn.setAttribute("disabled","");
     tb.append(el("tr",{},
       el("td",{}, el("div",{class:"reorder"}, up, dn)),
-      el("td",{}, m.display_name||"(unnamed)"),
+      el("td",{}, el("span",{class:"kv", title:m.display_name||""}, m.display_name||"(unnamed)")),
       el("td",{}, m.provider||"—"),
       el("td",{}, el("span",{class:"kv baseurl", title:m.base_url||""}, m.base_url||"—")),
       el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
@@ -295,6 +316,12 @@ function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",di
 function normBase(u){ return (u||"").trim().replace(/\/+$/,"").replace(/\/v1$/i,""); }
 // is this model id already added for this base URL (i.e. already in the model list for this provider)?
 function modelAlreadyAdded(id, base){ return S.models.some(x => x.model_id===id && normBase(x.base_url)===normBase(base)); }
+// is this base URL already a configured provider (in the model list)? drives auto-detect
+// when the admin re-selects an existing provider from the Base URL combobox.
+function isKnownProvider(base){ return S.models.some(x => (x.base_url||"").trim()!=="" && normBase(x.base_url)===normBase(base)); }
+// auto-detect state: re-selecting a known provider re-uses the previously detected
+// model list (no re-fetch). _lastAutoBase avoids re-triggering on the same value.
+let _lastAutoBase="";
 function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
 function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
 // lock the R/K/S + enabled to a display name's pre-existing values (so every model
@@ -358,7 +385,7 @@ function refreshScoreFills(){ requestAnimationFrame(function(){ document.querySe
 let _scoreResize=null; window.addEventListener("resize",function(){ if(_scoreResize)clearTimeout(_scoreResize); _scoreResize=setTimeout(refreshScoreFills,120); });
 function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
 // detect — call the probe endpoint, learn the provider, list the models + context lengths
-async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); if(avail.length && !avail.some(x=>x.ID===m.model_id)){ m.model_id=avail[0].ID; if(avail[0].MaxContext){ m.max_context=String(avail[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
+async function detectModel(){ const m=S.modelDraft; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; } S.formError=null; msg("Detecting "+m.base_url+"…",""); try{ const r=await api("POST","/setup/probe-model",{base_url:m.base_url, api_key:m.api_key}); m.provider=r.provider; m._models=r.models; S.detectedCache[normBase(m.base_url)]={provider:r.provider, models:r.models}; const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); if(avail.length && !avail.some(x=>x.ID===m.model_id)){ m.model_id=avail[0].ID; if(avail[0].MaxContext){ m.max_context=String(avail[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); render(); }catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); render(); } }
 function addAux(){ S.aux.push({modality:"vision",provider:"llama",base_url:"",api_key:"",model_id:""}); render(); }
 function removeAux(i){ S.aux.splice(i,1); render(); }
 async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
