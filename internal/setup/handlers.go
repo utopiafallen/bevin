@@ -82,16 +82,20 @@ func (h *EditHandler) admin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// Routes registers the normal-mode edit routes on mux.
+// Routes registers the normal-mode edit routes on mux. The methods are explicit
+// (GET for the page + state, POST for the mutations) rather than any-method, so
+// they don't conflict with the "GET /" static-asset catch-all the normal-mode
+// app registers — Go's ServeMux rejects an any-method route that a method+subtree
+// route would shadow.
 func (h *EditHandler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("/admin/setup", h.page)
-	mux.HandleFunc("/admin/setup/state", h.state)
-	mux.HandleFunc("/admin/setup/advance", h.advance)
-	mux.HandleFunc("/admin/setup/back", h.back)
-	mux.HandleFunc("/admin/setup/cancel", h.cancel)
-	mux.HandleFunc("/admin/setup/test-model", h.testModel)
-	mux.HandleFunc("/admin/setup/probe-model", h.probeModel)
-	mux.HandleFunc("/admin/setup/finalize", h.finalize)
+	mux.HandleFunc("GET /admin/setup", h.page)
+	mux.HandleFunc("GET /admin/setup/state", h.state)
+	mux.HandleFunc("POST /admin/setup/advance", h.advance)
+	mux.HandleFunc("POST /admin/setup/back", h.back)
+	mux.HandleFunc("POST /admin/setup/cancel", h.cancel)
+	mux.HandleFunc("POST /admin/setup/test-model", h.testModel)
+	mux.HandleFunc("POST /admin/setup/probe-model", h.probeModel)
+	mux.HandleFunc("POST /admin/setup/finalize", h.finalize)
 }
 
 func (h *EditHandler) page(w http.ResponseWriter, r *http.Request) {

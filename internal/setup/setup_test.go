@@ -52,7 +52,7 @@ func (f *fakeSidecars) probe(ctx context.Context, dataDir, kind, endpoint string
 	f.probes++
 	return f.probeInstalled, nil
 }
-func (f *fakeSidecars) install(ctx context.Context, dataDir, kind string) (string, error) {
+func (f *fakeSidecars) install(ctx context.Context, dataDir, kind string, preferredPort int) (string, error) {
 	f.installs++
 	return "http://127.0.0.1:1", nil
 }

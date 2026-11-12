@@ -7,11 +7,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +38,12 @@ const (
 const (
 	defaultQdrantEndpoint = "http://127.0.0.1:6333"
 	defaultLlamaEndpoint  = "http://127.0.0.1:8081"
+
+	// Default loopback ports — the starting point when picking a free port if a
+	// sidecar is auto-provisioned (the server is free to move off the default
+	// when it is already taken).
+	defaultQdrantPort = 6333
+	defaultLlamaPort  = 8081
 )
 
 // ---- download (resumable, atomic, cached) ----
@@ -242,7 +250,7 @@ func findBinary(dir, name string) string {
 // installQdrant downloads the Qdrant binary, writes a loopback config, and
 // launches it bound to 127.0.0.1. Verified: /collections and /healthz respond,
 // and the socket is 127.0.0.1-only. Idempotent via Ensure (probe-first).
-func installQdrant(ctx context.Context, dataDir string) (string, error) {
+func installQdrant(ctx context.Context, dataDir string, preferredPort int) (string, error) {
 	dir := SidecarDir(dataDir, KindQdrant)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -264,12 +272,28 @@ func installQdrant(ctx context.Context, dataDir string) (string, error) {
 			return "", fmt.Errorf("qdrant binary not found after extract in %s", dir)
 		}
 	}
+	// Pick free loopback ports (REST + gRPC), preferring the sidecar's existing
+	// port (so a re-launch stays on its ports when they're still free) or the
+	// defaults when freshly auto-provisioned.
+	httpPort := preferredPort
+	if httpPort <= 0 {
+		httpPort = defaultQdrantPort
+	}
+	httpPort, err := pickFreePort(httpPort)
+	if err != nil {
+		return "", err
+	}
+	grpcPort, err := pickFreePort(httpPort + 1)
+	if err != nil {
+		return "", err
+	}
+	endpoint := "http://127.0.0.1:" + strconv.Itoa(httpPort)
 	// Loopback config (verified schema: service.host binds REST + gRPC).
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfg := "service:\n" +
 		"  host: 127.0.0.1\n" +
-		"  http_port: 6333\n" +
-		"  grpc_port: 6334\n" +
+		"  http_port: " + strconv.Itoa(httpPort) + "\n" +
+		"  grpc_port: " + strconv.Itoa(grpcPort) + "\n" +
 		"  enable_cors: true\n" +
 		"storage:\n" +
 		"  storage_path: " + filepath.Join(dir, "storage") + "\n" +
@@ -281,14 +305,14 @@ func installQdrant(ctx context.Context, dataDir string) (string, error) {
 	if err := launchDaemon(ctx, bin, dataDir, KindQdrant, "--config-path", cfgPath); err != nil {
 		return "", err
 	}
-	return defaultQdrantEndpoint, waitForHealthy(ctx, defaultQdrantEndpoint, "/collections")
+	return endpoint, waitForHealthy(ctx, endpoint, "/collections")
 }
 
 // installLlamaServer downloads the llama-server binary (with its bundled libs)
 // + the embeddinggemma-2 GGUF + mmproj, and launches it in embedding mode on
 // loopback, CPU-only. Verified: /v1/models reports multimodal input_modalities
 // and /v1/embeddings returns a 512-dim vector.
-func installLlamaServer(ctx context.Context, dataDir string) (string, error) {
+func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) (string, error) {
 	dir := SidecarDir(dataDir, KindLlamaServer)
 	models := filepath.Join(dir, "models")
 	if err := os.MkdirAll(models, 0o755); err != nil {
@@ -323,16 +347,28 @@ func installLlamaServer(ctx context.Context, dataDir string) (string, error) {
 			return "", err
 		}
 	}
+	// Pick a free loopback port, preferring the sidecar's existing port (so a
+	// re-launch stays on its port when it's still free) or the default when
+	// freshly auto-provisioned.
+	port := preferredPort
+	if port <= 0 {
+		port = defaultLlamaPort
+	}
+	port, err := pickFreePort(port)
+	if err != nil {
+		return "", err
+	}
+	endpoint := "http://127.0.0.1:" + strconv.Itoa(port)
 	// CPU-only, loopback, embedding mode. Video input uses the system ffmpeg
 	// (already detected by installFFmpeg; llama-server finds it on PATH).
 	args := []string{
 		"-m", gguf, "--mmproj", mmproj, "--embedding",
-		"--host", "127.0.0.1", "--port", "8081", "-ngl", "0",
+		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-ngl", "0",
 	}
 	if err := launchDaemon(ctx, bin, dataDir, KindLlamaServer, args...); err != nil {
 		return "", err
 	}
-	return defaultLlamaEndpoint, waitForHealthy(ctx, defaultLlamaEndpoint, "/v1/models")
+	return endpoint, waitForHealthy(ctx, endpoint, "/v1/models")
 }
 
 // installFFmpeg detects a system ffmpeg first (the common case); otherwise it
@@ -370,6 +406,22 @@ func installFFmpeg(ctx context.Context, dataDir string) (string, error) {
 }
 
 // ---- process launch (daemon) + health wait ----
+
+// pickFreePort returns a free loopback TCP port, preferring `start` (when free)
+// and scanning upward otherwise. It opens a real listener to test availability.
+// The window between closing the listener and the sidecar's own bind is tiny; if
+// the port is snatched in that window, the sidecar's bind fails and the health
+// check catches it (the supervisor retries next tick).
+func pickFreePort(start int) (int, error) {
+	for p := start; p < start+100; p++ {
+		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(p))
+		if err == nil {
+			_ = l.Close()
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("no free loopback port in %d..%d", start, start+99)
+}
 
 // launchDaemon starts a long-lived sidecar process, logging to its sidecar dir
 // and recording its PID. It does not block on the process.

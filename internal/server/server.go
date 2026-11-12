@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"log"
@@ -56,6 +57,8 @@ type App struct {
 	ttl  time.Duration
 	dataDir string
 	edit *setup.Manager
+	// supCancel stops the sidecar supervisor (started by NewNormal).
+	supCancel context.CancelFunc
 }
 
 // NewNormal builds the normal-mode app from a loaded config.
@@ -71,6 +74,16 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	edit := setup.New(dataDir, cfg.Bind, 0, srv, prov, nil)
 	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit}
 	a.routes()
+	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
+	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
+	// are down after a bevin restart or machine reboot) and respawns any that
+	// die mid-session. It runs in a background goroutine + is stopped by
+	// App.Close. It never blocks the app from coming up (a slow model load
+	// happens in the background; the agent degrades until the sidecar is up).
+	sm := setup.NewSidecarManager(nil, nil)
+	supCtx, supCancel := context.WithCancel(context.Background())
+	a.supCancel = supCancel
+	go sm.Supervise(supCtx, cfg)
 	return a, nil
 }
 
@@ -78,7 +91,12 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
 
 // Close releases per-user stores.
-func (a *App) Close() { a.ag.Close() }
+func (a *App) Close() {
+	if a.supCancel != nil {
+		a.supCancel()
+	}
+	a.ag.Close()
+}
 
 func (a *App) routes() {
 	mux := http.NewServeMux()
