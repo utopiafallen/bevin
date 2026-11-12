@@ -134,7 +134,7 @@ const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
 let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
 let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {} };
 
-function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
+function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ if(c==null) continue; e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
 function field(label, input){ return el("div",{},el("label",{},label),input); }
 function inp(id, val, ph){ const i=el("input",{id, value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); return i; }
@@ -175,6 +175,10 @@ function renderModelForm(){
       const avail = cached.models.filter(x => !modelAlreadyAdded(x.ID, d.base_url));
       d.model_id = avail.length ? avail[0].ID : "";
       if(d.model_id){ const sel = cached.models.find(x => x.ID === d.model_id); if(sel && sel.MaxContext){ d.max_context = String(sel.MaxContext); d.context_auto = true; } }
+      // Refresh the bottom status (the cached path skips detectModel, which is
+      // what normally updates it) so a stale message from a prior endpoint
+      // doesn't linger.
+      msg("Detected " + cached.provider + " — " + cached.models.length + " model(s) (" + avail.length + " not yet added).", "ok");
       render();
     },
     clearBtn: { label: editing ? "Cancel" : "Clear", fn: cancelEdit },
@@ -220,8 +224,10 @@ function renderModelForm(){
     el("div",{class:"row"},
       field("Display name", el("div",{}, disp, dl)),
       field("Enable for users", en)),
-    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
-    (m.auto_disabled ? el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.") : null),
+    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent.")
+  );
+  if(m.auto_disabled){ halfB.append(el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.")); }
+  halfB.append(
     el("h5",{class:"scores-header"},"Scores (1-10)"),
     el("p",{class:"field-help"},"Help the user gauge a model's strengths when picking one for a conversation — informational only; it does not change how the agent runs."),
     scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }, locked),
@@ -336,7 +342,7 @@ function renderAuxCard(i){
   wrap.append(renderProviderHalf("af"+i, m, {
     knownBases: allKnownBases(),
     detect: () => detectAux(i),
-    onCache: (d, cached) => { applyAuxFields(d, cached.models, i); render(); },
+    onCache: (d, cached) => { applyAuxFields(d, cached.models, i); msg("Detected " + cached.provider + " — " + cached.models.length + " model(s) found.", "ok"); render(); },
     clearBtn: { label: "Clear", fn: () => { S.aux[i] = freshAux(); render(); } },
     getError: () => (S.auxError && S.auxError[i]) || null,
     clearError: () => { if(S.auxError) S.auxError[i] = null; }

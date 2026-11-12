@@ -69,19 +69,37 @@ func probeEndpoint(ctx context.Context, baseURL, apiKey string) (*ProbeResult, e
 			add(b + "/v1/models")
 		}
 	}
-	var lastErr error
+	// Try the candidate /models URLs IN PARALLEL: a dead or slow variant (e.g.
+	// a LAN IP whose bare /models endpoint hangs or is filtered) must not
+	// delay the one that succeeds. Each candidate runs in its own goroutine;
+	// we return the first success, or the last error if every candidate fails.
+	type probeOut struct {
+		res *ProbeResult
+		err error
+	}
+	outCh := make(chan probeOut, len(cands))
 	for _, u := range cands {
-		b, err := fetchProbe(ctx, u, apiKey)
-		if err != nil {
-			lastErr = err
-			continue
+		go func(u string) {
+			b, err := fetchProbe(ctx, u, apiKey)
+			if err != nil {
+				outCh <- probeOut{nil, err}
+				return
+			}
+			kind, models, cerr := classify(b)
+			if cerr != nil {
+				outCh <- probeOut{nil, cerr}
+				return
+			}
+			outCh <- probeOut{&ProbeResult{Provider: kind, Models: models}, nil}
+		}(u)
+	}
+	var lastErr error
+	for range cands {
+		out := <-outCh
+		if out.err == nil {
+			return out.res, nil
 		}
-		kind, models, cerr := classify(b)
-		if cerr != nil {
-			lastErr = cerr
-			continue
-		}
-		return &ProbeResult{Provider: kind, Models: models}, nil
+		lastErr = out.err
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("nothing to try")
