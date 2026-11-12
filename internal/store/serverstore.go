@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS users (
 	display_name TEXT NOT NULL,
 	role         TEXT NOT NULL DEFAULT 'user',
 	status       TEXT NOT NULL DEFAULT 'active',
+	email        TEXT NOT NULL DEFAULT '',
 	created_at   TEXT NOT NULL
 );
 -- internal auth: password hash per user (argon2id)
@@ -80,8 +81,29 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handle ON sessions(handle);
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 1, nowUTC())
-	return err
+	// v1: initial schema.
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 1, nowUTC()); err != nil {
+		return err
+	}
+	// v2: add the email column (existing installs; fresh installs already have
+	// it from the schema above).
+	var v int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v < 2 {
+		var hasCol int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'email'`).Scan(&hasCol)
+		if hasCol == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 2, nowUTC()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // User is an S1 account row.
@@ -90,6 +112,7 @@ type User struct {
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role"` // admin | user
 	Status      string `json:"status"`
+	Email       string `json:"email"`
 	CreatedAt   string `json:"created_at"`
 }
 
@@ -113,8 +136,8 @@ func (s *ServerStore) CreateUser(handle, displayName, role string) (*User, error
 func (s *ServerStore) GetUser(handle string) (*User, error) {
 	u := &User{}
 	err := s.db.QueryRow(
-		`SELECT handle, display_name, role, status, created_at FROM users WHERE handle = ?`,
-		handle).Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.CreatedAt)
+		`SELECT handle, display_name, role, status, email, created_at FROM users WHERE handle = ?`,
+		handle).Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -126,7 +149,7 @@ func (s *ServerStore) GetUser(handle string) (*User, error) {
 
 // ListUsers returns all accounts.
 func (s *ServerStore) ListUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT handle, display_name, role, status, created_at FROM users ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT handle, display_name, role, status, email, created_at FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -134,12 +157,24 @@ func (s *ServerStore) ListUsers() ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// SetUserEmail sets (or clears) a user's email address ("" clears it).
+func (s *ServerStore) SetUserEmail(handle, emailAddr string) error {
+	res, err := s.db.Exec(`UPDATE users SET email = ? WHERE handle = ?`, emailAddr, handle)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 // SetUserStatus sets active | disabled.

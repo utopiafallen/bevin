@@ -303,6 +303,50 @@ func TestModelAvailable(t *testing.T) {
 	}
 }
 
+func TestEmailConfigured(t *testing.T) {
+	if (Email{}).Configured() {
+		t.Fatal("empty email should not be configured")
+	}
+	if (Email{Enabled: true}).Configured() {
+		t.Fatal("enabled but no host should not be configured")
+	}
+	if (Email{SMTPHost: "smtp.example.com"}).Configured() {
+		t.Fatal("host but not enabled should not be configured")
+	}
+	if !(Email{Enabled: true, SMTPHost: "smtp.example.com"}.Configured()) {
+		t.Fatal("enabled + host should be configured")
+	}
+}
+
+func TestEmailRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{testModel()},
+		Email: Email{
+			Enabled: true, SMTPHost: "smtp.example.com", SMTPPort: 587,
+			Username: "bevin@example.com", Password: "pw",
+			FromName: "Bevin", UseStartTLS: true,
+		},
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email.SMTPHost != "smtp.example.com" || got.Email.SMTPPort != 587 {
+		t.Fatalf("email = %+v", got.Email)
+	}
+	if got.Email.FromAddress != "bevin@example.com" {
+		t.Fatalf("from_address defaulted to %q (want the username)", got.Email.FromAddress)
+	}
+	if !got.Email.Configured() {
+		t.Fatal("round-tripped email should be configured")
+	}
+}
+
 func TestResolveDisplayNameAutoDisabled(t *testing.T) {
 	models := []Model{
 		{ID: "a", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 1, Enabled: true},

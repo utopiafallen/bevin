@@ -57,13 +57,18 @@ type oaiTool struct {
 	} `json:"function"`
 }
 
+type oaiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type oaiChatRequest struct {
-	Model       string       `json:"model"`
-	Messages    []oaiMessage `json:"messages"`
-	Tools       []oaiTool    `json:"tools,omitempty"`
-	Temperature *float64     `json:"temperature,omitempty"`
-	MaxTokens   *int         `json:"max_tokens,omitempty"`
-	Stream      bool         `json:"stream,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []oaiMessage     `json:"messages"`
+	Tools         []oaiTool        `json:"tools,omitempty"`
+	Temperature   *float64         `json:"temperature,omitempty"`
+	MaxTokens     *int             `json:"max_tokens,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
+	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
 type oaiUsage struct {
@@ -255,12 +260,17 @@ func encodeOAITools(tools []Tool) []oaiTool {
 }
 
 // buildOAIChatRequest assembles the OAI request body from a neutral request.
+// When streaming, it requests include_usage so the final SSE chunk carries the
+// token accounting (OpenAI + compatible APIs omit usage otherwise).
 func buildOAIChatRequest(req ChatRequest, model string, stream, videoOK bool) (oaiChatRequest, error) {
 	ocr := oaiChatRequest{
 		Model:       model,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 		Stream:      stream,
+	}
+	if stream {
+		ocr.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
 	}
 	msgs := make([]oaiMessage, 0, len(req.System)+len(req.Messages))
 	for _, sp := range req.System {

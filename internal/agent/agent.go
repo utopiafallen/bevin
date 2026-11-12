@@ -199,17 +199,20 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 	return convID, nil
 }
 
-// Turn runs one chat turn: persist the user message, build the request (frozen
-// system prompt + latest context summary + raw turns since that summary), call
-// the active model, persist the assistant reply. Before the call, if the prompt
-// is already over the summarization budget (a very large message, or growth
-// that outpaced the post-turn compaction), it compacts the older turns so the
-// call fits. After the turn, if the prompt (now including the reply) exceeds
-// the budget, it compacts the older turns so the NEXT call fits. Compaction
-// folds the raw turns since the latest summary into a new chained summary
-// (stored as role=summary); full history is retained. Returns the reply text
-// and the conversation id.
-func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
+// runTurn is the shared logic for Turn (non-streaming, emit=nil) and
+// TurnStream (streaming, emit!=nil). It persists the user message, builds the
+// request (frozen system prompt + latest context summary + raw turns since
+// that summary), pre-compacts if the prompt is over budget, calls the active
+// model (p.Chat when emit is nil, p.Stream otherwise — emitting deltas via
+// emit), persists the assistant reply, and post-compacts if the prompt (now
+// including the reply) exceeds the budget. Compaction folds the raw turns
+// since the latest summary into a new chained summary (stored as
+// role=summary); full history is retained. The post-compact prefers the
+// API-reported usage (res.Usage — from the final SSE chunk when streaming)
+// and falls back to the char/4 estimate. A compaction failure is not fatal
+// (the reply is already persisted) — it is logged + the next turn retries.
+// Returns the reply text + the conversation id.
+func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", "", err
@@ -222,7 +225,6 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 	if !ok {
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
-
 	// Persist the user message first, so history is always durable/consistent.
 	if _, err := us.AppendMessage(convID, roleUser, userText, nil, nil); err != nil {
 		return conv.ID, "", err
@@ -235,7 +237,8 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 	if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID)) {
 		// Pre-compact: the prompt is over budget before the call. Fold the
 		// older turns (incl. this message) into a summary so the call fits.
-		if cerr := a.compactIfNeeded(ctx, us, conv, p); cerr != nil {
+		// No API usage yet for this call — fall back to the char/4 estimate.
+		if cerr := a.compactIfNeeded(ctx, us, conv, p, 0); cerr != nil {
 			return conv.ID, "", cerr
 		}
 		hist, err = us.ListMessages(convID)
@@ -244,8 +247,13 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 		}
 		req, _ = buildRequest(conv, hist)
 	}
-
-	res, err := p.Chat(ctx, conv.ActiveModelID, req)
+	// Call the model (non-streaming or streaming).
+	var res *provider.Result
+	if emit == nil {
+		res, err = p.Chat(ctx, conv.ActiveModelID, req)
+	} else {
+		res, err = p.Stream(ctx, conv.ActiveModelID, req, emit)
+	}
 	if err != nil {
 		if isModelUnavailable(err) {
 			// The provider reports the model is unavailable — auto-disable it
@@ -264,12 +272,30 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, &modelID, nil); err != nil {
 		return conv.ID, "", err
 	}
-	// Post-compact: if the prompt (now including the reply) exceeds the budget,
-	// compact the older turns so the next call fits. A compaction failure is not
-	// fatal to the turn (the reply is already persisted) — log it; the next turn
-	// retries.
-	if cerr := a.compactIfNeeded(ctx, us, conv, p); cerr != nil {
+	// Post-compact: if the prompt (now including the reply) exceeds the
+	// budget, compact the older turns so the next call fits. Prefer the
+	// API-reported usage (res.Usage — from the final SSE chunk when
+	// streaming) — the next call's prompt is ~this call's total (prompt + the
+	// reply just produced); fall back to the char/4 estimate when the backend
+	// omits usage.
+	actualTokens := 0
+	if res.Usage != nil {
+		actualTokens = res.Usage.TotalTokens
+	}
+	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens); cerr != nil {
 		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil
+}
+
+// Turn runs one chat turn (non-streaming). See runTurn for the full flow.
+func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
+	return a.runTurn(ctx, handle, convID, userText, nil)
+}
+
+// TurnStream runs one chat turn (streaming), emitting each delta via emit.
+// See runTurn for the full flow. The aggregated reply + the conversation id
+// are returned when the stream completes.
+func (a *Agent) TurnStream(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
+	return a.runTurn(ctx, handle, convID, userText, emit)
 }

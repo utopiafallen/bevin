@@ -82,11 +82,12 @@ func newTestSetup(t *testing.T) (*Manager, *fakeSidecars, string) {
 func validAnswers(m *Manager) {
 	_ = m.SetAdmin(AdminAnswers{Handle: "admin", DisplayName: "Admin", Password: "adminpass1"})
 	_ = m.SetModels([]config.Model{{
-		ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x",
+		ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "test",
 		ModelID: "gpt-4o", DisplayName: "GPT-4o", Metadata: config.Metadata{Reasoning: 8, Knowledge: 9, Speed: 7},
 		MaxContext: 128000, Slots: 1, Enabled: true,
 	}})
 	_ = m.SetSidecars(config.Sidecars{Qdrant: "http://127.0.0.1:6333", LlamaServer: "http://127.0.0.1:8081"})
+	_ = m.SetEmail(config.Email{Enabled: true, SMTPHost: "smtp.example.com", SMTPPort: 587, Username: "bevin@example.com", Password: "pw", FromName: "Bevin"})
 }
 
 func TestStateValidation(t *testing.T) {
@@ -131,6 +132,14 @@ func TestFinalize(t *testing.T) {
 	// sidecars: qdrant + llama probed (endpoints set) then installed; ffmpeg installed directly.
 	if fs.installs != 3 {
 		t.Fatalf("installs = %d, want 3", fs.installs)
+	}
+	// The email config is saved to server.toml (the port default + the from
+	// address default are applied by Validate).
+	if cfg.Email.SMTPHost != "smtp.example.com" || !cfg.Email.Configured() {
+		t.Fatalf("email not saved: %+v", cfg.Email)
+	}
+	if cfg.Email.FromAddress != "bevin@example.com" {
+		t.Fatalf("email from_address defaulted to %q (want the username)", cfg.Email.FromAddress)
 	}
 	// Idempotent second finalize (reads back, no re-seed / no re-install).
 	installedBefore := fs.installs

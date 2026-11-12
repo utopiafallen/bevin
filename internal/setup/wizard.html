@@ -153,7 +153,7 @@ const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
 // In edit mode the routes are namespaced under /admin and the admin-identity
 // step is skipped (the admin already exists), so start on the models step.
 let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {}, sidecarStatus: null };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ if(c==null) continue; e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -488,12 +488,64 @@ async function pollSidecars(){
   }catch(e){ /* transient; keep polling */ }
 }
 function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
-function renderReview(){ const d=el("div",{},el("h3",{}, "6. Review & finish"));
+function renderEmail(){
+  const e = S.email;
+  const d = el("div",{});
+  d.append(el("h3",{}, "6. Email notifications (optional)"));
+  d.append(el("p",{class:"small"},"bevin can email users and the admin (a task finished, something needs attention, …). Leave it off to skip — you can add it later in Settings. When on, bevin sends through your SMTP server."));
+  // Enable toggle (Yes/No).
+  const en = el("div",{class:"yesno"});
+  const yesB = el("button",{type:"button", class:e.enabled?"sel":""}, "Yes");
+  const noB = el("button",{type:"button", class:!e.enabled?"sel":""}, "No");
+  yesB.addEventListener("click",()=>{ e.enabled=true; render(); });
+  noB.addEventListener("click",()=>{ e.enabled=false; render(); });
+  en.append(yesB,noB);
+  d.append(field("Enable email notifications", en));
+  if(!e.enabled){
+    d.append(el("p",{class:"small"},"Email is off — bevin will not send any email. The rest of this step is skipped."));
+    return d;
+  }
+  // SMTP config (shown when enabled).
+  d.append(el("h4",{style:"margin-top:1rem"},"SMTP server"));
+  const host = inp("em_host", e.smtp_host, "smtp.example.com");
+  host.addEventListener("input",()=>{ e.smtp_host=host.value; });
+  const port = inp("em_port", e.smtp_port, "587");
+  port.type = "number"; port.min = "1"; port.max = "65535";
+  port.addEventListener("input",()=>{ e.smtp_port=port.value; });
+  const user = inp("em_user", e.username, "you@example.com");
+  user.addEventListener("input",()=>{ e.username=user.value; });
+  const passInput = el("input",{id:"em_pw", type:"password", value:e.password||"", placeholder:"SMTP password / app password"});
+  passInput.addEventListener("input",()=>{ e.password=passInput.value; });
+  const passToggle = el("button",{type:"button", class:"pw-toggle"}, "Show");
+  passToggle.onclick=function(){ const show=passInput.type==="password"; passInput.type=show?"text":"password"; passToggle.textContent=show?"Hide":"Show"; };
+  const passWrap = el("div",{class:"pw-wrap"}, passInput, passToggle);
+  const fromAddr = inp("em_from", e.from_address, "blank = the username");
+  fromAddr.addEventListener("input",()=>{ e.from_address=fromAddr.value; });
+  const fromName = inp("em_fromname", e.from_name, "bevin");
+  fromName.addEventListener("input",()=>{ e.from_name=fromName.value; });
+  // Encryption (STARTTLS / Off).
+  const tls = el("div",{class:"yesno"});
+  const tlsYes = el("button",{type:"button", class:e.use_starttls?"sel":""}, "STARTTLS");
+  const tlsNo = el("button",{type:"button", class:!e.use_starttls?"sel":""}, "Off");
+  tlsYes.addEventListener("click",()=>{ e.use_starttls=true; render(); });
+  tlsNo.addEventListener("click",()=>{ e.use_starttls=false; render(); });
+  tls.append(tlsYes,tlsNo);
+  d.append(
+    el("div",{class:"row"}, field("SMTP host", host), field("Port", port)),
+    field("Username", user),
+    el("div",{}, el("label",{}, "Password"), passWrap),
+    el("div",{class:"row"}, field("From address", fromAddr), field("From name", fromName)),
+    field("Encryption", tls),
+    el("p",{class:"field-help"},"Port 587 + STARTTLS is the usual submission setup. A local relay may use 25 without STARTTLS — set Encryption to Off in that case (bevin still upgrades to TLS when the server offers it).")
+  );
+  return d;
+}
+function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
   d.append(el("pre",{class:"kv"}, JSON.stringify(S, null, 2)));
   d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
   return d;
 }
-const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, sidecars:renderSidecars, review:renderReview };
+const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
 
 // ---- model form helpers ----
 function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}; }
@@ -644,15 +696,19 @@ async function doNext(){
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
+  // The email step: smtp_port is a string in the draft (from the input); the
+  // server's config expects an int, so normalize it (empty -> 0 -> the server
+  // defaults it to 587).
+  const emailPayload = Object.assign({}, S.email, { smtp_port: parseInt(S.email.smtp_port, 10) || 0 });
   try{
-    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:S.aux, sidecars:S.sidecars});
+    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:S.aux, sidecars:S.sidecars, email:emailPayload});
     msg("");
     if(step==="review") return;
     idx=Math.min(idx+1, STEPS.length-1); render();
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); if(IS_EDIT){ msg("Done — config saved; the agent will pick up the changes.","ok"); document.getElementById("body").innerHTML="<h3>Config updated</h3><p>Your model changes are saved. <a href='/'>Back to bevin</a></p>"; } else { msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; } document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
 function q(s){ return document.querySelector(s); }
 

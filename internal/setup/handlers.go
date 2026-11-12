@@ -23,7 +23,7 @@ var wizardTmpl = template.Must(template.New("wizard.html").Funcs(template.FuncMa
 }).ParseFS(wizardFS, "wizard.html"))
 
 // Step order for the wizard (matches the plan's §10).
-var stepOrder = []string{"server", "admin", "models", "aux", "sidecars", "review"}
+var stepOrder = []string{"server", "admin", "models", "aux", "sidecars", "email", "review"}
 
 // Handler serves the setup wizard API. Every /setup route is gated on the
 // one-time setup token. After finalize, the in-process transition callback
@@ -158,6 +158,8 @@ func (h *EditHandler) advance(w http.ResponseWriter, r *http.Request) {
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
 		// display-only; the server auto-provisions the sidecars (no user state)
+	case "email":
+		err = h.mgr.SetEmail(p.Email)
 	default:
 		err = fmt.Errorf("unknown step %q", p.Step)
 	}
@@ -366,6 +368,7 @@ type advancePayload struct {
 	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
 	Sidecars config.Sidecars   `json:"sidecars"`
+	Email    config.Email      `json:"email"`
 }
 
 func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
@@ -393,6 +396,8 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
 		// display-only; the server auto-provisions the sidecars (no user state)
+	case "email":
+		err = h.mgr.SetEmail(p.Email)
 	case "review":
 		// no state; finalize is a separate call
 	default:

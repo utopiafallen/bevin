@@ -29,11 +29,12 @@ type AdminAnswers struct {
 
 // Answers is the full set of wizard inputs (steps that are not review-only).
 type Answers struct {
-	Admin    AdminAnswers   `json:"admin"`
-	Models   []config.Model `json:"models"`
+	Admin    AdminAnswers     `json:"admin"`
+	Models   []config.Model   `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
 	Embedder config.Embedder   `json:"embedder"`
 	Sidecars config.Sidecars   `json:"sidecars"`
+	Email    config.Email      `json:"email"`
 }
 
 // handleRe is a conservative handle pattern (lowercase alnum + - _ .).
@@ -126,6 +127,8 @@ func (m *Manager) clearStep(step string) {
 		m.state.Answers.Aux = nil
 	case "sidecars":
 		m.state.Answers.Sidecars = config.Sidecars{}
+	case "email":
+		m.state.Answers.Email = config.Email{}
 	}
 }
 
@@ -145,6 +148,7 @@ func (m *Manager) LoadFromConfig() error {
 		Aux:      cfg.Aux,
 		Embedder: cfg.Embedder,
 		Sidecars: cfg.Sidecars,
+		Email:    cfg.Email,
 	}
 	return nil
 }
@@ -172,6 +176,7 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 	}
 	cfg.Models = a.Models
 	cfg.Aux = a.Aux
+	cfg.Email = a.Email
 	// Sidecars are server-managed: use the endpoints the provisioning run
 	// recorded (in edit mode, the already-running sidecars).
 	cfg.Sidecars = m.recordedSidecarsLocked()
@@ -242,6 +247,18 @@ func (m *Manager) SetSidecars(sc config.Sidecars) error {
 	return nil
 }
 
+// SetEmail stores the (optional) email-notifier step. Email is optional: when
+// it is not enabled (or has no host) the config is left blank (no sender).
+func (m *Manager) SetEmail(e config.Email) error {
+	if err := validateEmail(e); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.Answers.Email = e
+	return nil
+}
+
 // Finalize performs the deferred commit: validate everything, seed the admin
 // (idempotent), ensure the sidecars (idempotent, forward-only), then write
 // server.toml (0600) as the commit of record. It is safe to call again (a
@@ -283,6 +300,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds},
 		Models:           a.Models,
 		Aux:              a.Aux,
+		Email:            a.Email,
 		Sidecars:         m.recordedSidecars(),
 		MaxWorkspaceSize: config.DefaultMaxWorkspaceSize,
 	}
@@ -330,6 +348,22 @@ func validateAdmin(a AdminAnswers) error {
 	}
 	if len(a.Password) < 8 {
 		return errors.New("password must be at least 8 characters")
+	}
+	return nil
+}
+
+// validateEmail checks the (optional) email-notifier step. When email is not
+// enabled it is a no-op (a blank email is valid). When enabled, a host is
+// required (the sender is built from it).
+func validateEmail(e config.Email) error {
+	if !e.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(e.SMTPHost) == "" {
+		return errors.New("email: an SMTP host is required when email is enabled")
+	}
+	if e.SMTPPort < 1 || e.SMTPPort > 65535 {
+		return errors.New("email: SMTP port must be 1-65535")
 	}
 	return nil
 }

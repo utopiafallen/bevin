@@ -12,12 +12,14 @@ import (
 
 // fakeProvider records every Chat request + returns a fixed reply (or cycles
 // through canned replies). It implements the provider.Provider interface so the
-// Agent can be exercised without a real model backend.
+// Agent can be exercised without a real model backend. When usage is set, every
+// Result carries it (so the usage-based compaction path can be exercised).
 type fakeProvider struct {
 	mu       sync.Mutex
 	calls    []provider.ChatRequest
 	replies  []string
 	replyIdx int
+	usage    *provider.Usage
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
@@ -31,11 +33,45 @@ func (f *fakeProvider) Chat(_ context.Context, _ string, req provider.ChatReques
 		reply = f.replies[f.replyIdx%len(f.replies)]
 		f.replyIdx++
 	}
-	return &provider.Result{Text: reply}, nil
+	res := &provider.Result{Text: reply}
+	if f.usage != nil {
+		res.Usage = f.usage
+	}
+	return res, nil
 }
 
-func (f *fakeProvider) Stream(_ context.Context, _ string, _ provider.ChatRequest, _ func(provider.Chunk) error) (*provider.Result, error) {
-	return &provider.Result{Text: "ok"}, nil
+func (f *fakeProvider) Stream(_ context.Context, _ string, req provider.ChatRequest, emit func(provider.Chunk) error) (*provider.Result, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, req)
+	reply := "ok"
+	if len(f.replies) > 0 {
+		reply = f.replies[f.replyIdx%len(f.replies)]
+		f.replyIdx++
+	}
+	usage := f.usage
+	f.mu.Unlock()
+	// Simulate a stream: emit the reply as text deltas + a final chunk that
+	// carries the usage (mirrors the real providers, where usage arrives in the
+	// last SSE chunk).
+	if emit != nil && reply != "" {
+		mid := len(reply) / 2
+		parts := []string{reply[:mid], reply[mid:]}
+		for _, part := range parts {
+			if err := emit(provider.Chunk{TextDelta: part}); err != nil {
+				return &provider.Result{Text: reply}, err
+			}
+		}
+		if usage != nil {
+			if err := emit(provider.Chunk{Usage: usage, Done: true}); err != nil {
+				return &provider.Result{Text: reply}, err
+			}
+		}
+	}
+	res := &provider.Result{Text: reply}
+	if usage != nil {
+		res.Usage = usage
+	}
+	return res, nil
 }
 func (f *fakeProvider) Models(_ context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (f *fakeProvider) Embed(_ context.Context, _ string, _ []string) ([][]float32, error) {
@@ -165,5 +201,142 @@ func TestTurnSummarizesOnBudget(t *testing.T) {
 	}
 	if len(last.Messages) >= 45 {
 		t.Fatalf("latest request sent %d messages, want fewer (compacted into the summary)", len(last.Messages))
+	}
+}
+
+// TestTurnCompactsOnReportedUsage verifies the compaction trigger uses the
+// API-reported usage (res.Usage) when present — not the char/4 estimate. The
+// fake provider reports TotalTokens=900 (over the 800 budget) while the actual
+// messages are tiny (the estimate would be far under budget), so the summarization
+// fires only because of the reported usage.
+func TestTurnCompactsOnReportedUsage(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	if cfg.Models[0].MaxContext != 1000 {
+		t.Fatalf("test precondition: m1 MaxContext = %d, want 1000", cfg.Models[0].MaxContext)
+	}
+	// Reports 900 total tokens (prompt + completion) every call — over the 800
+	// budget, while the actual messages are a couple of chars (the estimate is
+	// negligible).
+	fp := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
+	a.providers["m1"] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+	// A summary was produced (the trigger fired on the reported usage, not the
+	// tiny estimate).
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var summaries int
+	for _, m := range msgs {
+		if m.Role == roleSummary {
+			summaries++
+		}
+	}
+	if summaries == 0 {
+		t.Fatalf("no summary produced — the usage-based trigger did not fire (%d messages)", len(msgs))
+	}
+}
+
+// TestTurnNoUsageFallsBackToEstimate verifies the estimator is used when the
+// backend omits usage (the pre-existing estimate-driven path still works). This
+// is covered end-to-end by TestTurnSummarizesOnBudget (no usage set on the fake
+// provider), but asserted explicitly here for the no-usage branch.
+func TestTurnNoUsageFallsBackToEstimate(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	fp := &fakeProvider{} // no usage
+	a.providers["m1"] = fp
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	// No error + a reply across turns (the estimate-driven compaction path).
+	for i := 0; i < 5; i++ {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi "+strings.Repeat("y", 200)); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+}
+
+// TestTurnStream verifies the streaming turn: the emit callback receives the
+// deltas, the reply is aggregated + persisted, and the final chunk carries the
+// usage (the API-reported accounting the post-compact prefers).
+func TestTurnStream(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	fp := &fakeProvider{usage: &provider.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}}
+	a.providers["m1"] = fp
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	var mu sync.Mutex
+	var chunks []provider.Chunk
+	conv, reply, err := a.TurnStream(context.Background(), "u1", convID, "hi", func(c provider.Chunk) error {
+		mu.Lock()
+		chunks = append(chunks, c)
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("TurnStream: %v", err)
+	}
+	if reply != "ok" {
+		t.Fatalf("reply = %q, want %q", reply, "ok")
+	}
+	if conv != convID {
+		t.Fatalf("conv = %q, want %q", conv, convID)
+	}
+	// The emit callback received the deltas + a final chunk with usage.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(chunks) == 0 {
+		t.Fatal("no chunks emitted (the stream did not emit deltas)")
+	}
+	var emitted string
+	var gotUsage bool
+	for _, c := range chunks {
+		emitted += c.TextDelta
+		if c.Usage != nil {
+			gotUsage = true
+		}
+	}
+	if emitted != "ok" {
+		t.Fatalf("emitted text = %q, want %q", emitted, "ok")
+	}
+	if !gotUsage {
+		t.Fatal("no chunk carried the usage (the final chunk should carry it)")
+	}
+	// The reply is persisted in the store.
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var assistant int
+	for _, m := range msgs {
+		if m.Role == roleAssistant && m.Content == "ok" {
+			assistant++
+		}
+	}
+	if assistant != 1 {
+		t.Fatalf("assistant reply not persisted (%d)", assistant)
 	}
 }

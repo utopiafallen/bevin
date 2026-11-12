@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -18,6 +19,8 @@ import (
 	"github.com/utopiafallen/bevin/internal/agent"
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/email"
+	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
 	"github.com/utopiafallen/bevin/web"
@@ -57,6 +60,10 @@ type App struct {
 	ttl  time.Duration
 	dataDir string
 	edit *setup.Manager
+	srv  *store.ServerStore
+	// mail is the SMTP sender (nil when email is not configured; notify is a
+	// no-op in that case).
+	mail *email.Sender
 	// supCancel stops the sidecar supervisor (started by NewNormal).
 	supCancel context.CancelFunc
 }
@@ -72,7 +79,10 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 		return nil, err
 	}
 	edit := setup.New(dataDir, cfg.Bind, 0, srv, prov, nil)
-	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit}
+	// Build the SMTP sender (nil when email is not configured; notify is a
+	// no-op in that case).
+	mail := email.New(cfg.Email)
+	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit, srv: srv, mail: mail}
 	a.routes()
 	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
 	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
@@ -107,6 +117,9 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /api/models", a.requireAuth(a.models))
 	mux.HandleFunc("POST /api/conversations", a.requireAuth(a.createConversation))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.requireAuth(a.sendMessage))
+	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.requireAuth(a.sendMessageStream))
+	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
+	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
 	// Normal-mode edit: re-run the setup wizard to edit the live config, gated
 	// on an admin session.
 	edit := setup.NewEditHandler(a.edit, a.adminGate)
@@ -236,6 +249,141 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"conversation_id": convID, "reply": reply})
+}
+
+// sendMessageStream streams a chat turn as SSE (text/event-stream). Each text
+// delta is a "message" event (JSON {delta, reasoning}); when the stream
+// completes a "done" event carries the conversation id, the full reply, and
+// the API-reported usage (from the final SSE chunk); a failure sends an
+// "error" event. A client disconnect cancels the request context, aborting
+// the upstream stream. The non-streaming sendMessage remains for clients that
+// don't want incremental updates.
+func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	id := r.PathValue("id")
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable reverse-proxy buffering
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	writeEvent := func(event string, payload any) error {
+		b, _ := json.Marshal(payload)
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	// The emit callback is called synchronously (same goroutine as TurnStream),
+	// so capturing the final chunk's usage here is race-free.
+	var lastUsage *provider.Usage
+	convID, reply, err := a.ag.TurnStream(r.Context(), u.Handle, id, req.Message, func(c provider.Chunk) error {
+		if c.Usage != nil {
+			lastUsage = c.Usage
+		}
+		if c.TextDelta != "" || c.ReasoningDelta != "" {
+			return writeEvent("message", map[string]any{"delta": c.TextDelta, "reasoning": c.ReasoningDelta})
+		}
+		return nil
+	})
+	if err != nil {
+		_ = writeEvent("error", map[string]string{"error": err.Error()})
+		return
+	}
+	var usage map[string]any
+	if lastUsage != nil {
+		usage = map[string]any{
+			"prompt_tokens":     lastUsage.PromptTokens,
+			"completion_tokens": lastUsage.CompletionTokens,
+			"total_tokens":      lastUsage.TotalTokens,
+		}
+	}
+	_ = writeEvent("done", map[string]any{"conversation_id": convID, "reply": reply, "usage": usage})
+}
+
+// notify sends an email notification to a user (by handle). It is fire-and-
+// forget: a notification must never block or break the calling path. It is a
+// no-op when email is not configured, the user has no email address, or the
+// send fails (the failure is logged, not returned).
+func (a *App) notify(handle, subject, body string) {
+	if a.mail == nil {
+		return
+	}
+	u, err := a.srv.GetUser(handle)
+	if err != nil || u.Email == "" {
+		return
+	}
+	to := u.Email
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := a.mail.Send(ctx, to, subject, body); err != nil {
+			log.Printf("notify %s: %v", u.Handle, err)
+		}
+	}()
+}
+
+// emailAddress reports whether email is configured on the server + the
+// current user's email address (so the UI can prompt for it when missing).
+func (a *App) emailAddress(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": a.mail != nil,
+		"email":      u.Email,
+	})
+}
+
+// setEmail sets the current user's email address (self-service). An admin may
+// set another user's address by passing "handle" in the body.
+func (a *App) setEmail(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	var req struct {
+		Handle string `json:"handle"`
+		Email  string `json:"email"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// A non-admin may only change their own address; an admin may set any.
+	target := u.Handle
+	if req.Handle != "" && req.Handle != u.Handle {
+		if u.Role != "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		target = req.Handle
+	}
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email != "" && !strings.Contains(req.Email, "@") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email is not valid"})
+		return
+	}
+	if err := a.srv.SetUserEmail(target, req.Email); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+	log.Printf("email: %s address set by %s", target, u.Handle)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "email": req.Email})
 }
 
 // clientIP reads the client IP from X-Forwarded-For (fallback X-Real-IP), else

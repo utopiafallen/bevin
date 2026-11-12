@@ -41,12 +41,20 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 // previous summary + the raw turns since it). Full history is retained in the
 // store; the summary only changes what the request builder sends. It is a no-op
 // when the prompt is under budget or there is no older turn to fold.
-func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider) error {
+//
+// actualTokens, when > 0, is the API-reported prompt size for the most recent
+// call (used in preference to the char/4 estimate) — the provider's usage
+// stats when the backend returned them. Pass 0 to fall back to the estimate
+// (e.g. before the first call, or a backend that omits usage).
+func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int) error {
 	hist, err := us.ListMessages(conv.ID)
 	if err != nil {
 		return err
 	}
-	_, tokens := buildRequest(conv, hist)
+	tokens := actualTokens
+	if tokens <= 0 {
+		_, tokens = buildRequest(conv, hist)
+	}
 	if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID)) {
 		return nil
 	}

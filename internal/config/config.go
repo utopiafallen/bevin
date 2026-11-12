@@ -27,7 +27,7 @@ const (
 // ConfigVersion is the schema version of server.toml. Bump it when a release
 // changes the schema and add a matching step in migrate() so older configs are
 // upgraded in place on load; Load refuses a config newer than this build.
-const ConfigVersion = 2
+const ConfigVersion = 3
 
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
@@ -44,8 +44,9 @@ type ServerConfig struct {
 	Auth             Auth       `toml:"auth"`
 	Models           []Model    `toml:"models"`
 	Aux              []AuxModel `toml:"aux"`
-	Embedder         Embedder   `toml:"embedder"`
-	Sidecars         Sidecars   `toml:"sidecars"`
+	Embedder         Embedder   `toml:"embedder" json:"embedder"`
+	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
+	Email            Email      `toml:"email" json:"email"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
 }
 
@@ -136,6 +137,27 @@ type Sidecars struct {
 	FFmpeg      string `toml:"ffmpeg" json:"ffmpeg"`
 }
 
+// Email is the server-managed SMTP configuration used to send email
+// notifications to users + admin. It is optional: when SMTPHost is empty (or
+// Enabled is false) the EmailSender is nil and no emails are sent. The password
+// is a secret (server.toml is written 0600). This is the server-level notifier;
+// a per-user email configuration for the agent's (future) email tool is a
+// later revision.
+type Email struct {
+	Enabled     bool   `toml:"enabled" json:"enabled"`
+	SMTPHost    string `toml:"smtp_host" json:"smtp_host"`
+	SMTPPort    int    `toml:"smtp_port" json:"smtp_port"`
+	Username    string `toml:"username" json:"username"`
+	Password    string `toml:"password" json:"password"`
+	FromAddress string `toml:"from_address" json:"from_address"`
+	FromName    string `toml:"from_name" json:"from_name"`
+	UseStartTLS bool   `toml:"use_starttls" json:"use_starttls"`
+}
+
+// Configured reports whether email sending is configured (enabled + a host is
+// set). When false, the harness's EmailSender is nil and Send is a no-op.
+func (e Email) Configured() bool { return e.Enabled && strings.TrimSpace(e.SMTPHost) != "" }
+
 // Path is the location of server.toml for a data dir.
 func Path(dir string) string { return filepath.Join(filepath.Clean(dir), ServerFileName) }
 
@@ -198,6 +220,12 @@ func migrate(c *ServerConfig) error {
 				}
 			}
 			c.Version = 2
+		case 2:
+			// v2 -> v3: the schema gained the optional [email] section (the
+			// server-managed SMTP notifier). A v2 config simply has an empty
+			// Email (email disabled) — no field transform, just stamp the
+			// version.
+			c.Version = 3
 		default:
 			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
 		}
@@ -244,6 +272,18 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.MaxWorkspaceSize <= 0 {
 		c.MaxWorkspaceSize = DefaultMaxWorkspaceSize
+	}
+	// Email defaults (applied when the notifier is configured).
+	if c.Email.Enabled {
+		if c.Email.SMTPPort <= 0 {
+			c.Email.SMTPPort = 587 // standard SMTP submission port
+		}
+		if c.Email.FromName == "" {
+			c.Email.FromName = "bevin"
+		}
+		if c.Email.FromAddress == "" {
+			c.Email.FromAddress = c.Email.Username
+		}
 	}
 	for i := range c.Models {
 		if c.Models[i].Slots < 1 {
