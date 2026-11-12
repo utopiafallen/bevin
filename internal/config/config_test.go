@@ -24,7 +24,7 @@ func TestServerRoundTrip(t *testing.T) {
 		Logging:  Logging{Level: "info"},
 		Auth:     Auth{Mode: "internal", SessionSecret: "deadbeef", SessionTTLSeconds: 2592000},
 		Models:   []Model{testModel()},
-		Aux:      []AuxModel{{Kind: "vision", Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v"}},
+		Aux:      []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v"}},
 		Embedder: Embedder{BaseURL: "http://127.0.0.1:8080/v1", ModelID: "embeddinggemma-2"},
 		Sidecars: Sidecars{Qdrant: "http://127.0.0.1:6334", LlamaServer: "http://127.0.0.1:8080", FFmpeg: "ffmpeg"},
 	}
@@ -48,7 +48,7 @@ func TestServerRoundTrip(t *testing.T) {
 	if got.Auth.SessionSecret != "deadbeef" {
 		t.Fatalf("secret = %q", got.Auth.SessionSecret)
 	}
-	if got.Aux[0].Kind != "vision" || got.Aux[0].ModelID != "v" {
+	if len(got.Aux[0].Kinds) != 1 || got.Aux[0].Kinds[0] != "vision" || got.Aux[0].ModelID != "v" {
 		t.Fatalf("aux = %+v", got.Aux[0])
 	}
 	if got.Embedder.ModelID != "embeddinggemma-2" {
@@ -213,6 +213,47 @@ enabled = true
 	}
 	if _, err := Load(dir); err == nil {
 		t.Fatal("expected an error for a config newer than the build")
+	}
+}
+
+func TestAuxKindToKindsMigration(t *testing.T) {
+	dir := t.TempDir()
+	// A v1 config with the deprecated aux "kind" (a single modality) is
+	// migrated to "kinds" (one or more) on load.
+	v1 := `version = 1
+
+[auth]
+mode = "internal"
+session_secret = "deadbeef"
+
+[[models]]
+id = "m1"
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-test"
+model_id = "ornith"
+
+[[aux]]
+kind = "vision"
+provider = "llama"
+base_url = "http://127.0.0.1:8081/v1"
+model_id = "v"
+`
+	if err := os.WriteFile(Path(dir), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load v1 config: %v", err)
+	}
+	if got.Version != ConfigVersion {
+		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
+	}
+	if len(got.Aux) != 1 {
+		t.Fatalf("aux count = %d, want 1", len(got.Aux))
+	}
+	if len(got.Aux[0].Kinds) != 1 || got.Aux[0].Kinds[0] != "vision" {
+		t.Fatalf("migrated aux kinds = %v, want [vision]", got.Aux[0].Kinds)
 	}
 }
 

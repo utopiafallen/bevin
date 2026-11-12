@@ -27,7 +27,7 @@ const (
 // ConfigVersion is the schema version of server.toml. Bump it when a release
 // changes the schema and add a matching step in migrate() so older configs are
 // upgraded in place on load; Load refuses a config newer than this build.
-const ConfigVersion = 1
+const ConfigVersion = 2
 
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
@@ -102,18 +102,25 @@ type Metadata struct {
 // is tracked separately.
 func (m Model) Available() bool { return m.Enabled && !m.AutoDisabled }
 
-// AuxModel is an admin-set perception model (vision/audio/video), hidden from
-// the user and used mid-conversation to comprehend a non-text asset.
+// AuxModel is an admin-set perception model, hidden from the user and used
+// mid-conversation to comprehend one or more non-text assets. A single model may
+// perceive multiple modalities (e.g. a VLM that takes both image + audio), so
+// Kinds is a set, not a single value.
 type AuxModel struct {
-	Kind     string `toml:"kind" json:"kind"` // vision | audio | video
-	Provider string `toml:"provider" json:"provider"`
-	BaseURL  string `toml:"base_url" json:"base_url"`
-	APIKey   string `toml:"api_key" json:"api_key"`
-	ModelID  string `toml:"model_id" json:"model_id"`
+	Kinds    []string `toml:"kinds" json:"kinds"` // vision/audio/video — one or more
+	Provider string   `toml:"provider" json:"provider"`
+	BaseURL  string   `toml:"base_url" json:"base_url"`
+	APIKey   string   `toml:"api_key" json:"api_key"`
+	ModelID  string   `toml:"model_id" json:"model_id"`
+	// Kind is the deprecated v1 field (a single modality). It exists only so a
+	// v1 config's value survives unmarshal; migrate() folds it into Kinds.
+	Kind string `toml:"kind,omitempty" json:"kind,omitempty"`
 }
 
-// Embedder is the local llama-server serving /v1/embeddings
-// (embeddinggemma-2).
+// Embedder is the local llama-server serving /v1/embeddings (embeddinggemma-2).
+// It is server-managed: the embedder IS the llama-server sidecar, so the server
+// derives its base URL (loopback) from the llama-server endpoint at setup. It is
+// not user-configured in the wizard.
 type Embedder struct {
 	BaseURL string `toml:"base_url" json:"base_url"`
 	APIKey  string `toml:"api_key" json:"api_key"`
@@ -182,6 +189,15 @@ func migrate(c *ServerConfig) error {
 			// already structurally valid v1, so no field transform is needed —
 			// just stamp the version. Future schema changes add cases here.
 			c.Version = 1
+		case 1:
+			// v1 -> v2: aux "kind" (a single modality) became "kinds" (one or
+			// more). Fold any v1 aux Kind into Kinds.
+			for i := range c.Aux {
+				if len(c.Aux[i].Kinds) == 0 && strings.TrimSpace(c.Aux[i].Kind) != "" {
+					c.Aux[i].Kinds = []string{c.Aux[i].Kind}
+				}
+			}
+			c.Version = 2
 		default:
 			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
 		}

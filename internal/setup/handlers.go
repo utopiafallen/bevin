@@ -23,7 +23,7 @@ var wizardTmpl = template.Must(template.New("wizard.html").Funcs(template.FuncMa
 }).ParseFS(wizardFS, "wizard.html"))
 
 // Step order for the wizard (matches the plan's §10).
-var stepOrder = []string{"server", "admin", "models", "aux", "embedder", "sidecars", "review"}
+var stepOrder = []string{"server", "admin", "models", "aux", "sidecars", "review"}
 
 // Handler serves the setup wizard API. Every /setup route is gated on the
 // one-time setup token. After finalize, the in-process transition callback
@@ -148,8 +148,6 @@ func (h *EditHandler) advance(w http.ResponseWriter, r *http.Request) {
 		err = h.mgr.SetModels(p.Models)
 	case "aux":
 		err = h.mgr.SetAux(p.Aux)
-	case "embedder":
-		err = h.mgr.SetEmbedder(p.Embedder)
 	case "sidecars":
 		err = h.mgr.SetSidecars(p.Sidecars)
 	default:
@@ -306,7 +304,6 @@ type advancePayload struct {
 	Admin    AdminAnswers      `json:"admin"`
 	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
-	Embedder config.Embedder   `json:"embedder"`
 	Sidecars config.Sidecars   `json:"sidecars"`
 }
 
@@ -333,8 +330,6 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 		err = h.mgr.SetModels(p.Models)
 	case "aux":
 		err = h.mgr.SetAux(p.Aux)
-	case "embedder":
-		err = h.mgr.SetEmbedder(p.Embedder)
 	case "sidecars":
 		err = h.mgr.SetSidecars(p.Sidecars)
 	case "review":

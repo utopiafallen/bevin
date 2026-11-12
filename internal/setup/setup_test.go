@@ -78,7 +78,6 @@ func validAnswers(m *Manager) {
 		ModelID: "gpt-4o", DisplayName: "GPT-4o", Metadata: config.Metadata{Reasoning: 8, Knowledge: 9, Speed: 7},
 		MaxContext: 128000, Slots: 1, Enabled: true,
 	}})
-	_ = m.SetEmbedder(config.Embedder{BaseURL: "http://127.0.0.1:8081/v1", ModelID: "embeddinggemma-2"})
 	_ = m.SetSidecars(config.Sidecars{Qdrant: "http://127.0.0.1:6333", LlamaServer: "http://127.0.0.1:8081"})
 }
 
@@ -95,9 +94,6 @@ func TestStateValidation(t *testing.T) {
 	}
 	if err := m.SetModels([]config.Model{{Provider: "wat", BaseURL: "http://x", ModelID: "m", Enabled: true}}); err == nil {
 		t.Fatal("expected error for unknown provider")
-	}
-	if err := m.SetEmbedder(config.Embedder{BaseURL: ""}); err == nil {
-		t.Fatal("expected error for empty embedder base_url")
 	}
 }
 

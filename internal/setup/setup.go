@@ -108,8 +108,6 @@ func (m *Manager) clearStep(step string) {
 		m.state.Answers.Models = nil
 	case "aux":
 		m.state.Answers.Aux = nil
-	case "embedder":
-		m.state.Answers.Embedder = config.Embedder{}
 	case "sidecars":
 		m.state.Answers.Sidecars = config.Sidecars{}
 	}
@@ -149,13 +147,12 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 	if err := validateModels(a.Models); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(a.Embedder.BaseURL) == "" {
-		return nil, errors.New("embedder base_url is required")
-	}
 	cfg.Models = a.Models
 	cfg.Aux = a.Aux
-	cfg.Embedder = a.Embedder
 	cfg.Sidecars = a.Sidecars
+	// The embedder is server-managed (it is the llama-server sidecar), so its
+	// config is derived from the llama-server endpoint, not user-entered.
+	cfg.Embedder = deriveEmbedder(cfg.Sidecars.LlamaServer)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -196,15 +193,18 @@ func (m *Manager) SetAux(aux []config.AuxModel) error {
 	return nil
 }
 
-// SetEmbedder stores + validates the embedder step.
-func (m *Manager) SetEmbedder(e config.Embedder) error {
-	if strings.TrimSpace(e.BaseURL) == "" {
-		return errors.New("embedder base_url is required (the local llama-server)")
+// deriveEmbedder builds the embedder config from the llama-server endpoint. The
+// embedder IS the llama-server (running embeddinggemma-2 on loopback), so its
+// base URL is the llama-server endpoint + /v1, with no API key. The server
+// manages this — the user does not configure the embedder in the wizard.
+func deriveEmbedder(llamaEndpoint string) config.Embedder {
+	e := strings.TrimRight(strings.TrimSpace(llamaEndpoint), "/")
+	e = strings.TrimSuffix(e, "/v1") // the endpoint may already carry /v1
+	return config.Embedder{
+		BaseURL: e + "/v1",
+		ModelID: "embeddinggemma-2",
+		APIKey:  "",
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.state.Answers.Embedder = e
-	return nil
 }
 
 // SetSidecars stores the sidecar endpoints step. A blank endpoint means
@@ -234,10 +234,8 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	if err := validateModels(a.Models); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(a.Embedder.BaseURL) == "" {
-		return nil, errors.New("embedder base_url is required")
-	}
-	// Sidecar endpoints may be blank → auto-provisioned in EnsureAll below.
+	// Sidecar endpoints may be blank → auto-provisioned in EnsureAll below. The
+	// embedder is derived from the llama-server endpoint after provisioning.
 
 	secret, err := config.GenerateSessionSecret()
 	if err != nil {
@@ -250,7 +248,6 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds},
 		Models:           a.Models,
 		Aux:              a.Aux,
-		Embedder:         a.Embedder,
 		Sidecars:         a.Sidecars,
 		MaxWorkspaceSize: config.DefaultMaxWorkspaceSize,
 	}
@@ -268,10 +265,14 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		return nil, fmt.Errorf("set admin password: %w", err)
 	}
 
-	// Ensure sidecars (idempotent, forward-only).
+	// Ensure sidecars (idempotent, forward-only). This provisions the
+	// llama-server (the embedder) and records its loopback endpoint into cfg.
 	if err := m.sidecars.EnsureAll(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("sidecars: %w", err)
 	}
+
+	// Derive the embedder from the (now provisioned) llama-server endpoint.
+	cfg.Embedder = deriveEmbedder(cfg.Sidecars.LlamaServer)
 
 	// Write server.toml LAST (the commit of record; 0600 — holds secrets).
 	if err := config.Save(m.dataDir, cfg); err != nil {
