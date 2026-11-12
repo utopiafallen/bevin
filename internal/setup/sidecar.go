@@ -80,7 +80,9 @@ func (sm *SidecarManager) EnsureAll(ctx context.Context, cfg *config.ServerConfi
 		return fmt.Errorf("qdrant: %w", err)
 	}
 	cfg.Sidecars.Qdrant = ep
-	ef, err := sm.Ensure(ctx, cfg.DataDir, KindFFmpeg, "")
+	// ffmpeg: pass the recorded path (blank on a fresh run) so a healthy system
+	// / cached ffmpeg is probed (no re-install), like the other sidecars.
+	ef, err := sm.Ensure(ctx, cfg.DataDir, KindFFmpeg, cfg.Sidecars.FFmpeg)
 	if err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}

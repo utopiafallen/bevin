@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -56,6 +57,11 @@ type Manager struct {
 	mu     sync.Mutex
 	state  SetupState
 	finished bool
+
+	// Sidecar provisioning (the display-only sidecars step): provMu guards
+	// provState (the in-flight / finished run). See provision.go.
+	provMu    sync.Mutex
+	provState *provisionState
 }
 
 // New builds a setup Manager. srv/prov are the live server store + auth
@@ -93,8 +99,18 @@ func (m *Manager) StepBack(step string) {
 }
 
 // Cancel discards all in-memory answers (safe: no side effects; sidecars that
-// were already installed are left in place).
+// were already installed are left in place). It also stops an in-flight
+// provisioning run + resets it (so a later StartProvision re-starts it); a
+// partial download is resumable, so canceling never leaves a broken install.
 func (m *Manager) Cancel() {
+	m.provMu.Lock()
+	if m.provState != nil {
+		if m.provState.running {
+			m.provState.cancel()
+		}
+		m.provState = nil
+	}
+	m.provMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state = SetupState{}
@@ -137,6 +153,13 @@ func (m *Manager) LoadFromConfig() error {
 // aux, and embedder on the existing server.toml (preserving the session secret,
 // auth, bind, port, and sidecar endpoints) without re-seeding the admin.
 func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error) {
+	// Sidecars are server-managed (display-only step): start the provisioning
+	// (idempotent — in edit mode it probes the already-running sidecars, fast)
+	// + wait for it BEFORE taking m.mu, so the recorded endpoints are fresh.
+	m.StartProvision()
+	if werr := m.WaitForProvision(ctx); werr != nil {
+		log.Printf("bevin: setup: sidecar provisioning (edit): %v", werr)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cfg, err := config.Load(m.dataDir)
@@ -149,7 +172,9 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 	}
 	cfg.Models = a.Models
 	cfg.Aux = a.Aux
-	cfg.Sidecars = a.Sidecars
+	// Sidecars are server-managed: use the endpoints the provisioning run
+	// recorded (in edit mode, the already-running sidecars).
+	cfg.Sidecars = m.recordedSidecarsLocked()
 	// The embedder is server-managed (it is the llama-server sidecar), so its
 	// config is derived from the llama-server endpoint, not user-entered.
 	cfg.Embedder = deriveEmbedder(cfg.Sidecars.LlamaServer)
@@ -223,23 +248,33 @@ func (m *Manager) SetSidecars(sc config.Sidecars) error {
 // re-run is a no-op for already-provisioned pieces).
 func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.finished {
+		m.mu.Unlock()
 		return config.Load(m.dataDir)
 	}
-	a := m.state.Answers
+	a := m.state.Answers // captured copy (the answers are not mutated during Finalize)
+	m.mu.Unlock()
+
 	if err := validateAdmin(a.Admin); err != nil {
 		return nil, fmt.Errorf("admin: %w", err)
 	}
 	if err := validateModels(a.Models); err != nil {
 		return nil, err
 	}
-	// Sidecar endpoints may be blank → auto-provisioned in EnsureAll below. The
-	// embedder is derived from the llama-server endpoint after provisioning.
 
 	secret, err := config.GenerateSessionSecret()
 	if err != nil {
 		return nil, err
+	}
+	// Start the sidecar provisioning (idempotent — it may already have started
+	// on the sidecars step) + wait for it. This runs WITHOUT m.mu held, so the
+	// provisioning goroutine can read the answers (existingEndpoint) without
+	// deadlocking. A sidecar provisioned on the step is not re-provisioned (no
+	// port drift) and its endpoint is recorded; a run failure is not fatal here
+	// (EnsureAll below re-tries the failed sidecar).
+	m.StartProvision()
+	if werr := m.WaitForProvision(ctx); werr != nil {
+		log.Printf("bevin: setup: sidecar provisioning: %v (re-trying at finalize)", werr)
 	}
 	cfg := &config.ServerConfig{
 		DataDir:          m.dataDir,
@@ -248,7 +283,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds},
 		Models:           a.Models,
 		Aux:              a.Aux,
-		Sidecars:         a.Sidecars,
+		Sidecars:         m.recordedSidecars(),
 		MaxWorkspaceSize: config.DefaultMaxWorkspaceSize,
 	}
 	if err := cfg.Validate(); err != nil {
@@ -265,8 +300,10 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		return nil, fmt.Errorf("set admin password: %w", err)
 	}
 
-	// Ensure sidecars (idempotent, forward-only). This provisions the
-	// llama-server (the embedder) and records its loopback endpoint into cfg.
+	// Ensure sidecars (idempotent, forward-only). It probes the recorded
+	// endpoints (healthy → no re-provision, no port drift) and re-provisions any
+	// that are blank (a failed sidecar, retried here), recording the final
+	// loopback endpoints into cfg.
 	if err := m.sidecars.EnsureAll(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("sidecars: %w", err)
 	}
@@ -278,7 +315,9 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	if err := config.Save(m.dataDir, cfg); err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
 	m.finished = true
+	m.mu.Unlock()
 	return cfg, nil
 }
 

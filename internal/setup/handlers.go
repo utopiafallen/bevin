@@ -50,6 +50,8 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/test-model", h.testModel)
 	mux.HandleFunc("/setup/test-sidecar", h.testSidecar)
 	mux.HandleFunc("/setup/probe-model", h.probeModel)
+	mux.HandleFunc("/setup/sidecars/start", h.sidecarsStart)
+	mux.HandleFunc("/setup/sidecars/status", h.sidecarsStatus)
 	mux.HandleFunc("/setup/finalize", h.finalize)
 }
 
@@ -95,6 +97,8 @@ func (h *EditHandler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/setup/cancel", h.cancel)
 	mux.HandleFunc("POST /admin/setup/test-model", h.testModel)
 	mux.HandleFunc("POST /admin/setup/probe-model", h.probeModel)
+	mux.HandleFunc("POST /admin/setup/sidecars/start", h.sidecarsStart)
+	mux.HandleFunc("GET /admin/setup/sidecars/status", h.sidecarsStatus)
 	mux.HandleFunc("POST /admin/setup/finalize", h.finalize)
 }
 
@@ -153,7 +157,7 @@ func (h *EditHandler) advance(w http.ResponseWriter, r *http.Request) {
 	case "aux":
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
-		err = h.mgr.SetSidecars(p.Sidecars)
+		// display-only; the server auto-provisions the sidecars (no user state)
 	default:
 		err = fmt.Errorf("unknown step %q", p.Step)
 	}
@@ -254,6 +258,34 @@ func (h *EditHandler) finalize(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data_dir": cfg.DataDir})
 }
 
+// sidecarsStart (edit mode) starts the provisioning run (idempotent — in edit
+// mode it probes the already-running sidecars, fast) + returns the current
+// status. Gated on an admin session.
+func (h *EditHandler) sidecarsStart(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.mgr.StartProvision()
+	writeSidecarsStatus(w, h.mgr)
+}
+
+// sidecarsStatus (edit mode) returns the current per-sidecar provisioning
+// status. Gated on an admin session.
+func (h *EditHandler) sidecarsStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeSidecarsStatus(w, h.mgr)
+}
+
 // gate checks the one-time setup token (query param, echoed into a cookie on
 // first load).
 func (h *Handler) gate(w http.ResponseWriter, r *http.Request) bool {
@@ -285,6 +317,31 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// sidecarView is a SidecarProgress + its display name / description (for the
+// wizard's progress view).
+type sidecarView struct {
+	SidecarProgress
+	Name string `json:"name"`
+	Desc string `json:"desc"`
+}
+
+// writeSidecarsStatus serializes the current provisioning state (the per-sidecar
+// progress + the recorded endpoints). Shared by the setup + edit handlers.
+func writeSidecarsStatus(w http.ResponseWriter, mgr *Manager) {
+	done, running, statuses, endpoints := mgr.ProvisionStatus()
+	views := make([]sidecarView, 0, len(statuses))
+	for _, s := range statuses {
+		meta := SidecarMeta[s.Kind]
+		views = append(views, sidecarView{SidecarProgress: s, Name: meta.Name, Desc: meta.Desc})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"done":      done,
+		"running":   running,
+		"sidecars":  views,
+		"endpoints": endpoints,
+	})
 }
 
 func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
@@ -335,7 +392,7 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	case "aux":
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
-		err = h.mgr.SetSidecars(p.Sidecars)
+		// display-only; the server auto-provisions the sidecars (no user state)
 	case "review":
 		// no state; finalize is a separate call
 	default:
@@ -443,6 +500,34 @@ func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
+}
+
+// sidecarsStart (setup mode) starts the sidecar provisioning run (idempotent)
+// + returns the current status. The wizard calls this when the admin lands on
+// the display-only sidecars step, then polls sidecarsStatus for progress.
+func (h *Handler) sidecarsStart(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.mgr.StartProvision()
+	writeSidecarsStatus(w, h.mgr)
+}
+
+// sidecarsStatus (setup mode) returns the current per-sidecar provisioning
+// status (the wizard streams it on the sidecars step).
+func (h *Handler) sidecarsStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeSidecarsStatus(w, h.mgr)
 }
 
 func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {

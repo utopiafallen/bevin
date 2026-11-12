@@ -46,13 +46,85 @@ const (
 	defaultLlamaPort  = 8081
 )
 
+// ---- download progress reporting ----
+
+// sidecarReport, when non-nil, receives live progress for a sidecar while it is
+// being provisioned: status is one of pending|downloading|starting|ready|error,
+// message is a human-readable detail (which file, byte %, etc.), and percent is
+// a 0-100 download progress (0 when the total size is unknown). The setup
+// Manager sets it for the duration of a provisioning run so the wizard can
+// stream it. The real install functions call report() (phase transitions +
+// download bytes); an injected fake install (tests) simply doesn't.
+var sidecarReport func(kind, status, message string, percent int)
+
+// report is a nil-safe helper the install functions use to report a phase.
+func report(kind, status, message string, percent int) {
+	if sidecarReport != nil {
+		sidecarReport(kind, status, message, percent)
+	}
+}
+
+// downloadProgress is a thin io.Writer that counts bytes and reports download
+// progress (throttled to a few updates per second) via report(). got = bytes in
+// the final file so far (resume offset + bytes written this pass); total = the
+// expected final size (0 when unknown → the wizard shows an indeterminate bar).
+type downloadProgress struct {
+	w       io.Writer
+	kind    string
+	file    string
+	total   int64
+	got0    int64 // bytes already in the file before this pass (resume offset)
+	written int64
+	last    time.Time
+}
+
+func (p *downloadProgress) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.written += int64(n)
+	now := time.Now()
+	if p.last.IsZero() || now.Sub(p.last) >= 250*time.Millisecond {
+		p.last = now
+		got := p.got0 + p.written
+		pct := 0
+		if p.total > 0 {
+			pct = int(got * 100 / p.total)
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		msg := "downloading " + p.file
+		if p.total > 0 {
+			msg += fmt.Sprintf(" (%d%%, %s of %s)", pct, humanBytes(got), humanBytes(p.total))
+		} else {
+			msg += " (" + humanBytes(got) + ")"
+		}
+		report(p.kind, "downloading", msg, pct)
+	}
+	return n, err
+}
+
+// humanBytes renders a byte count in a compact form (e.g. "12.3 MB").
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 // ---- download (resumable, atomic, cached) ----
 
 // downloadResumable fetches url to dest, resuming a partial <dest>.part via
 // HTTP Range. The file is written to <dest>.part then atomically renamed to
 // dest, so a partial download is never a broken final file. It returns the
-// number of bytes in the final file.
-func downloadResumable(ctx context.Context, url, dest string) (int64, error) {
+// number of bytes in the final file. kind + fileLabel are used for progress
+// reporting (fileLabel is the human-readable name shown in the wizard).
+func downloadResumable(ctx context.Context, url, dest string, kind, fileLabel string) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return 0, err
 	}
@@ -87,7 +159,24 @@ func downloadResumable(ctx context.Context, url, dest string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	written, err := io.Copy(f, resp.Body)
+	// Expected final size: Content-Length for a fresh download, or the "/total"
+	// of Content-Range for a resume (0 when the server doesn't say →
+	// indeterminate progress).
+	total := int64(0)
+	if cl, perr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); perr == nil {
+		if resp.StatusCode == http.StatusOK {
+			total = cl + start
+		}
+	}
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		if i := strings.IndexByte(cr, '/'); i >= 0 {
+			if t, perr := strconv.ParseInt(cr[i+1:], 10, 64); perr == nil {
+				total = t
+			}
+		}
+	}
+	pw := &downloadProgress{w: f, kind: kind, file: fileLabel, total: total, got0: start}
+	written, err := io.Copy(pw, resp.Body)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -261,7 +350,7 @@ func installQdrant(ctx context.Context, dataDir string, preferredPort int) (stri
 		if url == "" {
 			return "", fmt.Errorf("no qdrant release known for %s (pass an endpoint in the wizard)", osArch())
 		}
-		if _, err := downloadResumable(ctx, url, filepath.Join(dir, "qdrant-artifact")); err != nil {
+		if _, err := downloadResumable(ctx, url, filepath.Join(dir, "qdrant-artifact"), KindQdrant, "Qdrant"); err != nil {
 			return "", err
 		}
 		if err := extractArtifact(filepath.Join(dir, "qdrant-artifact"), dir); err != nil {
@@ -302,6 +391,7 @@ func installQdrant(ctx context.Context, dataDir string, preferredPort int) (stri
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		return "", err
 	}
+	report(KindQdrant, "starting", "Starting Qdrant…", 100)
 	if err := launchDaemon(ctx, bin, dataDir, KindQdrant, "--config-path", cfgPath); err != nil {
 		return "", err
 	}
@@ -322,7 +412,7 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 	bin := findBinary(dir, "llama-server")
 	if bin == "" {
 		if url := llamaDownloadURL(); url != "" {
-			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "llama-artifact")); err != nil {
+			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "llama-artifact"), KindLlamaServer, "llama-server"); err != nil {
 				return "", err
 			}
 			if err := extractArtifact(filepath.Join(dir, "llama-artifact"), dir); err != nil {
@@ -337,13 +427,13 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 	// Embedding model + mmproj (the multimodal projector).
 	gguf := filepath.Join(models, embedGGUFName)
 	if _, err := os.Stat(gguf); err != nil {
-		if _, err := downloadResumable(ctx, embedDownloadURL(embedGGUFName), gguf); err != nil {
+		if _, err := downloadResumable(ctx, embedDownloadURL(embedGGUFName), gguf, KindLlamaServer, "embedding model"); err != nil {
 			return "", err
 		}
 	}
 	mmproj := filepath.Join(models, embedMMProjName)
 	if _, err := os.Stat(mmproj); err != nil {
-		if _, err := downloadResumable(ctx, embedDownloadURL(embedMMProjName), mmproj); err != nil {
+		if _, err := downloadResumable(ctx, embedDownloadURL(embedMMProjName), mmproj, KindLlamaServer, "multimodal projector"); err != nil {
 			return "", err
 		}
 	}
@@ -365,6 +455,7 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 		"-m", gguf, "--mmproj", mmproj, "--embedding",
 		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-ngl", "0",
 	}
+	report(KindLlamaServer, "starting", "Starting llama-server (the model load can take a couple minutes)…", 100)
 	if err := launchDaemon(ctx, bin, dataDir, KindLlamaServer, args...); err != nil {
 		return "", err
 	}
@@ -390,7 +481,7 @@ func installFFmpeg(ctx context.Context, dataDir string) (string, error) {
 	bin := findBinary(dir, "ffmpeg")
 	if bin == "" {
 		if url := ffmpegDownloadURL(); url != "" {
-			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "ffmpeg-artifact")); err != nil {
+			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "ffmpeg-artifact"), KindFFmpeg, "ffmpeg"); err != nil {
 				return "", err
 			}
 			if err := extractArtifact(filepath.Join(dir, "ffmpeg-artifact"), dir); err != nil {

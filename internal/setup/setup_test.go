@@ -45,15 +45,23 @@ func TestWizardTemplateRenders(t *testing.T) {
 
 type fakeSidecars struct {
 	probeInstalled bool
+	installed      map[string]bool // kind → installed (the probe reports healthy for these)
 	probes, installs int
 }
 
 func (f *fakeSidecars) probe(ctx context.Context, dataDir, kind, endpoint string) (bool, error) {
 	f.probes++
-	return f.probeInstalled, nil
+	if f.probeInstalled {
+		return true, nil
+	}
+	return f.installed[kind], nil
 }
 func (f *fakeSidecars) install(ctx context.Context, dataDir, kind string, preferredPort int) (string, error) {
 	f.installs++
+	if f.installed == nil {
+		f.installed = map[string]bool{}
+	}
+	f.installed[kind] = true
 	return "http://127.0.0.1:1", nil
 }
 
@@ -188,7 +196,7 @@ func TestDownloadResumable(t *testing.T) {
 
 	// Fresh full download.
 	dest := filepath.Join(t.TempDir(), "file.bin")
-	if _, err := downloadResumable(context.Background(), srv.URL, dest); err != nil {
+	if _, err := downloadResumable(context.Background(), srv.URL, dest, KindQdrant, "test file"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(dest)
@@ -202,7 +210,7 @@ func TestDownloadResumable(t *testing.T) {
 	if err := os.WriteFile(dest2+".part", []byte("hello wo"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := downloadResumable(context.Background(), srv.URL, dest2); err != nil {
+	if _, err := downloadResumable(context.Background(), srv.URL, dest2, KindQdrant, "test file"); err != nil {
 		t.Fatal(err)
 	}
 	got2, _ := os.ReadFile(dest2)

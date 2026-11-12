@@ -34,6 +34,27 @@
   .hidden { display:none; }
   .kv { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-2); padding:.1em .4em; border-radius:6px; }
   pre.kv { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:.8rem; overflow:auto; margin:0; }
+  /* sidecars step (display-only) — per-sidecar progress + a confirmation banner */
+  .sidecar-list { margin-top:.9rem; display:flex; flex-direction:column; gap:.55rem; }
+  .sidecar-row { display:flex; gap:.6rem; align-items:flex-start; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:.6rem .7rem; }
+  .sidecar-icon { width:1.1rem; text-align:center; font-weight:800; margin-top:.1rem; color:var(--text-muted); flex:none; }
+  .sidecar-icon.ready { color:var(--ok); }
+  .sidecar-icon.error { color:var(--danger); }
+  .sidecar-icon.downloading, .sidecar-icon.starting { color:var(--brand-strong); animation:sidecarPulse 1.2s ease-in-out infinite; }
+  @keyframes sidecarPulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  .sidecar-body { flex:1; min-width:0; }
+  .sidecar-head { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap; }
+  .sidecar-name { font-weight:700; font-size:.9rem; }
+  .sidecar-desc { font-size:.78rem; color:var(--text-muted); }
+  .sidecar-msg { font-size:.78rem; color:var(--text-muted); margin-top:.2rem; word-break:break-word; }
+  .sidecar-bar { height:6px; background:var(--border); border-radius:4px; margin-top:.4rem; overflow:hidden; }
+  .sidecar-fill { height:100%; width:0; background:var(--brand); border-radius:4px; transition:width .4s ease; }
+  .sidecar-fill.ready { background:var(--ok); }
+  .sidecar-fill.error { background:var(--danger); }
+  .sidecar-banner { margin-top:.9rem; font-size:.88rem; font-weight:600; padding:.6rem .8rem; border-radius:var(--radius); border:1px solid var(--border); background:var(--surface-2); }
+  .sidecar-banner.ok { color:var(--ok); border-color:var(--ok); }
+  .sidecar-banner.err { color:var(--danger); border-color:var(--danger); }
+  .sidecar-retry { font:inherit; font-weight:700; margin-left:.5rem; padding:.2rem .6rem; border:1px solid var(--danger); border-radius:var(--radius); background:transparent; color:var(--danger); cursor:pointer; }
   .pw-wrap { display:flex; gap:.4rem; align-items:center; }
   .pw-wrap input { flex:1; }
   .pw-toggle { font:inherit; font-size:.78rem; font-weight:700; white-space:nowrap; padding:.3rem .6rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text-muted); cursor:pointer; }
@@ -132,7 +153,7 @@ const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
 // In edit mode the routes are namespaced under /admin and the admin-identity
 // step is skipped (the admin already exists), so start on the models step.
 let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {} };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {}, sidecarStatus: null };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ if(c==null) continue; e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -372,14 +393,101 @@ function renderAuxPerception(i){
     el("p",{class:"field-help"},"Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."));
   return ph;
 }
-function renderSidecars(){ const c=S.sidecars; return el("div",{},
-  el("h3",{}, "5. Sidecars"),
-  el("p",{class:"small"},"Leave an endpoint blank to auto-provision (download + launch, idempotent, forward-only). All sidecars bind to loopback. The llama-server below is the embedder: its base URL is configured for you automatically (loopback, the server picks the port), so there is no separate embedder step. Stepping back / canceling never uninstalls."),
-  field("Qdrant endpoint", inp("sc_qdrant", c.qdrant, "http://127.0.0.1:6333 (blank = auto)")),
-  field("llama-server endpoint", inp("sc_llama", c.llama_server, "http://127.0.0.1:8081 (blank = auto)")),
-  field("ffmpeg path", inp("sc_ffmpeg", c.ffmpeg, "blank = use system or auto")),
-  el("div",{class:"btns"},el("button",{onclick:"testQdrant()"},"Test Qdrant"), el("button",{onclick:"testLlama()"},"Test llama-server"))
-);}
+// ---- sidecars step (display-only) ----
+// The server auto-provisions the sidecars. This step shows per-sidecar progress
+// (checking → downloading → starting → ready) streamed from the server, then a
+// confirmation. No user input. _sidecarTimer is the 1s poll (null when stopped).
+let _sidecarTimer = null;
+function renderSidecars(){
+  const d = el("div",{});
+  d.append(el("h3",{}, "5. Sidecars"));
+  d.append(el("p",{class:"small"},"bevin provisions these local services for you — it downloads + launches each one, all bound to loopback. The llama-server is the embedder; its endpoint is configured for you automatically, so there is no separate embedder step. Stepping back / canceling never uninstalls."));
+  d.append(el("div",{class:"sidecar-list", id:"sidecar_list"}));
+  d.append(el("div",{class:"sidecar-banner", id:"sidecar_banner"}));
+  renderSidecarList();
+  return d;
+}
+const SIDECAR_PLACEHOLDER = [
+  {kind:"qdrant", name:"Qdrant", desc:"Vector database — workspace file search", status:"pending", message:"Waiting…", percent:0},
+  {kind:"ffmpeg", name:"ffmpeg", desc:"Media decoding — workspace ingest", status:"pending", message:"Waiting…", percent:0},
+  {kind:"llama-server", name:"llama-server", desc:"Local embedder (embeddinggemma-2)", status:"pending", message:"Waiting…", percent:0},
+];
+function statusIcon(status){
+  switch(status){
+    case "ready": return "✓";
+    case "error": return "✕";
+    case "downloading": case "starting": return "▸";
+    default: return "•";
+  }
+}
+function renderSidecarList(){
+  const list = document.getElementById("sidecar_list");
+  const banner = document.getElementById("sidecar_banner");
+  if(!list) return;
+  const st = S.sidecarStatus;
+  const rows = (st && st.sidecars && st.sidecars.length) ? st.sidecars : SIDECAR_PLACEHOLDER;
+  list.innerHTML = "";
+  let allReady = true, anyError = false;
+  for(const s of rows){
+    const row = el("div",{class:"sidecar-row"});
+    row.append(el("span",{class:"sidecar-icon " + (s.status||"pending"), text: statusIcon(s.status)}));
+    const body = el("div",{class:"sidecar-body"});
+    const head = el("div",{class:"sidecar-head"});
+    head.append(el("span",{class:"sidecar-name"}, s.name || s.kind));
+    if(s.desc) head.append(el("span",{class:"sidecar-desc"}, s.desc));
+    body.append(head);
+    let detail = s.message || "";
+    if(s.status === "ready" && s.endpoint) detail = (detail ? detail + " — " : "") + s.endpoint;
+    else if(s.status === "error" && s.error) detail = s.error;
+    if(detail) body.append(el("div",{class:"sidecar-msg"}, detail));
+    const bar = el("div",{class:"sidecar-bar"});
+    const fill = el("div",{class:"sidecar-fill " + (s.status||"pending")});
+    fill.style.width = (s.percent||0) + "%";
+    bar.append(fill);
+    body.append(bar);
+    row.append(body);
+    list.append(row);
+    if(s.status !== "ready") allReady = false;
+    if(s.status === "error") anyError = true;
+  }
+  const next = document.getElementById("next");
+  banner.className = "sidecar-banner";
+  banner.innerHTML = "";
+  if(st && st.done && allReady && !anyError){
+    banner.classList.add("ok");
+    banner.append(el("span",{}, "All sidecars are ready."));
+    if(next) next.disabled = false;
+  } else {
+    if(anyError){
+      banner.classList.add("err");
+      banner.append(el("span",{}, "A sidecar failed to set up. "));
+      const retry = el("button",{class:"sidecar-retry", onclick:"startSidecars()"},"Retry");
+      banner.append(retry);
+    } else if(st && st.running){
+      banner.append(el("span",{}, "Setting up sidecars… this can take a few minutes (the llama-server model load is the slow part). You can wait here."));
+    } else {
+      banner.append(el("span",{}, "Preparing to set up the sidecars…"));
+    }
+    if(next) next.disabled = true;
+  }
+}
+async function startSidecars(){
+  if(_sidecarTimer) return; // already polling
+  try{ S.sidecarStatus = await api("POST", "/setup/sidecars/start", {}); }
+  catch(e){ S.sidecarStatus = null; }
+  renderSidecarList();
+  if(!_sidecarTimer) _sidecarTimer = setInterval(pollSidecars, 1000);
+}
+async function pollSidecars(){
+  if(STEPS[idx] !== "sidecars"){ stopSidecarPoll(); return; }
+  try{
+    const st = await api("GET", "/setup/sidecars/status");
+    S.sidecarStatus = st;
+    renderSidecarList();
+    if(st && st.done) stopSidecarPoll();
+  }catch(e){ /* transient; keep polling */ }
+}
+function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
 function renderReview(){ const d=el("div",{},el("h3",{}, "6. Review & finish"));
   d.append(el("pre",{class:"kv"}, JSON.stringify(S, null, 2)));
   d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
@@ -513,9 +621,6 @@ async function detectAux(i){ const m=S.aux[i]; if(m._detecting) return; if(!m.ba
   catch(e){ S.auxError=S.auxError||{}; S.auxError[i]="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
   finally{ m._detecting=false; render(); }
 }
-async function testQdrant(){ msg("Testing Qdrant…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"qdrant",endpoint:S.sidecars.qdrant}); msg(r.ok?"Qdrant reachable.":"Qdrant not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
-async function testLlama(){ msg("Testing llama-server…",""); try{ const r=await api("POST","/setup/test-sidecar",{kind:"llama-server",endpoint:S.sidecars.llama_server}); msg(r.ok?"llama-server reachable.":"llama-server not reachable yet.","ok"); }catch(e){ msg("Error: "+e.message,"err"); } }
-
 // ---- nav ----
 function sync(id, v){ /* handled by per-field listeners */ }
 function render(){
@@ -527,13 +632,18 @@ function render(){
   document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
   refreshScoreFills();
+  // Sidecars step: start the (idempotent) provisioning + stream progress when
+  // the admin lands on it (startSidecars guards against re-starting the poll).
+  if(STEPS[idx] === "sidecars" && !_sidecarTimer){ startSidecars(); }
 }
 async function api(method, path, body){ const url = IS_EDIT ? "/admin" + path : path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, sidecars via id-based reads)
   if(step==="admin"){ S.admin.handle=q("#ad_handle").value||q("#ad_handle").placeholder; S.admin.display_name=q("#ad_name").value||q("#ad_name").placeholder; S.admin.password=q("#ad_pw").value; if(q("#ad_pw").value!==q("#ad_pw2").value){msg("Passwords do not match","err");return;} }
-  if(step==="sidecars"){ S.sidecars.qdrant=q("#sc_qdrant").value; S.sidecars.llama_server=q("#sc_llama").value; S.sidecars.ffmpeg=q("#sc_ffmpeg").value; }
+  // The sidecars step is display-only: require all sidecars ready before
+  // advancing (the Next button is disabled until then — belt-and-suspenders).
+  if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
   try{
     await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:S.aux, sidecars:S.sidecars});
     msg("");
@@ -542,7 +652,7 @@ async function doNext(){
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); if(IS_EDIT){ msg("Done — config saved; the agent will pick up the changes.","ok"); document.getElementById("body").innerHTML="<h3>Config updated</h3><p>Your model changes are saved. <a href='/'>Back to bevin</a></p>"; } else { msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; } document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
 function q(s){ return document.querySelector(s); }
 
