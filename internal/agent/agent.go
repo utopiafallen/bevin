@@ -185,6 +185,12 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 		if err != nil {
 			return "", err
 		}
+		// Freeze the system prompt at conversation start. It is the content of
+		// the system message the request builder sends; a profile/input change
+		// later appends a new system message rather than mutating this.
+		if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
+			return "", err
+		}
 		return c.ID, nil
 	}
 	if _, err := us.GetConversation(convID); err != nil {
@@ -193,9 +199,16 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 	return convID, nil
 }
 
-// Turn runs one chat turn: persist the user message, call the active model with
-// the full conversation history, persist the assistant reply. Returns the reply
-// text and the conversation id.
+// Turn runs one chat turn: persist the user message, build the request (frozen
+// system prompt + latest context summary + raw turns since that summary), call
+// the active model, persist the assistant reply. Before the call, if the prompt
+// is already over the summarization budget (a very large message, or growth
+// that outpaced the post-turn compaction), it compacts the older turns so the
+// call fits. After the turn, if the prompt (now including the reply) exceeds
+// the budget, it compacts the older turns so the NEXT call fits. Compaction
+// folds the raw turns since the latest summary into a new chained summary
+// (stored as role=summary); full history is retained. Returns the reply text
+// and the conversation id.
 func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
@@ -211,26 +224,28 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 	}
 
 	// Persist the user message first, so history is always durable/consistent.
-	if _, err := us.AppendMessage(convID, string(provider.RoleUser), userText, nil, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleUser, userText, nil, nil); err != nil {
 		return conv.ID, "", err
 	}
 	hist, err := us.ListMessages(convID)
 	if err != nil {
 		return conv.ID, "", err
 	}
-	msgs := make([]provider.Message, 0, len(hist))
-	for _, h := range hist {
-		role := provider.Role(h.Role)
-		if role == "" {
-			role = provider.RoleUser
+	req, tokens := buildRequest(conv, hist)
+	if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID)) {
+		// Pre-compact: the prompt is over budget before the call. Fold the
+		// older turns (incl. this message) into a summary so the call fits.
+		if cerr := a.compactIfNeeded(ctx, us, conv, p); cerr != nil {
+			return conv.ID, "", cerr
 		}
-		msgs = append(msgs, provider.Message{Role: role, Text: h.Content})
+		hist, err = us.ListMessages(convID)
+		if err != nil {
+			return conv.ID, "", err
+		}
+		req, _ = buildRequest(conv, hist)
 	}
 
-	res, err := p.Chat(ctx, conv.ActiveModelID, provider.ChatRequest{
-		System:   []provider.ContentPart{{Text: baseSystemPrompt}},
-		Messages: msgs,
-	})
+	res, err := p.Chat(ctx, conv.ActiveModelID, req)
 	if err != nil {
 		if isModelUnavailable(err) {
 			// The provider reports the model is unavailable — auto-disable it
@@ -246,8 +261,15 @@ func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (stri
 		a.SetModelAutoDisabled(conv.ActiveModelID, false)
 	}
 	modelID := conv.ActiveModelID
-	if _, err := us.AppendMessage(convID, string(provider.RoleAssistant), res.Text, &modelID, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, &modelID, nil); err != nil {
 		return conv.ID, "", err
+	}
+	// Post-compact: if the prompt (now including the reply) exceeds the budget,
+	// compact the older turns so the next call fits. A compaction failure is not
+	// fatal to the turn (the reply is already persisted) — log it; the next turn
+	// retries.
+	if cerr := a.compactIfNeeded(ctx, us, conv, p); cerr != nil {
+		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil
 }

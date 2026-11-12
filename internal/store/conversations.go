@@ -104,6 +104,20 @@ func (s *UserStore) SetConversationTitle(id, title string) error {
 	return err
 }
 
+// SetFrozenSystemPrompt stores the system prompt frozen at conversation start.
+// It is the content of the system message the request builder sends; it is not
+// mutated in place (a profile/input change appends a new system message later).
+func (s *UserStore) SetFrozenSystemPrompt(id, prompt string) error {
+	res, err := s.db.Exec(`UPDATE conversations SET frozen_system_prompt = ? WHERE id = ?`, prompt, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Message is a P3 row.
 type Message struct {
 	ID             int64     `json:"id"`
