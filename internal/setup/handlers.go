@@ -326,7 +326,7 @@ func (m *Manager) TestEmail(ctx context.Context, smtp config.Email, to string) e
 	if s == nil {
 		return fmt.Errorf("no SMTP host configured")
 	}
-	return s.Send(ctx, to, "bevin — test email",
+	return s.Send(ctx, to, "bevin: test email",
 		"This is a test email from your bevin server.\n\nIf you can read it, your SMTP settings work.\n\n— bevin")
 }
 
