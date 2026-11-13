@@ -23,7 +23,7 @@ func TestNormalizeOAuth(t *testing.T) {
 	full := config.OAuth{
 		Enabled: true, ClientID: "app-1", ClientSecret: "s3cret",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
-		UserinfoURL: "https://idp.example.com/o/user/", RedirectURI: "https://bevin.example.com/auth/oauth/callback",
+		UserinfoURL: "https://idp.example.com/o/user/", BaseURI: "https://bevin.example.com",
 	}
 	n, err := normalizeOAuth(full)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestNormalizeOAuth(t *testing.T) {
 	missing(func(o *config.OAuth) { o.AuthURL = "" })
 	missing(func(o *config.OAuth) { o.TokenURL = "" })
 	missing(func(o *config.OAuth) { o.UserinfoURL = "" })
-	missing(func(o *config.OAuth) { o.RedirectURI = "" })
+	missing(func(o *config.OAuth) { o.BaseURI = "" })
 
 	// Non-http(s) / relative URLs are rejected.
 	bad := full
@@ -72,16 +72,16 @@ func TestNormalizeOAuth(t *testing.T) {
 // TestSanitizeHandle — provider text -> a valid bevin handle.
 func TestSanitizeHandle(t *testing.T) {
 	cases := map[string]string{
-		"Alice":        "alice",
-		"alice.bob":    "alice.bob",
-		"__lead":       "lead", // leading punctuation dropped
-		"UPPER_CASE":   "upper_case",
-		"sp ace":       "space",
-		"a@x.com":      "ax.com", // SanitizeHandle strips disallowed chars (the email LOCAL PART is split on @ by the caller)
-		"short":        "short",
-		"":             "",
-		"!!":           "",
-		"a":            "", // <2 chars
+		"Alice":      "alice",
+		"alice.bob":  "alice.bob",
+		"__lead":     "lead", // leading punctuation dropped
+		"UPPER_CASE": "upper_case",
+		"sp ace":     "space",
+		"a@x.com":    "ax.com", // SanitizeHandle strips disallowed chars (the email LOCAL PART is split on @ by the caller)
+		"short":      "short",
+		"":           "",
+		"!!":         "",
+		"a":          "", // <2 chars
 	}
 	for in, want := range cases {
 		if got := SanitizeHandle(in); got != want {
@@ -123,7 +123,7 @@ func TestCommitEditOAuth(t *testing.T) {
 		Enabled: true, Name: "authentik", ClientID: "app-1", ClientSecret: "s3cret",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
 		UserinfoURL: "https://idp.example.com/o/user/", Scopes: "openid profile email",
-		RedirectURI: "https://bevin.example.com/auth/oauth/callback",
+		BaseURI: "https://bevin.example.com",
 	}
 	got, err := m.CommitEdit(nil, nil, nil, &oauth)
 	if err != nil {
@@ -181,7 +181,7 @@ func TestSetOAuthStep(t *testing.T) {
 	full := config.OAuth{
 		Enabled: true, Name: "authentik", ClientID: "app-1",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
-		UserinfoURL: "https://idp.example.com/o/user/", RedirectURI: "https://bevin.example.com/auth/oauth/callback",
+		UserinfoURL: "https://idp.example.com/o/user/", BaseURI: "https://bevin.example.com",
 	}
 	if err := m.SetOAuth(full); err != nil {
 		t.Fatal(err)

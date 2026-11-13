@@ -54,15 +54,15 @@ type SetupState struct {
 
 // Manager drives the wizard. It is safe for concurrent use.
 type Manager struct {
-	dataDir string
-	bind    string
-	port    int
-	srv     *store.ServerStore
-	prov    auth.Provider
+	dataDir  string
+	bind     string
+	port     int
+	srv      *store.ServerStore
+	prov     auth.Provider
 	sidecars *SidecarManager
 
-	mu     sync.Mutex
-	state  SetupState
+	mu       sync.Mutex
+	state    SetupState
 	finished bool
 
 	// onFinalize, when set, is called (normal mode only) right after an edit
@@ -353,7 +353,7 @@ func normalizeOAuth(o config.OAuth) (config.OAuth, error) {
 	o.TokenURL = strings.TrimSpace(o.TokenURL)
 	o.UserinfoURL = strings.TrimSpace(o.UserinfoURL)
 	o.Scopes = strings.TrimSpace(o.Scopes)
-	o.RedirectURI = strings.TrimSpace(o.RedirectURI)
+	o.BaseURI = strings.TrimSpace(o.BaseURI)
 	if !o.Enabled {
 		return o, nil
 	}
@@ -369,7 +369,7 @@ func normalizeOAuth(o config.OAuth) (config.OAuth, error) {
 		{"authorization (auth) URL", o.AuthURL},
 		{"token URL", o.TokenURL},
 		{"user-info URL", o.UserinfoURL},
-		{"redirect URI", o.RedirectURI},
+		{"public base URI", o.BaseURI},
 	} {
 		if u.val == "" {
 			return o, fmt.Errorf("oauth: %s is required when OAuth is enabled", u.name)

@@ -50,7 +50,7 @@ const PROBE_URL = "/admin/api/probe-model"; // unused here; the shared code refe
 let S = {
   selfHandle: "",
   users: [],
-  oauth: { enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", redirect_uri:"" },
+  oauth: { enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", base_uri:"" },
   _hasSecret: false,
 };
 
@@ -136,7 +136,8 @@ function renderOauthSection(main){
   const tuI=inp("oa_tokenurl", o.token_url, "https://idp.example.com/application/o/token/");
   const uuI=inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/");
   const scI=inp("oa_scopes", o.scopes, "openid profile email");
-  const ruI=inp("oa_redirecturi", o.redirect_uri, "https://bevin.example.com/auth/oauth/callback");
+  const ruI=inp("oa_baseuri", o.base_uri, "https://bevin.example.com");
+  const ruOut=inp("oa_redirectderived","",""); ruOut.readOnly=true;
   nameI.addEventListener("input",()=>{ o.name=nameI.value; });
   cidI.addEventListener("input",()=>{ o.client_id=cidI.value; });
   csI.addEventListener("input",()=>{ o.client_secret=csI.value; });
@@ -144,14 +145,17 @@ function renderOauthSection(main){
   tuI.addEventListener("input",()=>{ o.token_url=tuI.value; });
   uuI.addEventListener("input",()=>{ o.userinfo_url=uuI.value; });
   scI.addEventListener("input",()=>{ o.scopes=scI.value; });
-  ruI.addEventListener("input",()=>{ o.redirect_uri=ruI.value; });
+  ruI.addEventListener("input",()=>{ o.base_uri=ruI.value; ruOut.value=derivedRedirect(); });
+  function derivedRedirect(){ return (String(o.base_uri||"").trim().replace(/\/+$/,""))+"/auth/oauth/callback"; }
+  ruOut.value=derivedRedirect();
   d.append(field("Provider name", nameI));
   d.append(el("div",{class:"row"}, field("Client ID", cidI), field("Client secret", csI)));
   d.append(field("Authorization URL", auI));
   d.append(field("Token URL", tuI));
   d.append(field("User-info URL", uuI));
-  d.append(el("div",{class:"row"}, field("Scopes", scI), field("Redirect URI", ruI)));
-  d.append(el("p",{class:"small"},"The redirect URI is this server's PUBLIC address + /auth/oauth/callback — the exact URL registered on the OAuth app. The provider's identity maps to a handle from preferred_username (else the email's local part, else the subject)."));
+  d.append(el("div",{class:"row"}, field("Scopes", scI), field("Public base URI", ruI)));
+  d.append(field("Redirect URI — paste this into the OAuth app registration", ruOut));
+  d.append(el("p",{class:"small"},"Enter this server's PUBLIC address — behind the reverse proxy, so https (with a subpath if bevin is served under one). Bevin derives the redirect URI from it (base + /auth/oauth/callback) — the provider's identity maps to a handle from preferred_username (else the email's local part, else the subject)."));
   const save=el("button",{class:"primary"},"Save OAuth settings");
   save.onclick=async function(){
     try{
@@ -195,7 +199,7 @@ async function refreshUsers(){
       token_url: o.token_url||"",
       userinfo_url: o.userinfo_url||"",
       scopes: o.scopes||"",
-      redirect_uri: o.redirect_uri||"",
+      base_uri: o.base_uri||"",
     };
     S._hasSecret=!!o.has_secret;
   }catch(err){ msg("Could not load the config: "+err.message,"err"); }

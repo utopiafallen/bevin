@@ -94,7 +94,7 @@ let idx = 0;
 // define the same names pointing at their own /admin/api/* endpoints.
 const PROBE_URL = "/setup/probe-model";
 const EMAIL_TEST_URL = "/setup/test-email";
-let S = { admin: {handle:"",display_name:"",password:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", redirect_uri:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+let S = { admin: {handle:"",display_name:"",password:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", base_uri:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 // ---- per-step renderers ----
 function renderServer(){ return el("div",{},
@@ -138,8 +138,13 @@ function renderOAuth(){
   d.append(field("User-info URL", inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/")));
   d.append(el("div",{class:"row"},
     field("Scopes", inp("oa_scopes", o.scopes, "openid profile email")),
-    field("Redirect URI", inp("oa_redirecturi", o.redirect_uri, "https://bevin.example.com/auth/oauth/callback"))));
-  d.append(el("p",{class:"small"},"The redirect URI is this server's PUBLIC address + /auth/oauth/callback — the exact URL you register on the OAuth app (behind your reverse proxy, so https). The provider's user identity is mapped to a bevin handle from its preferred_username (else the email's local part, else the subject)."));
+    field("Public base URI", inp("oa_baseuri", o.base_uri, "https://bevin.example.com"))));
+  const ruOut=inp("oa_redirectderived","",""); ruOut.readOnly=true;
+  const updateDerived=()=>{ ruOut.value=(String(o.base_uri||"").trim().replace(/\/+$/,""))+"/auth/oauth/callback"; };
+  q("#oa_baseuri").addEventListener("input",()=>{ updateDerived(); });
+  updateDerived();
+  d.append(field("Redirect URI — paste this into the OAuth app registration", ruOut));
+  d.append(el("p",{class:"small"},"Enter this server's PUBLIC address — behind your reverse proxy, so https (with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Bevin knows its own callback route and derives the redirect URI from the base (base + /auth/oauth/callback) — there is nothing else to set here. The provider's user identity is mapped to a bevin handle from its preferred_username (else the email's local part, else the subject)."));
   return d;
 }
 function renderModels(){
@@ -296,7 +301,7 @@ async function doNext(){
   // (normalizeOAuth) so the review step shows the effective values. The
   // fields only exist while the step is enabled — gathering is skipped when
   // it's off (the stored draft is kept; a disabled IdP is ignored at runtime).
-  if(step==="oauth" && S.oauth.enabled){ const o=S.oauth; o.name=q("#oa_name").value; o.client_id=q("#oa_clientid").value; o.client_secret=q("#oa_clientsecret").value; o.auth_url=q("#oa_authurl").value; o.token_url=q("#oa_tokenurl").value; o.userinfo_url=q("#oa_userinfourl").value; o.scopes=q("#oa_scopes").value; o.redirect_uri=q("#oa_redirecturi").value; ["name","client_id","client_secret","auth_url","token_url","userinfo_url","scopes","redirect_uri"].forEach(k=>{ o[k]=String(o[k]||"").trim(); }); if(o.enabled){ if(!o.name) o.name="OAuth"; if(!o.scopes) o.scopes="openid profile email"; } }
+  if(step==="oauth" && S.oauth.enabled){ const o=S.oauth; o.name=q("#oa_name").value; o.client_id=q("#oa_clientid").value; o.client_secret=q("#oa_clientsecret").value; o.auth_url=q("#oa_authurl").value; o.token_url=q("#oa_tokenurl").value; o.userinfo_url=q("#oa_userinfourl").value; o.scopes=q("#oa_scopes").value; o.base_uri=q("#oa_baseuri").value; ["name","client_id","client_secret","auth_url","token_url","userinfo_url","scopes","base_uri"].forEach(k=>{ o[k]=String(o[k]||"").trim(); }); if(o.enabled){ if(!o.name) o.name="OAuth"; if(!o.scopes) o.scopes="openid profile email"; } }
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
@@ -322,7 +327,7 @@ async function doNext(){
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:"",redirect_uri:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:"",base_uri:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
   msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go

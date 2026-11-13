@@ -167,7 +167,9 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"token_url":    cfg.Auth.OAuth.TokenURL,
 			"userinfo_url": cfg.Auth.OAuth.UserinfoURL,
 			"scopes":       cfg.Auth.OAuth.Scopes,
-			"redirect_uri": cfg.Auth.OAuth.RedirectURI,
+			"base_uri":     cfg.Auth.OAuth.BaseURI,
+			// Derived, read-only: what the admin pastes into the provider.
+			"redirect_uri": cfg.Auth.OAuth.RedirectURI(),
 		},
 	})
 }

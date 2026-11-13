@@ -82,7 +82,7 @@ func oauthApp(t *testing.T, claims map[string]any) (*App, *store.ServerStore, st
 				Enabled: true, Name: "TestIDP", ClientID: "app-1", ClientSecret: "cs-1",
 				AuthURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token",
 				UserinfoURL: provider.URL + "/userinfo", Scopes: "openid profile email",
-				RedirectURI: "https://bevin.example.com/auth/oauth/callback",
+				BaseURI: "https://bevin.example.com",
 			},
 		},
 	}
@@ -109,6 +109,11 @@ func doOAuthRoundTrip(t *testing.T, a *App) (*httptest.ResponseRecorder, string)
 	state := lu.Query().Get("state")
 	if state == "" {
 		t.Fatal("login redirect missing the state param")
+	}
+	// The redirect_uri must be the one DERIVED from the configured public
+	// base (base + /auth/oauth/callback) — the admin never types it.
+	if got, want := lu.Query().Get("redirect_uri"), "https://bevin.example.com/auth/oauth/callback"; got != want {
+		t.Fatalf("authorize redirect_uri = %q, want derived %q", got, want)
 	}
 	// The state cookie was set (single-use).
 	var stateCookie *http.Cookie
@@ -472,7 +477,7 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "cs-1",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"redirect_uri": "https://bevin.example.com/auth/oauth/callback",
+			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {
@@ -510,7 +515,7 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"redirect_uri": "https://bevin.example.com/auth/oauth/callback",
+			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {
@@ -528,7 +533,7 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "cs-2",
 			"auth_url": "not a url", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"redirect_uri": "https://bevin.example.com/auth/oauth/callback",
+			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusBadRequest {
@@ -546,7 +551,7 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": false, "name": "TestIDP", "client_id": "app-1", "client_secret": "",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"redirect_uri": "https://bevin.example.com/auth/oauth/callback",
+			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {

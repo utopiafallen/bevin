@@ -27,7 +27,7 @@ const (
 // ConfigVersion is the schema version of server.toml. Bump it when a release
 // changes the schema and add a matching step in migrate() so older configs are
 // upgraded in place on load; Load refuses a config newer than this build.
-const ConfigVersion = 3
+const ConfigVersion = 4
 
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
@@ -37,8 +37,8 @@ const DefaultMaxWorkspaceSize = int64(5 * 1024 * 1024 * 1024)
 
 // ServerConfig is the admin-tier configuration (server.toml).
 type ServerConfig struct {
-	Version int `toml:"version"`
-	DataDir string     `toml:"data_dir"`
+	Version          int        `toml:"version"`
+	DataDir          string     `toml:"data_dir"`
 	Bind             string     `toml:"bind"`
 	Logging          Logging    `toml:"logging"`
 	Auth             Auth       `toml:"auth"`
@@ -48,6 +48,10 @@ type ServerConfig struct {
 	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
 	Email            Email      `toml:"email" json:"email"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
+	// legacyOAuthRedirect carries the pre-v4 OAuth redirect_uri through
+	// migration (unexported: never persisted, never JSON'd). Load captures it
+	// from the raw file before migrate() turns it into BaseURI.
+	legacyOAuthRedirect string
 }
 
 type Logging struct {
@@ -76,21 +80,42 @@ type OAuth struct {
 	TokenURL     string `toml:"token_url" json:"token_url"`
 	UserinfoURL  string `toml:"userinfo_url" json:"userinfo_url"`
 	Scopes       string `toml:"scopes" json:"scopes"` // default "openid profile email"
-	RedirectURI  string `toml:"redirect_uri" json:"redirect_uri"` // public URL of /auth/oauth/callback
+	// BaseURI is the server's PUBLIC base (scheme + host[:port] + optional
+	// subpath — it sits behind the reverse proxy's TLS, so https). The
+	// redirect URI is DERIVED from it (see RedirectURI): bevin knows its own
+	// callback route, the admin only supplies the base.
+	BaseURI string `toml:"base_uri" json:"base_uri"`
+}
+
+// OAuthCallbackPath is the route the OAuth callback lands on.
+const OAuthCallbackPath = "/auth/oauth/callback"
+
+// RedirectURI derives the OAuth redirect URI from the public base:
+//
+//	https://bevin.example.com[/subpath]  ->  https://bevin.example.com[/subpath]/auth/oauth/callback
+//
+// The admin pastes this into the provider's app registration. Empty base ->
+// empty (the authorize request can't be built; validation requires a base).
+func (o OAuth) RedirectURI() string {
+	base := strings.TrimRight(strings.TrimSpace(o.BaseURI), "/")
+	if base == "" {
+		return ""
+	}
+	return base + OAuthCallbackPath
 }
 
 // Model is a main text model in the admin catalog. A model is a provider
 // endpoint (Provider + BaseURL + APIKey) plus the API model name (ModelID).
 type Model struct {
-	ID          string   `toml:"id" json:"id"`
-	Provider    string   `toml:"provider" json:"provider"` // openai | anthropic | llama
-	BaseURL     string   `toml:"base_url" json:"base_url"`
-	APIKey      string   `toml:"api_key" json:"api_key"`
-	ModelID     string   `toml:"model_id" json:"model_id"`
-	DisplayName string   `toml:"display_name" json:"display_name"`
-	MaxContext  int      `toml:"max_context" json:"max_context"`
-	Slots       int      `toml:"slots" json:"slots"`
-	Enabled     bool     `toml:"enabled" json:"enabled"`
+	ID          string `toml:"id" json:"id"`
+	Provider    string `toml:"provider" json:"provider"` // openai | anthropic | llama
+	BaseURL     string `toml:"base_url" json:"base_url"`
+	APIKey      string `toml:"api_key" json:"api_key"`
+	ModelID     string `toml:"model_id" json:"model_id"`
+	DisplayName string `toml:"display_name" json:"display_name"`
+	MaxContext  int    `toml:"max_context" json:"max_context"`
+	Slots       int    `toml:"slots" json:"slots"`
+	Enabled     bool   `toml:"enabled" json:"enabled"`
 	// AutoDisabled is set by the agent when the provider reports this model is
 	// unavailable (e.g. the model was deleted/renamed upstream) and cleared when
 	// a later attempt succeeds. It is independent of the admin's Enabled flag:
@@ -197,6 +222,22 @@ func Load(dir string) (*ServerConfig, error) {
 	if cfg.Version > ConfigVersion {
 		return nil, fmt.Errorf("server.toml version %d is newer than this bevin build (v%d) — upgrade bevin", cfg.Version, ConfigVersion)
 	}
+	// Pre-v4 configs stored an admin-entered OAuth redirect_uri; the v4 struct
+	// derives it from base_uri and no longer has the field, so the unmarshal
+	// above discarded it. Re-read just that value from the raw file for
+	// migrate() to fold into BaseURI.
+	if cfg.Version < 4 {
+		var legacy struct {
+			Auth struct {
+				OAuth struct {
+					RedirectURI string `toml:"redirect_uri"`
+				} `toml:"oauth"`
+			} `toml:"auth"`
+		}
+		if err := toml.Unmarshal(b, &legacy); err == nil {
+			cfg.legacyOAuthRedirect = legacy.Auth.OAuth.RedirectURI
+		}
+	}
 	if err := migrate(&cfg); err != nil {
 		return nil, err
 	}
@@ -236,6 +277,16 @@ func migrate(c *ServerConfig) error {
 			// Email (email disabled) — no field transform, just stamp the
 			// version.
 			c.Version = 3
+		case 3:
+			// v3 -> v4: the OAuth redirect_uri (admin-entered) became a value
+			// DERIVED from the public base_uri — bevin knows its own callback
+			// route, so only the base is configured. Recover the base from the
+			// legacy redirect when it ends in the callback path; otherwise
+			// leave base_uri empty for the admin to re-enter (users panel).
+			if legacy := strings.TrimSpace(c.legacyOAuthRedirect); strings.HasSuffix(legacy, OAuthCallbackPath) {
+				c.Auth.OAuth.BaseURI = strings.TrimSuffix(legacy, OAuthCallbackPath)
+			}
+			c.Version = 4
 		default:
 			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
 		}

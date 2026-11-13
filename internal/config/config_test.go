@@ -257,6 +257,101 @@ model_id = "v"
 	}
 }
 
+// TestOAuthBaseURIMigration — v3 stored the admin-entered OAuth redirect_uri;
+// v4 derives the redirect from the public base_uri. A v3 file is migrated on
+// load: the base is recovered from the legacy redirect when it ends in the
+// callback path, otherwise base_uri is left empty for the admin to re-enter.
+func TestOAuthBaseURIMigration(t *testing.T) {
+	dir := t.TempDir()
+	v3 := `version = 3
+
+[auth]
+mode = "internal"
+session_secret = "deadbeef"
+
+[auth.oauth]
+enabled = true
+name = "TestIDP"
+client_id = "app-1"
+client_secret = "cs-1"
+auth_url = "https://idp.example.com/o/authorize/"
+token_url = "https://idp.example.com/o/token/"
+userinfo_url = "https://idp.example.com/o/user/"
+scopes = "openid profile email"
+redirect_uri = "https://bevin.example.com/auth/oauth/callback"
+
+[[models]]
+id = "m1"
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-test"
+model_id = "ornith"
+max_context = 200000
+slots = 2
+enabled = true
+`
+	if err := os.WriteFile(Path(dir), []byte(v3), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load v3 config: %v", err)
+	}
+	if got.Version != ConfigVersion {
+		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
+	}
+	if got.Auth.OAuth.BaseURI != "https://bevin.example.com" {
+		t.Fatalf("migrated base_uri = %q, want https://bevin.example.com", got.Auth.OAuth.BaseURI)
+	}
+	if got.Auth.OAuth.RedirectURI() != "https://bevin.example.com/auth/oauth/callback" {
+		t.Fatalf("derived redirect = %q", got.Auth.OAuth.RedirectURI())
+	}
+	// Saving the migrated config persists base_uri (and no redirect_uri key).
+	if err := Save(dir, got); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(Path(dir))
+	if !strings.Contains(string(b), "base_uri = \"https://bevin.example.com\"") {
+		t.Fatalf("saved config missing base_uri:\n%s", b)
+	}
+	if strings.Contains(string(b), "redirect_uri") {
+		t.Fatalf("saved config must not carry the legacy key:\n%s", b)
+	}
+	// A v3 redirect that doesn't end in the callback path is not
+	// decomposable — base_uri stays empty for the admin to re-enter.
+	v3b := strings.Replace(v3,
+		"redirect_uri = \"https://bevin.example.com/auth/oauth/callback\"",
+		"redirect_uri = \"https://somewhere.else/elsewhere\"", 1)
+	if err := os.WriteFile(Path(dir), []byte(v3b), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load(dir)
+	if err != nil {
+		t.Fatalf("load v3 config (odd redirect): %v", err)
+	}
+	if got.Auth.OAuth.BaseURI != "" {
+		t.Fatalf("unreconstructable base_uri = %q, want empty", got.Auth.OAuth.BaseURI)
+	}
+}
+
+// TestOAuthRedirectDerivation — the redirect URI is always the public base +
+// the callback path (trailing slashes normalized, subpaths preserved).
+func TestOAuthRedirectDerivation(t *testing.T) {
+	cases := []struct{ base, want string }{
+		{"https://bevin.example.com", "https://bevin.example.com/auth/oauth/callback"},
+		{"https://bevin.example.com/", "https://bevin.example.com/auth/oauth/callback"},
+		{"https://bevin.example.com:8443", "https://bevin.example.com:8443/auth/oauth/callback"},
+		{"https://host.example/bevin", "https://host.example/bevin/auth/oauth/callback"},
+		{"https://host.example/bevin///", "https://host.example/bevin/auth/oauth/callback"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := (OAuth{BaseURI: c.base}).RedirectURI(); got != c.want {
+			t.Errorf("RedirectURI(%q) = %q, want %q", c.base, got, c.want)
+		}
+	}
+}
+
 func TestResolveDisplayName(t *testing.T) {
 	models := []Model{
 		{ID: "a", Provider: "openai", BaseURL: "u", ModelID: "m", DisplayName: "Fast", MaxContext: 8000, Slots: 1, Enabled: true},
@@ -287,9 +382,9 @@ func TestResolveDisplayName(t *testing.T) {
 
 func TestModelAvailable(t *testing.T) {
 	cases := []struct {
-		name    string
-		m       Model
-		want    bool
+		name string
+		m    Model
+		want bool
 	}{
 		{"enabled + not auto-disabled", Model{Enabled: true}, true},
 		{"enabled + auto-disabled", Model{Enabled: true, AutoDisabled: true}, false},
