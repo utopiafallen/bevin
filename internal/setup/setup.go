@@ -59,10 +59,23 @@ type Manager struct {
 	state  SetupState
 	finished bool
 
+	// onFinalize, when set, is called (normal mode only) right after an edit
+	// finalize succeeds, with the freshly saved config — the server uses it to
+	// hot-reload the running agent so the edit applies without a restart. A
+	// hook error is reported to the wizard (the config is already saved on
+	// disk; the running agent stays on the old config until a restart).
+	onFinalize func(cfg *config.ServerConfig) error
+
 	// Sidecar provisioning (the display-only sidecars step): provMu guards
 	// provState (the in-flight / finished run). See provision.go.
 	provMu    sync.Mutex
 	provState *provisionState
+}
+
+// SetOnFinalize registers the post-edit-finalize hook (normal mode). See the
+// field doc on onFinalize.
+func (m *Manager) SetOnFinalize(f func(cfg *config.ServerConfig) error) {
+	m.onFinalize = f
 }
 
 // New builds a setup Manager. srv/prov are the live server store + auth
@@ -226,9 +239,14 @@ func (m *Manager) SetAux(aux []config.AuxModel) error {
 // deriveEmbedder builds the embedder config from the llama-server endpoint. The
 // embedder IS the llama-server (running embeddinggemma-2 on loopback), so its
 // base URL is the llama-server endpoint + /v1, with no API key. The server
-// manages this — the user does not configure the embedder in the wizard.
+// manages this — the user does not configure the embedder in the wizard. With
+// no llama-server endpoint (a sidecar-free config) it returns a zero embedder:
+// there is no local embedder to point at (never write a bare "/v1").
 func deriveEmbedder(llamaEndpoint string) config.Embedder {
 	e := strings.TrimRight(strings.TrimSpace(llamaEndpoint), "/")
+	if e == "" {
+		return config.Embedder{}
+	}
 	e = strings.TrimSuffix(e, "/v1") // the endpoint may already carry /v1
 	return config.Embedder{
 		BaseURL: e + "/v1",

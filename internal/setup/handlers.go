@@ -1,14 +1,19 @@
 package setup
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/provider"
 )
 
@@ -50,6 +55,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/test-model", h.testModel)
 	mux.HandleFunc("/setup/test-sidecar", h.testSidecar)
 	mux.HandleFunc("/setup/probe-model", h.probeModel)
+	mux.HandleFunc("/setup/test-email", h.testEmail)
 	mux.HandleFunc("/setup/sidecars/start", h.sidecarsStart)
 	mux.HandleFunc("/setup/sidecars/status", h.sidecarsStatus)
 	mux.HandleFunc("/setup/finalize", h.finalize)
@@ -97,6 +103,7 @@ func (h *EditHandler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/setup/cancel", h.cancel)
 	mux.HandleFunc("POST /admin/setup/test-model", h.testModel)
 	mux.HandleFunc("POST /admin/setup/probe-model", h.probeModel)
+	mux.HandleFunc("POST /admin/setup/test-email", h.testEmail)
 	mux.HandleFunc("POST /admin/setup/sidecars/start", h.sidecarsStart)
 	mux.HandleFunc("GET /admin/setup/sidecars/status", h.sidecarsStatus)
 	mux.HandleFunc("POST /admin/setup/finalize", h.finalize)
@@ -257,7 +264,18 @@ func (h *EditHandler) finalize(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data_dir": cfg.DataDir})
+	// Hot-reload the running agent with the freshly saved config so the edit
+	// applies without a restart (the first-run finalize has no hook: the
+	// in-process transition builds a brand-new app).
+	reloaded := false
+	if hook := h.mgr.onFinalize; hook != nil {
+		if herr := hook(cfg); herr != nil {
+			log.Printf("bevin: edit finalize: agent reload: %v", herr)
+		} else {
+			reloaded = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reloaded": reloaded, "data_dir": cfg.DataDir})
 }
 
 // sidecarsStart (edit mode) starts the provisioning run (idempotent — in edit
@@ -507,6 +525,64 @@ func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
 }
 
+// TestEmail sends a test email. When smtp carries a host, it sends through
+// those settings (the wizard's email step tests the draft before it is
+// saved); otherwise it sends through the SAVED config (the admin dashboard
+// tests the live config).
+func (m *Manager) TestEmail(ctx context.Context, smtp config.Email, to string) error {
+	if smtp.SMTPHost == "" {
+		cfg, err := config.Load(m.dataDir)
+		if err != nil {
+			return fmt.Errorf("email is not configured yet — fill in the SMTP settings first")
+		}
+		smtp = cfg.Email
+	}
+	if smtp.SMTPHost == "" {
+		return fmt.Errorf("no SMTP host configured")
+	}
+	s := email.New(smtp)
+	return s.Send(ctx, to, "bevin — test email",
+		"This is a test email from your bevin server.\n\nIf you can read it, your SMTP settings work.\n\n— bevin")
+}
+
+// handleTestEmail is the shared body of the /setup/test-email (wizard) and
+// /admin/setup/test-email (edit mode) endpoints; the callers do the gating.
+func handleTestEmail(w http.ResponseWriter, r *http.Request, m *Manager) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var p struct {
+		To   string       `json:"to"`
+		SMTP config.Email `json:"smtp"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := m.TestEmail(ctx, p.SMTP, strings.TrimSpace(p.To)); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "to": p.To})
+}
+
+func (h *Handler) testEmail(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	handleTestEmail(w, r, h.mgr)
+}
+
+func (h *EditHandler) testEmail(w http.ResponseWriter, r *http.Request) {
+	if !h.admin(w, r) {
+		return
+	}
+	handleTestEmail(w, r, h.mgr)
+}
+
 // sidecarsStart (setup mode) starts the sidecar provisioning run (idempotent)
 // + returns the current status. The wizard calls this when the admin lands on
 // the display-only sidecars step, then polls sidecarsStatus for progress.
@@ -550,6 +626,24 @@ func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.transition != nil {
 		h.transition()
+	}
+	// Issue the admin's session cookie now, so the completion screen's "Go to
+	// the admin dashboard" button works immediately: the setup cookie alone
+	// cannot enter the admin area (it is not a user session). Failure is
+	// non-fatal — the admin can still log in at the login page.
+	a := h.mgr.Answers()
+	if a.Admin.Handle != "" {
+		if u, tok, aerr := h.mgr.prov.Authenticate(r.Context(), a.Admin.Handle, a.Admin.Password); aerr == nil && u != nil {
+			ttl := config.DefaultSessionTTLSeconds * time.Second
+			if tp, ok := h.mgr.prov.(interface{ TTL() time.Duration }); ok {
+				if p := tp.TTL(); p > 0 {
+					ttl = p
+				}
+			}
+			auth.SetSessionCookie(w, tok, ttl)
+		} else if aerr != nil {
+			log.Printf("bevin: setup finalize: admin session: %v", aerr)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data_dir": cfg.DataDir})
 }

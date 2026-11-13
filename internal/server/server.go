@@ -79,6 +79,9 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 		return nil, err
 	}
 	edit := setup.New(dataDir, cfg.Bind, 0, srv, prov, nil)
+	// After an edit finalize, hot-reload the running agent with the freshly
+	// saved config (models, slot counts, provider endpoints) — no restart.
+	edit.SetOnFinalize(func(newCfg *config.ServerConfig) error { return ag.Reload(newCfg) })
 	// Build the SMTP sender (nil when email is not configured; notify is a
 	// no-op in that case).
 	mail := email.New(cfg.Email)
@@ -120,6 +123,13 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.requireAuth(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
+	// Admin dashboard (admin role only): the page entry + the live-state APIs
+	// it polls (slot pools + queue, sidecar health, email config + test send).
+	mux.HandleFunc("GET /admin", a.adminPage)
+	mux.HandleFunc("GET /admin/api/status", a.requireAdmin(a.adminStatus))
+	mux.HandleFunc("GET /admin/api/sidecars", a.requireAdmin(a.adminSidecars))
+	mux.HandleFunc("GET /admin/api/email", a.requireAdmin(a.adminEmail))
+	mux.HandleFunc("POST /admin/api/email/test", a.requireAdmin(a.adminEmailTest))
 	// Normal-mode edit: re-run the setup wizard to edit the live config, gated
 	// on an admin session.
 	edit := setup.NewEditHandler(a.edit, a.adminGate)
@@ -306,6 +316,7 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		log.Printf("turn (stream %s): %v", u.Handle, err)
 		_ = writeEvent("error", map[string]string{"error": err.Error()})
 		return
 	}

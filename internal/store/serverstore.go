@@ -24,12 +24,8 @@ func OpenServer(dir string) (*ServerStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "server.db"))
+	db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(dir, "server.db")))
 	if err != nil {
-		return nil, err
-	}
-	if err := configure(db); err != nil {
-		db.Close()
 		return nil, err
 	}
 	s := &ServerStore{db: db, dir: dir}

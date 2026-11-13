@@ -30,6 +30,8 @@
   .btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
   .msg { margin-top:.8rem; font-size:.85rem; font-weight:600; }
   .msg.err { color:var(--danger); } .msg.ok { color:var(--ok); }
+  .testmsg { font-size:.82rem; margin-top:.4rem; min-height:1.1em; }
+  .testmsg.err { color:var(--danger); } .testmsg.ok { color:var(--ok); }
   .small { font-size:.82rem; color:var(--text-muted); }
   .hidden { display:none; }
   .kv { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-2); padding:.1em .4em; border-radius:6px; }
@@ -153,7 +155,7 @@ const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
 // In edit mode the routes are namespaced under /admin and the admin-identity
 // step is skipped (the admin already exists), so start on the models step.
 let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, detectedCache: {}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ if(c==null) continue; e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
 function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
@@ -192,16 +194,6 @@ function renderModelForm(){
   f.append(renderProviderHalf("mf", m, {
     knownBases: allKnownBases(),
     detect: () => detectModel(),
-    onCache: (d, cached) => {
-      const avail = cached.models.filter(x => !modelAlreadyAdded(x.ID, d.base_url));
-      d.model_id = avail.length ? avail[0].ID : "";
-      if(d.model_id){ const sel = cached.models.find(x => x.ID === d.model_id); if(sel && sel.MaxContext){ d.max_context = String(sel.MaxContext); d.context_auto = true; } }
-      // Refresh the bottom status (the cached path skips detectModel, which is
-      // what normally updates it) so a stale message from a prior endpoint
-      // doesn't linger.
-      msg("Detected " + cached.provider + " — " + cached.models.length + " model(s) (" + avail.length + " not yet added).", "ok");
-      render();
-    },
     clearBtn: { label: editing ? "Cancel" : "Clear", fn: cancelEdit },
     getError: () => S.formError,
     clearError: () => { S.formError = null; }
@@ -294,24 +286,24 @@ function renderModelList(){
 // provider label. `draft` is the object being edited (S.modelDraft or
 // S.aux[i]); opts carries the form-specific callbacks:
 //   knownBases  — base URLs for the datalist (main + aux, deduped)
-//   detect      — the full probe (closure); called by the Detect button + on a
-//                 fresh (uncached) base-URL change
-//   onCache     — (draft, cached) => void; called when a known, already-detected
-//                 base URL is re-selected (re-uses the cache, no re-fetch)
+//   detect      — the full probe (closure); called by the Detect button, on
+//                 Enter in the Base URL field, and on a committed base-URL
+//                 change for a known provider (always a live probe — detection
+//                 results are never cached, so provider model changes are
+//                 picked up immediately)
 //   clearBtn    — { label, fn } or null (the ghost button beside Detect)
 //   getError    — () => string|null (this half's inline error)
 //   clearError  — () => void
 function renderProviderHalf(prefix, draft, opts){
   const knownBases = opts.knownBases || [];
   const detect = opts.detect;
-  const onCache = opts.onCache || null;
   const clearBtn = opts.clearBtn || null;
   const getError = opts.getError || null;
   const clearError = opts.clearError || null;
   const half = el("div", {class:"config-half"}, el("h4",{}, "Provider configuration"));
   const base = inp(prefix+"_base", draft.base_url, "https://api.openai.com");
   base.setAttribute("list", prefix+"_base_urls");
-  const baseDl = el("datalist", {id: prefix+"_base_urls"});
+  const baseDl = el("datalist", {id:prefix+"_base_urls"});
   [...new Set(knownBases.filter(Boolean))].forEach(u => baseDl.append(el("option", {value:u})));
   const key = inp(prefix+"_key", draft.api_key, "blank for a local llama-server");
   const provLabel = draft.provider ? el("span", {class:"kv"}, draft.provider) : el("span", {class:"small"}, "— press Detect —");
@@ -331,23 +323,24 @@ function renderProviderHalf(prefix, draft, opts){
   );
   if(getError && getError()){ half.append(el("p", {class:"form-err"}, getError())); }
   // Sync the base URL on every keystroke, but do NOT auto-detect — the probe
-  // must not fire while the user is still typing. The auto-detect runs on
-  // `change` (when the user commits a value: selecting from the Base URL
-  // combobox or blurring the field), so re-picking a known provider auto-fills
-  // its models without a mid-typing probe.
+  // must not fire while the user is still typing.
   base.addEventListener("input", () => { draft.base_url = base.value; if(clearError) clearError(); });
+  // Enter in the Base URL field triggers detection (both main + aux, for
+  // consistency) — the quick way to probe a freshly typed endpoint.
+  base.addEventListener("keydown", (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); detect(); } });
+  // Committing a value (blurring, or a combobox selection) for a KNOWN provider
+  // re-probes it live — never from a cache, so a provider's model list changes
+  // are always picked up. draft._lastBase (per form) avoids re-triggering on
+  // the same value.
   base.addEventListener("change", () => {
     draft.base_url = base.value; if(clearError) clearError();
     const nb = (base.value||"").trim();
-    if(nb && isKnownBase(nb) && normBase(nb) !== normBase(_lastAutoBase)){
-      _lastAutoBase = base.value;
-      const cached = S.detectedCache[normBase(nb)];
-      if(cached){ draft._models = cached.models; draft.provider = cached.provider; if(onCache) onCache(draft, cached); }
-      else { detect(); }
-    } else { _lastAutoBase = base.value; }
+    const prev = draft._lastBase || "";
+    draft._lastBase = base.value;
+    if(nb && isKnownBase(nb) && normBase(nb) !== normBase(prev)) detect();
   });
   key.addEventListener("input", () => { draft.api_key = key.value; if(clearError) clearError(); });
-  _lastAutoBase = draft.base_url; // sync so re-rendering doesn't auto-detect the current value
+  if(draft._lastBase === undefined) draft._lastBase = draft.base_url; // initial sync (no auto-detect of the current value)
   return half;
 }
 function renderAux(){
@@ -363,7 +356,6 @@ function renderAuxCard(i){
   wrap.append(renderProviderHalf("af"+i, m, {
     knownBases: allKnownBases(),
     detect: () => detectAux(i),
-    onCache: (d, cached) => { applyAuxFields(d, cached.models, i); msg("Detected " + cached.provider + " — " + cached.models.length + " model(s) found.", "ok"); render(); },
     clearBtn: { label: "Clear", fn: () => { S.aux[i] = freshAux(); render(); } },
     getError: () => (S.auxError && S.auxError[i]) || null,
     clearError: () => { if(S.auxError) S.auxError[i] = null; }
@@ -538,10 +530,42 @@ function renderEmail(){
     field("Encryption", tls),
     el("p",{class:"field-help"},"Port 587 + STARTTLS is the usual submission setup. A local relay may use 25 without STARTTLS — set Encryption to Off in that case (bevin still upgrades to TLS when the server offers it).")
   );
+  // Test send — probe the SMTP settings (as typed, before saving) against a
+  // real send. The draft SMTP config goes with the request (the server tests
+  // it transiently; nothing is saved by this).
+  d.append(el("h4",{style:"margin-top:1.2rem"},"Send a test email"));
+  const testRow = el("div",{class:"form-btns"});
+  const testTo = el("input", {id:"em_test_to", placeholder:"you@example.com"});
+  const testBtn = el("button", {class:"primary"}, "Send test email");
+  const testMsg = el("p", {class:"testmsg"});
+  testBtn.onclick = async () => {
+    const to = testTo.value.trim();
+    if(!to){ testMsg.textContent = "Enter the address to send the test to."; testMsg.className = "testmsg err"; return; }
+    testBtn.setAttribute("disabled",""); testBtn.style.opacity = ".6"; testMsg.textContent = "Sending…"; testMsg.className = "testmsg";
+    const smtp = { smtp_host: e.smtp_host, smtp_port: parseInt(e.smtp_port, 10) || 0, username: e.username, password: e.password, from_address: e.from_address, from_name: e.from_name, use_starttls: e.use_starttls };
+    try{
+      await api("POST", "/setup/test-email", { to, smtp });
+      testMsg.textContent = "Test email sent to " + to + " — check your inbox."; testMsg.className = "testmsg ok";
+    }catch(err){
+      testMsg.textContent = "Test send failed: " + err.message + " — check the SMTP settings."; testMsg.className = "testmsg err";
+    }finally{
+      testBtn.removeAttribute("disabled"); testBtn.style.opacity = "";
+    }
+  };
+  testRow.append(testTo, testBtn);
+  d.append(testRow, testMsg);
   return d;
 }
 function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
-  d.append(el("pre",{class:"kv"}, JSON.stringify(S, null, 2)));
+  // The review shows the SAVED answers only — strip the per-draft working
+  // state (_models / _detecting / _lastBase: probe results + UI flags) and the
+  // transient sidecar progress, so nothing ephemeral looks like config.
+  const shown = JSON.parse(JSON.stringify(S));
+  function stripUnderscore(o){ if(!o || typeof o !== "object") return o; if(Array.isArray(o)) return o.map(stripUnderscore); for(const k of Object.keys(o)) if(k.startsWith("_")) delete o[k]; return o; }
+  shown.modelDraft = stripUnderscore(shown.modelDraft);
+  shown.aux = stripUnderscore(shown.aux);
+  delete shown.sidecarStatus;
+  d.append(el("pre",{class:"kv"}, JSON.stringify(shown, null, 2)));
   d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
   return d;
 }
@@ -559,12 +583,10 @@ function modelAlreadyAdded(id, base){ return S.models.some(x => x.model_id===id 
 // Feeds the Base URL combobox so an endpoint entered in one step can be
 // re-selected in another.
 function allKnownBases(){ const s=new Set(); const add=x=>{ const u=(x.base_url||"").trim(); if(u)s.add(u); }; S.models.forEach(add); S.aux.forEach(add); return [...s]; }
-// is this base URL already a configured provider (main or aux)? drives auto-detect
-// when re-selecting an existing provider from the Base URL combobox.
+// is this base URL already a configured provider (main or aux)? drives the
+// live re-probe when re-selecting an existing provider from the Base URL
+// combobox (detection results are never cached — the probe is always fresh).
 function isKnownBase(base){ return allKnownBases().some(u => normBase(u)===normBase(base)); }
-// auto-detect state: re-selecting a known provider re-uses the previously detected
-// model list (no re-fetch). _lastAutoBase avoids re-triggering on the same value.
-let _lastAutoBase="";
 function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
 function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
 // lock the R/K/S + enabled to a display name's pre-existing values (so every model
@@ -596,7 +618,7 @@ function saveModel(){
   if(!m.display_name){ S.formError="Display name is required (what users will see)."; render(); return; }
   if(!m.max_context){ S.formError="Max context is required — the provider did not expose it, so enter it manually."; render(); return; }
   const wasEditing=S.editingIndex!==-1;
-  const toSave=deepCopy(m); delete toSave._models;
+  const toSave=deepCopy(m); delete toSave._models; delete toSave._lastBase; delete toSave._detecting;
   // max_context is a string in the draft (from the input); the server's config
   // expects an int, so normalize it before the model enters S.models.
   const mc=parseInt(toSave.max_context,10);
@@ -632,11 +654,12 @@ function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setP
 function refreshScoreFills(){ requestAnimationFrame(function(){ document.querySelectorAll("input.score").forEach(scoreFill); }); }
 let _scoreResize=null; window.addEventListener("resize",function(){ if(_scoreResize)clearTimeout(_scoreResize); _scoreResize=setTimeout(refreshScoreFills,120); });
 function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
-// probeDraft — call the probe endpoint for a draft (main or aux), learn the
-// provider, list the models (with modalities where the provider exposes them),
-// and cache the result keyed by base URL so re-selecting a known provider is
-// instant (no re-fetch). Shared by the main-model and aux steps.
-async function probeDraft(draft){ const r=await api("POST","/setup/probe-model",{base_url:draft.base_url, api_key:draft.api_key}); draft.provider=r.provider; draft._models=r.models; S.detectedCache[normBase(draft.base_url)]={provider:r.provider, models:r.models}; return r; }
+// probeDraft — call the probe endpoint for a draft (main or aux) and learn the
+// provider + list the models (with modalities where the provider exposes
+// them). The result is never cached: every detect is a live probe, so a
+// provider's model list changes are picked up immediately. Shared by the
+// main-model and aux steps.
+async function probeDraft(draft){ const r=await api("POST","/setup/probe-model",{base_url:draft.base_url, api_key:draft.api_key}); draft.provider=r.provider; draft._models=r.models; return r; }
 // applyModelFields — apply the detected models to a MAIN model draft: pick the
 // first model not yet added for this provider + auto-fill its context (the
 // original detectModel behavior).
@@ -700,8 +723,11 @@ async function doNext(){
   // server's config expects an int, so normalize it (empty -> 0 -> the server
   // defaults it to 587).
   const emailPayload = Object.assign({}, S.email, { smtp_port: parseInt(S.email.smtp_port, 10) || 0 });
+  // Aux models: strip the per-draft working state (_models / _lastBase /
+  // _detecting) so only the saved config crosses the wire.
+  const auxPayload = (S.aux||[]).map(m => { const c = JSON.parse(JSON.stringify(m)); for(const k of Object.keys(c)) if(k.startsWith("_")) delete c[k]; return c; });
   try{
-    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:S.aux, sidecars:S.sidecars, email:emailPayload});
+    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
     msg("");
     if(step==="review") return;
     idx=Math.min(idx+1, STEPS.length-1); render();
@@ -709,7 +735,24 @@ async function doNext(){
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
 async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
-async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{}); if(IS_EDIT){ msg("Done — config saved; the agent will pick up the changes.","ok"); document.getElementById("body").innerHTML="<h3>Config updated</h3><p>Your model changes are saved. <a href='/'>Back to bevin</a></p>"; } else { msg("Done — open the login page.","ok"); document.getElementById("body").innerHTML="<h3>Setup complete</h3><p>Open <a href='/'>/</a> to log in as the admin you just created.</p>"; } document.getElementById("finalize").classList.add("hidden"); document.getElementById("next").classList.add("hidden"); document.getElementById("back").classList.add("hidden"); document.getElementById("cancel").classList.add("hidden"); }catch(e){ msg("Finalize failed: "+e.message,"err"); } }
+async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
+  // The admin does not use the chat UI as a regular user — after setup they go
+  // to the admin dashboard (a real button, not a link into the user UI).
+  const body = document.getElementById("body");
+  body.innerHTML = "";
+  const h = el("h3", {}, IS_EDIT ? "Config updated" : "Setup complete");
+  body.append(h);
+  body.append(el("p", {}, IS_EDIT
+    ? (r.reloaded ? "Your changes are saved and the running agent picked them up — no restart needed." : "Your changes are saved to server.toml. The running agent could not pick them up in place (see the server log) — restart bevin to apply them.")
+    : "bevin is running in normal mode. The admin account you just created signs in to the admin dashboard."));
+  const b = el("button", {class:"primary", style:"margin-top:1rem"}, IS_EDIT ? "Back to the admin dashboard" : "Go to the admin dashboard");
+  b.onclick = () => { location.href = "/admin"; };
+  body.append(b);
+  document.getElementById("finalize").classList.add("hidden");
+  document.getElementById("next").classList.add("hidden");
+  document.getElementById("back").classList.add("hidden");
+  document.getElementById("cancel").classList.add("hidden");
+}catch(e){ msg("Finalize failed: "+e.message,"err"); } }
 function q(s){ return document.querySelector(s); }
 
 document.getElementById("next").onclick=doNext;

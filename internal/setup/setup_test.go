@@ -276,6 +276,75 @@ func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
 	}
 }
 
+// TestProvisionEditSkipsUnconfigured — in normal mode (a config already
+// exists) the provisioning run keeps only the CONFIGURED sidecars alive; a
+// config that records no sidecars gets none installed (setup mode, by
+// contrast, always provisions all three). The unconfigured kinds report
+// ready/skipped so the wizard's sidecars step can still advance.
+func TestProvisionEditSkipsUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	// A config that exists but records no sidecars.
+	cfg := &config.ServerConfig{
+		Version: config.ConfigVersion,
+		DataDir: dir,
+		Bind:    "0.0.0.0",
+		Auth:    config.Auth{SessionSecret: "seed"},
+		Models:  []config.Model{{ID: "m1", Provider: "openai", BaseURL: "http://127.0.0.1:1", ModelID: "m1", DisplayName: "M1", MaxContext: 4096, Slots: 1, Enabled: true}},
+	}
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := store.OpenServer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	fs := &fakeSidecars{}
+	sm := NewSidecarManager(fs.probe, fs.install)
+	m := New(dir, "0.0.0.0", 5656, srv, auth.NewInternalProvider(srv, time.Hour), sm)
+	// Normal mode: load the existing config into the wizard state.
+	if err := m.LoadFromConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	m.StartProvision()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.WaitForProvision(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fs.installs != 0 {
+		t.Fatalf("edit-mode provisioning installed sidecars: %d installs (want 0 — the config recorded none)", fs.installs)
+	}
+	done, running, statuses, sidecars := m.ProvisionStatus()
+	if !done || running {
+		t.Fatalf("run should be done (done=%v running=%v)", done, running)
+	}
+	if sidecars.Qdrant != "" || sidecars.LlamaServer != "" || sidecars.FFmpeg != "" {
+		t.Fatalf("unconfigured sidecars got recorded endpoints: %+v", sidecars)
+	}
+	for _, s := range statuses {
+		if s.Status != "ready" {
+			t.Fatalf("unconfigured sidecar %s shows %q (want ready/skipped so the wizard step can advance)", s.Kind, s.Status)
+		}
+	}
+}
+
+func TestDeriveEmbedder(t *testing.T) {
+	// No llama-server endpoint (sidecar-free config) → zero embedder, never a
+	// bare "/v1".
+	e := deriveEmbedder("")
+	if e != (config.Embedder{}) {
+		t.Fatalf("empty endpoint should give a zero embedder, got %+v", e)
+	}
+	if got := deriveEmbedder("http://127.0.0.1:8081"); got.BaseURL != "http://127.0.0.1:8081/v1" || got.ModelID != "embeddinggemma-2" {
+		t.Fatalf("endpoint + /v1: %+v", got)
+	}
+	if got := deriveEmbedder("http://127.0.0.1:8081/v1"); got.BaseURL != "http://127.0.0.1:8081/v1" {
+		t.Fatalf("endpoint with /v1 should not double-suffix: %+v", got)
+	}
+}
+
 func TestSetupHandler(t *testing.T) {
 	m, _, _ := newTestSetup(t)
 	transitioned := false
@@ -338,5 +407,18 @@ func TestSetupHandler(t *testing.T) {
 	}
 	if !m.IsSetup() {
 		t.Fatal("after finalize, setup should be complete")
+	}
+	// Finalize also issues the admin's session cookie, so the completion
+	// screen's "Go to the admin dashboard" button works immediately (the
+	// setup cookie alone cannot enter the admin area). http.SetCookie appends,
+	// so look across all Set-Cookie values.
+	foundSession := false
+	for _, sc := range w.Header().Values("Set-Cookie") {
+		if strings.Contains(sc, "bevin_session=") {
+			foundSession = true
+		}
+	}
+	if !foundSession {
+		t.Fatalf("finalize should set the admin session cookie, got Set-Cookie=%v", w.Header().Values("Set-Cookie"))
 	}
 }

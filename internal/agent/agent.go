@@ -30,6 +30,9 @@ type Agent struct {
 	dataDir      string
 	providers    map[string]provider.Provider // by model ID (admin-enabled; auto-disabled ones stay so in-flight conversations can still attempt + re-enable them)
 	defaultModel string
+	// sched schedules turns through the per-model execution-slot pools (see
+	// scheduler.go): each model's turns run up to its slot count, FIFO.
+	sched *Scheduler
 
 	mu    sync.Mutex
 	users map[string]*store.UserStore
@@ -45,6 +48,7 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		providers: map[string]provider.Provider{},
 		users:     map[string]*store.UserStore{},
 	}
+	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
 		if !m.Enabled {
 			continue
@@ -64,8 +68,60 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	return a, nil
 }
 
-// DefaultModelID returns the default (first enabled) model ID.
-func (a *Agent) DefaultModelID() string { return a.defaultModel }
+// DefaultModelID returns the default (first available) model ID.
+func (a *Agent) DefaultModelID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.defaultModel
+}
+
+// providerFor returns the provider for a model ID (admin-enabled; auto-disabled
+// models keep their provider so in-flight conversations can still attempt +
+// re-enable them).
+func (a *Agent) providerFor(modelID string) (provider.Provider, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p, ok := a.providers[modelID]
+	return p, ok
+}
+
+// Reload swaps in a freshly saved config (the admin edit wizard's finalize):
+// the model set, slot counts, and provider endpoints update in place — the
+// running agent does not need a restart. The per-user stores are untouched,
+// and every model pool is poked so queued jobs see the new slot counts
+// immediately. It fails (leaving the agent on the old config) when the new
+// config has no enabled model.
+func (a *Agent) Reload(cfg *config.ServerConfig) error {
+	providers := map[string]provider.Provider{}
+	defaultModel := ""
+	for _, m := range cfg.Models {
+		if !m.Enabled {
+			continue
+		}
+		p, err := provider.New(m.Provider, m.BaseURL, m.APIKey)
+		if err != nil {
+			return fmt.Errorf("model %s: %w", m.ID, err)
+		}
+		providers[m.ID] = p
+		if m.Available() && defaultModel == "" {
+			defaultModel = m.ID
+		}
+	}
+	if len(providers) == 0 {
+		return fmt.Errorf("no enabled models configured")
+	}
+	a.cfgMu.Lock()
+	a.cfg = cfg
+	a.cfgMu.Unlock()
+	a.mu.Lock()
+	a.providers = providers
+	a.defaultModel = defaultModel
+	a.mu.Unlock()
+	for _, m := range cfg.Models {
+		a.sched.Poke(m.ID)
+	}
+	return nil
+}
 
 // Models returns the available models (admin-enabled and not auto-disabled) for
 // the user UI.
@@ -175,13 +231,13 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 		return "", err
 	}
 	if convID == "" {
-		if a.defaultModel == "" {
+		if a.DefaultModelID() == "" {
 			return "", fmt.Errorf("no available models to start a conversation")
 		}
 		if title == "" {
 			title = "New conversation"
 		}
-		c, err := us.CreateConversation(title, a.defaultModel)
+		c, err := us.CreateConversation(title, a.DefaultModelID())
 		if err != nil {
 			return "", err
 		}
@@ -221,7 +277,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if err != nil {
 		return "", "", err
 	}
-	p, ok := a.providers[conv.ActiveModelID]
+	p, ok := a.providerFor(conv.ActiveModelID)
 	if !ok {
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
@@ -288,14 +344,105 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	return conv.ID, res.Text, nil
 }
 
-// Turn runs one chat turn (non-streaming). See runTurn for the full flow.
-func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
-	return a.runTurn(ctx, handle, convID, userText, nil)
+// modelSlots returns a model's current execution-slot count (min 1) from live
+// config — the scheduler consults it on every dispatch, so the admin's slot
+// edits apply without a restart. A model removed from the config while a job
+// is queued gets 1, so its queued jobs complete quickly (with an error)
+// instead of waiting on a pool that no longer exists.
+func (a *Agent) modelSlots(modelID string) int {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	for _, m := range a.cfg.Models {
+		if m.ID == modelID {
+			if m.Slots < 1 {
+				return 1
+			}
+			return m.Slots
+		}
+	}
+	return 1
 }
 
-// TurnStream runs one chat turn (streaming), emitting each delta via emit.
-// See runTurn for the full flow. The aggregated reply + the conversation id
-// are returned when the stream completes.
+// PoolStatus is one model's pool as seen by the admin dashboard: the slot
+// count + how many are busy + the turns waiting for a slot.
+type PoolStatus struct {
+	ID           string      `json:"id"`
+	DisplayName  string      `json:"display_name"`
+	Provider     string      `json:"provider"`
+	Slots        int         `json:"slots"`
+	Busy         int         `json:"busy"`
+	Enabled      bool        `json:"enabled"`
+	AutoDisabled bool        `json:"auto_disabled"`
+	Waiting      []QueuedJob `json:"waiting"`
+}
+
+// Pools returns the live state of every configured model's execution-slot
+// pool (for the admin dashboard).
+func (a *Agent) Pools() []PoolStatus {
+	load := a.sched.Load()
+	out := []PoolStatus{}
+	for _, m := range a.AllModels() {
+		slots := m.Slots
+		if slots < 1 {
+			slots = 1
+		}
+		wait := []QueuedJob{}
+		if l, ok := load[m.ID]; ok {
+			wait = l.Waiting
+			if wait == nil {
+				wait = []QueuedJob{}
+			}
+			out = append(out, PoolStatus{m.ID, m.DisplayName, m.Provider, slots, l.Busy, m.Enabled, m.AutoDisabled, wait})
+			continue
+		}
+		out = append(out, PoolStatus{m.ID, m.DisplayName, m.Provider, slots, 0, m.Enabled, m.AutoDisabled, wait})
+	}
+	return out
+}
+
+// Turn runs one chat turn (non-streaming) through the per-model slot pool:
+// it queues on the conversation's active model and holds one slot for the
+// duration of the turn. See runTurn for the full flow.
+func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
+	return a.runScheduled(ctx, handle, convID, userText, nil)
+}
+
+// TurnStream runs one chat turn (streaming) through the per-model slot pool,
+// emitting each delta via emit once the turn holds a slot and the model call
+// starts. See runTurn for the full flow.
 func (a *Agent) TurnStream(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
-	return a.runTurn(ctx, handle, convID, userText, emit)
+	return a.runScheduled(ctx, handle, convID, userText, emit)
+}
+
+// runScheduled resolves the conversation (so the scheduler knows which model
+// pool to queue on) and runs the turn under that pool's slot limit. A
+// conversation that no longer exists fails before anything is queued; a
+// canceled context drops the job out of the queue (the user message is not
+// persisted — the turn never ran).
+func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", "", err
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return "", "", err
+	}
+	var (
+		reply  string
+		retErr error
+	)
+	jerr := a.sched.Submit(ctx, JobInfo{Handle: handle, ConvID: convID, ModelID: conv.ActiveModelID}, func(jobCtx context.Context) error {
+		_, reply, retErr = a.runTurn(jobCtx, handle, convID, userText, emit)
+		return retErr
+	})
+	if jerr != nil {
+		// The context was canceled (queued or running): runTurn may have
+		// already returned the cause; prefer the explicit job error.
+		if retErr == nil {
+			retErr = jerr
+		}
+		return conv.ID, reply, retErr
+	}
+	return conv.ID, reply, retErr
 }

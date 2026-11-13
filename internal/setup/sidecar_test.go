@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,7 +127,11 @@ func TestSuperviseRespawnsAndStops(t *testing.T) {
 			return "http://127.0.0.1:1", nil
 		},
 	)
-	cfg := &config.ServerConfig{DataDir: t.TempDir()}
+	// A configured (recorded) sidecar: the supervisor must (re-)provision it.
+	cfg := &config.ServerConfig{
+		DataDir:  t.TempDir(),
+		Sidecars: config.Sidecars{LlamaServer: "http://127.0.0.1:8081"},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -143,5 +148,40 @@ func TestSuperviseRespawnsAndStops(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("supervisor should stop when the context is canceled")
+	}
+}
+
+// TestSuperviseSkipsUnconfiguredSidecars verifies the supervisor NEVER installs
+// a sidecar that setup never provisioned (no recorded endpoint) — a sidecar-
+// free config stays sidecar-free for the life of the process.
+func TestSuperviseSkipsUnconfiguredSidecars(t *testing.T) {
+	old := superviseInterval
+	superviseInterval = 10 * time.Millisecond
+	defer func() { superviseInterval = old }()
+
+	var installs int32
+	sm := NewSidecarManager(
+		func(ctx context.Context, dataDir, kind, endpoint string) (bool, error) { return false, nil },
+		func(ctx context.Context, dataDir, kind string, preferredPort int) (string, error) {
+			atomic.AddInt32(&installs, 1)
+			return "http://127.0.0.1:1", nil
+		},
+	)
+	cfg := &config.ServerConfig{DataDir: t.TempDir()} // no sidecar endpoints
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sm.Supervise(ctx, cfg)
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond) // several supervise ticks
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor should stop when the context is canceled")
+	}
+	if got := atomic.LoadInt32(&installs); got != 0 {
+		t.Fatalf("supervisor installed %d sidecars for an unconfigured config; want 0", got)
 	}
 }

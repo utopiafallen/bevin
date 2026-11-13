@@ -38,12 +38,8 @@ func OpenUser(dir string) (*UserStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "bevin.db"))
+	db, err := sql.Open("sqlite", sqliteDSN(filepath.Join(dir, "bevin.db")))
 	if err != nil {
-		return nil, err
-	}
-	if err := configure(db); err != nil {
-		db.Close()
 		return nil, err
 	}
 	s := &UserStore{db: db, dir: dir}
@@ -57,17 +53,31 @@ func OpenUser(dir string) (*UserStore, error) {
 // Close closes the user store.
 func (s *UserStore) Close() error { return s.db.Close() }
 
-func configure(db *sql.DB) error {
-	for _, p := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=NORMAL",
-	} {
-		if _, err := db.Exec(p); err != nil {
-			return err
-		}
-	}
-	return nil
+// sqliteDSN returns the SQLite DSN for a file path. The pragmas are encoded
+// in the DSN (not set once after Open) because database/sql pools connections:
+// busy_timeout and foreign_keys are per-connection and a one-shot Exec would
+// only reach whichever connection the pool happened to hand out.
+//
+// The two load-bearing settings under concurrent turns:
+//
+//   - busy_timeout: concurrent turns for the same user share one bevin.db; a
+//     writer that can't get the lock immediately waits (up to 10 s) instead of
+//     failing with SQLITE_BUSY.
+//   - _txlock=immediate: Begin() acquires the WRITE lock at transaction start
+//     instead of lazily at the first write. A deferred transaction that reads
+//     first (like AppendMessage's MAX(seq) probe) takes a read snapshot and
+//     then has to UPGRADE to a writer; if another connection is writing at
+//     that instant the upgrade fails with SQLITE_LOCKED — and busy_timeout
+//     does NOT retry that error. Immediate transactions serialize at BEGIN
+//     (where busy_timeout works) and never hit the upgrade window. Every
+//     Begin() in this package is a write transaction, so nothing pays for
+//     the write lock early; plain reads (Query/QueryRow) are autocommit and
+//     unaffected.
+func sqliteDSN(path string) string {
+	return path +
+		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(10000)" +
+		"&_txlock=immediate"
 }
 
 // nowUTC is the canonical stored timestamp (RFC3339, UTC).

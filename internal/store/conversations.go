@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 // Conversation is a P2 row.
@@ -148,12 +149,12 @@ func scanMsg(rs interface{ Scan(...any) error }, m *Message) error {
 func (s *UserStore) AppendMessage(convID, role, content string, modelID *string, emb []float32) (*Message, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var next int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE conversation_id = ?`, convID).Scan(&next); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: seq: %w", err)
 	}
 	now := nowUTC()
 	var embCol any
@@ -163,17 +164,17 @@ func (s *UserStore) AppendMessage(convID, role, content string, modelID *string,
 	res, err := tx.Exec(`INSERT INTO messages (conversation_id, role, content, seq, created_at, model_id, embedding) VALUES (?,?,?,?,?,?,?)`,
 		convID, role, content, next, now, modelID, embCol)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: insert: %w", err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: lastid: %w", err)
 	}
 	if _, err := tx.Exec(`UPDATE conversations SET last_activity_at = ? WHERE id = ?`, now, convID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: touch: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append: commit: %w", err)
 	}
 	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Seq: next, CreatedAt: now, ModelID: modelID, Embedding: emb}, nil
 }

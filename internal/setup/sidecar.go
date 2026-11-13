@@ -73,7 +73,9 @@ func (sm *SidecarManager) Ensure(ctx context.Context, dataDir, kind, endpoint st
 // EnsureAll provisions the required sidecars for a config, idempotently, all
 // bound to loopback. Each sidecar's (loopback) endpoint is recorded back into
 // cfg so the running process points at it (a re-launch that lands on a
-// different free port updates the endpoint accordingly).
+// different free port updates the endpoint accordingly). Used at setup: the
+// design provisions all sidecars at setup time, so the supervisor later has
+// recorded endpoints to keep alive.
 func (sm *SidecarManager) EnsureAll(ctx context.Context, cfg *config.ServerConfig) error {
 	ep, err := sm.Ensure(ctx, cfg.DataDir, KindQdrant, cfg.Sidecars.Qdrant)
 	if err != nil {
@@ -97,23 +99,57 @@ func (sm *SidecarManager) EnsureAll(ctx context.Context, cfg *config.ServerConfi
 	return nil
 }
 
+// EnsureConfigured (re-)provisions ONLY the sidecars recorded in cfg (a
+// non-empty endpoint). The normal-mode supervisor uses it: setup owns initial
+// provisioning (EnsureAll provisions everything and records the endpoints into
+// the config), and the supervisor's job is to keep the configured sidecars
+// alive — never to install a sidecar that setup never provisioned (a config
+// without sidecar endpoints stays sidecar-free).
+func (sm *SidecarManager) EnsureConfigured(ctx context.Context, cfg *config.ServerConfig) error {
+	if cfg.Sidecars.Qdrant != "" {
+		ep, err := sm.Ensure(ctx, cfg.DataDir, KindQdrant, cfg.Sidecars.Qdrant)
+		if err != nil {
+			return fmt.Errorf("qdrant: %w", err)
+		}
+		cfg.Sidecars.Qdrant = ep
+	}
+	if cfg.Sidecars.FFmpeg != "" {
+		ef, err := sm.Ensure(ctx, cfg.DataDir, KindFFmpeg, cfg.Sidecars.FFmpeg)
+		if err != nil {
+			return fmt.Errorf("ffmpeg: %w", err)
+		}
+		cfg.Sidecars.FFmpeg = ef
+	}
+	if cfg.Sidecars.LlamaServer != "" {
+		ep, err := sm.Ensure(ctx, cfg.DataDir, KindLlamaServer, cfg.Sidecars.LlamaServer)
+		if err != nil {
+			return fmt.Errorf("llama-server: %w", err)
+		}
+		cfg.Sidecars.LlamaServer = ep
+	}
+	return nil
+}
+
 // superviseInterval is how often the sidecar supervisor re-checks the sidecars
 // and respawns any that died mid-session.
 var superviseInterval = 30 * time.Second
 
-// Supervise keeps the sidecars alive for the life of the process. On start it
-// ensures all of them are up (re-launching any that are down — e.g. after a
-// bevin restart or a machine reboot, since the sidecars are separate processes
-// bevin does not keep alive on its own), then re-checks every
-// superviseInterval and respawns any that died mid-session (crash/OOM). It
-// returns when ctx is done. A down sidecar is re-provisioned via the same
-// idempotent Ensure (probe-first, forward-only), so an already-running sidecar
-// is never disturbed. It updates cfg in place with the endpoints it lands on;
-// it does not write server.toml (the setup wizard + admin edit own the on-disk
-// config, which is re-ensured on the next boot).
+// Supervise keeps the CONFIGURED sidecars alive for the life of the process.
+// On start it ensures each one recorded in cfg is up (re-launching any that
+// are down — e.g. after a bevin restart or a machine reboot, since the
+// sidecars are separate processes bevin does not keep alive on its own), then
+// re-checks every superviseInterval and respawns any that died mid-session
+// (crash/OOM). A sidecar with no recorded endpoint (setup never provisioned
+// it) is left alone — the supervisor keeps configured sidecars alive, it does
+// not install new ones (EnsureConfigured). It returns when ctx is done. A down
+// sidecar is re-provisioned via the same idempotent Ensure (probe-first,
+// forward-only), so an already-running sidecar is never disturbed. It updates
+// cfg in place with the endpoints it lands on; it does not write server.toml
+// (the setup wizard + admin edit own the on-disk config, which is re-ensured
+// on the next boot).
 func (sm *SidecarManager) Supervise(ctx context.Context, cfg *config.ServerConfig) {
 	for {
-		if err := sm.EnsureAll(ctx, cfg); err != nil {
+		if err := sm.EnsureConfigured(ctx, cfg); err != nil {
 			// A sidecar failed to (re-)provision. Log + retry next tick; a
 			// transient failure (a busy port, a slow model load) is not fatal
 			// to the server.

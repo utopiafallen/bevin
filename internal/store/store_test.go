@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -64,6 +65,158 @@ func TestConversationAndMessages(t *testing.T) {
 	c2, _ := s.GetConversation(c.ID)
 	if c2.ActiveModelID != "m2" {
 		t.Fatalf("model = %q", c2.ActiveModelID)
+	}
+}
+
+func TestConcurrentWritersNoBusy(t *testing.T) {
+	// Two concurrent turns for one user share a single bevin.db. Without a
+	// per-connection busy_timeout the second writer fails with SQLITE_BUSY
+	// (seen in e2e: the 2nd of 2 parallel streaming turns died on persisting
+	// its reply). Every goroutine gets its own conversation (like distinct
+	// live turns) and appends a message; none may error.
+	s := openTestStore(t)
+	const writers = 4
+	errs := make([]error, writers)
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			<-start
+			c, err := s.CreateConversation("conv", "m1")
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			if _, err := s.AppendMessage(c.ID, "user", "concurrent write test", nil, nil); err != nil {
+				errs[i] = err
+			}
+		}(i)
+	}
+	close(start)
+	for i := 0; i < writers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("concurrent writer %d: %v (want no SQLITE_BUSY)", i, errs[i])
+		}
+	}
+}
+
+func TestConcurrentBurstShape(t *testing.T) {
+	// The full e2e burst shape: at t=0 three turns each do
+	// CreateConversation + SetFrozenSystemPrompt + AppendMessage(user)
+	// concurrently (a write storm); at t≈delay each appends its reply
+	// concurrently. Pre-fix (deferred txs) this failed the reply/user appends
+	// with SQLITE_LOCKED(517): a deferred transaction reads first (MAX(seq)),
+	// takes a read snapshot, then fails to UPGRADE to a writer while another
+	// connection is writing — an error busy_timeout does not retry. The DB is
+	// seeded with a handful of conversations + messages first so the FTS
+	// triggers and indexes are non-trivial, as in a real data dir.
+	s := openTestStore(t)
+	for i := 0; i < 8; i++ {
+		c, err := s.CreateConversation("seed", "m1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < 2; j++ {
+			if _, err := s.AppendMessage(c.ID, "user", "seed message", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AppendMessage(c.ID, "assistant", "seed reply", ptrStr("m1"), nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	const turns = 3
+	for round := 0; round < 10; round++ {
+		// Creation phase: the t=0 write storm.
+		start := make(chan struct{})
+		ids := make([]string, turns)
+		errs := make([]error, turns)
+		done := make(chan struct{}, turns)
+		for i := 0; i < turns; i++ {
+			go func(i int) {
+				defer func() { done <- struct{}{} }()
+				<-start
+				c, err := s.CreateConversation("burst", "m1")
+				if err != nil {
+					errs[i] = fmt.Errorf("create: %w", err)
+					return
+				}
+				ids[i] = c.ID
+				if err := s.SetFrozenSystemPrompt(c.ID, "system prompt text"); err != nil {
+					errs[i] = fmt.Errorf("frozen: %w", err)
+					return
+				}
+				if _, err := s.AppendMessage(c.ID, "user", "ping", nil, nil); err != nil {
+					errs[i] = fmt.Errorf("user append: %w", err)
+					return
+				}
+			}(i)
+		}
+		close(start)
+		for i := 0; i < turns; i++ {
+			<-done
+		}
+		for i := 0; i < turns; i++ {
+			if errs[i] != nil {
+				t.Fatalf("round %d turn %d (creation phase): %v", round, i, errs[i])
+			}
+		}
+		// The reply phase: all turns finish their model call at once.
+		time.Sleep(200 * time.Millisecond)
+		errs2 := make([]error, turns)
+		start2 := make(chan struct{})
+		done2 := make(chan struct{}, turns)
+		for i := 0; i < turns; i++ {
+			go func(i int) {
+				defer func() { done2 <- struct{}{} }()
+				<-start2
+				_, err := s.AppendMessage(ids[i], "assistant", "fake reply text", ptrStr("m1"), nil)
+				errs2[i] = err
+			}(i)
+		}
+		close(start2)
+		for i := 0; i < turns; i++ {
+			<-done2
+		}
+		for i := 0; i < turns; i++ {
+			if errs2[i] != nil {
+				t.Fatalf("round %d turn %d (reply phase): %v", round, i, errs2[i])
+			}
+		}
+	}
+}
+
+func TestConcurrentReplyAppends(t *testing.T) {
+	// The e2e shape: several conversations each already hold a user message
+	// (so the FTS triggers + indexes are warm), then all reply appends land
+	// in the same instant (as when two parallel turns finish their model call
+	// together). This is what produced SQLITE_LOCKED(517) in the browser e2e.
+	s := openTestStore(t)
+	const writers = 3
+	ids := make([]string, writers)
+	for i := 0; i < writers; i++ {
+		c, err := s.CreateConversation("conv", "m1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AppendMessage(c.ID, "user", "existing user message", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = c.ID
+	}
+	errs := make([]error, writers)
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			<-start
+			_, err := s.AppendMessage(ids[i], "assistant", "the model reply text", ptrStr("m1"), nil)
+			errs[i] = err
+		}(i)
+	}
+	close(start)
+	for i := 0; i < writers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("concurrent reply append %d: %v", i, errs[i])
+		}
 	}
 }
 

@@ -158,6 +158,12 @@ func (m *Manager) recordedSidecarsLocked() config.Sidecars {
 // streaming the real install functions' phase reports (downloading / starting)
 // into this run's status map via the sidecarReport hook. It records each
 // sidecar's endpoint and finishes when all are done (or the first error).
+//
+// In SETUP mode it provisions all three (the design: sidecars are always
+// pulled at setup). In NORMAL mode (a config already exists) it only keeps
+// the CONFIGURED sidecars alive (probe + re-launch if down): it never installs
+// a sidecar that setup did not provision — a sidecar-free config stays
+// sidecar-free (the same rule the normal-mode supervisor follows).
 func (m *Manager) runProvision(st *provisionState) {
 	defer st.cancel()
 	defer func() {
@@ -173,12 +179,19 @@ func (m *Manager) runProvision(st *provisionState) {
 	}
 	defer func() { sidecarReport = nil }()
 
+	editMode := config.Exists(m.dataDir) // normal mode: the config (and its sidecars) exist
 	for _, kind := range provisionOrder {
 		if st.ctx.Err() != nil {
 			return
 		}
-		m.setProvision(kind, "downloading", "Checking for an existing install…", 0)
 		existing := m.existingEndpoint(kind)
+		if editMode && existing == "" {
+			// Not configured: leave it alone — there is nothing to provision.
+			// Marked ready (not pending) so the wizard step can advance.
+			m.setProvision(kind, "ready", "Not configured — skipped", 100)
+			continue
+		}
+		m.setProvision(kind, "downloading", "Checking for an existing install…", 0)
 		ep, err := m.sidecars.Ensure(st.ctx, m.dataDir, kind, existing)
 		if err != nil {
 			st.err = err

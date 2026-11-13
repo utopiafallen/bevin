@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bevin — admin</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/brand.css">
+<style>
+  body { display:flex; min-height:100vh; margin:0; background:var(--bg); color:var(--text); font-family:var(--font-sans); }
+  .side { width:220px; flex:0 0 220px; background:var(--surface); border-right:1px solid var(--border); padding:1.2rem .9rem; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
+  .side .logo { display:flex; align-items:center; gap:.55rem; font-weight:900; font-size:1.05rem; padding:.2rem .5rem .9rem; }
+  .side .logo img { width:30px; height:30px; }
+  .side .admin-tag { font-size:.66rem; font-weight:800; letter-spacing:.09em; text-transform:uppercase; color:var(--brand-strong); background:var(--brand-softer); border-radius:var(--radius-pill); padding:.18rem .6rem; display:inline-block; margin:0 0 1rem .5rem; }
+  .nav { display:flex; flex-direction:column; gap:.15rem; }
+  .nav a { display:flex; align-items:center; gap:.55rem; padding:.55rem .7rem; border-radius:10px; color:var(--text); text-decoration:none; font-size:.92rem; font-weight:700; }
+  .nav a:hover { background:var(--surface-2); }
+  .nav a.active { background:var(--brand-soft); color:var(--brand-strong); }
+  .nav a .ic { width:1.2em; text-align:center; }
+  .side .foot { margin-top:auto; padding:.7rem .5rem 0; border-top:1px solid var(--border); font-size:.85rem; }
+  .side .foot a { color:var(--accent-strong); text-decoration:none; font-weight:700; }
+  .main { flex:1; padding:1.6rem 2rem 3rem; max-width:1000px; }
+  .main h1 { font-size:1.35rem; margin:.2rem 0 1rem; }
+  .main h2 { font-size:1rem; margin:1.4rem 0 .6rem; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.04em; font-size:.8rem; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:1rem 1.2rem; box-shadow:var(--shadow-sm); margin-bottom:1rem; }
+  .totals { display:flex; gap:1.6rem; font-size:.95rem; }
+  .totals b { font-size:1.5rem; display:block; }
+  .pool { padding:.7rem 0; border-bottom:1px solid var(--border); }
+  .pool:last-child { border-bottom:0; }
+  .pool-head { display:flex; align-items:baseline; gap:.6rem; margin-bottom:.45rem; }
+  .pool-name { font-weight:800; }
+  .pool-prov { color:var(--text-muted); font-size:.8rem; }
+  .pool-state { margin-left:auto; font-size:.85rem; font-weight:700; color:var(--text-muted); }
+  .slots { display:flex; gap:.35rem; }
+  .slot { flex:1; height:14px; border-radius:5px; background:var(--surface-2); border:1px solid var(--border); }
+  .slot.busy { background:var(--brand); border-color:var(--brand-hover); }
+  .util { height:5px; border-radius:3px; background:var(--surface-2); margin-top:.4rem; overflow:hidden; }
+  .util i { display:block; height:100%; background:var(--brand); border-radius:3px; }
+  table.q { width:100%; border-collapse:collapse; font-size:.9rem; }
+  table.q th { text-align:left; color:var(--text-muted); font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; padding:.3rem .5rem; }
+  table.q td { padding:.45rem .5rem; border-top:1px solid var(--border); }
+  .empty { color:var(--text-muted); font-size:.9rem; padding:.4rem 0; }
+  .badge { font-size:.7rem; font-weight:800; border-radius:var(--radius-pill); padding:.15rem .55rem; }
+  .badge.ok { background:color-mix(in srgb, var(--ok) 16%, transparent); color:var(--ok); }
+  .badge.bad { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger); }
+  .btn { display:inline-block; background:var(--brand); color:var(--brand-contrast); font:inherit; font-weight:800; border:0; border-radius:var(--radius-pill); padding:.55rem 1.2rem; cursor:pointer; text-decoration:none; }
+  .btn:hover { background:var(--brand-hover); }
+  .btn.ghost { background:transparent; color:var(--brand-strong); border:1px solid var(--border); }
+  .row { display:flex; gap:.6rem; align-items:center; }
+  .row input[type=text] { flex:1; font:inherit; padding:.5rem .8rem; border:1px solid var(--border); border-radius:10px; background:var(--surface); }
+  .kv { font-family:var(--font-mono); font-size:.85rem; word-break:break-all; }
+  .muted { color:var(--text-muted); font-size:.88rem; }
+  .msg { font-size:.9rem; margin-top:.5rem; min-height:1.2em; }
+  .msg.ok { color:var(--ok); } .msg.err { color:var(--danger); }
+  .blocked { text-align:center; padding:4rem 1rem; }
+  .blocked .btn { margin-top:1rem; }
+</style>
+</head>
+<body>
+  <nav class="side">
+    <div class="logo"><img src="/logo-mark.svg" alt="">bevin</div>
+    <span class="admin-tag">admin</span>
+    <div class="nav" id="nav">
+      <a href="#overview" data-page="overview"><span class="ic">▦</span>Overview</a>
+      <a href="#models" data-page="models"><span class="ic">◍</span>Models</a>
+      <a href="#sidecars" data-page="sidecars"><span class="ic">⬡</span>Sidecars</a>
+      <a href="#email" data-page="email"><span class="ic">✉</span>Email</a>
+      <a href="#server" data-page="server"><span class="ic">⚙</span>Server</a>
+    </div>
+    <div class="foot"><a href="#" id="signout">Sign out</a></div>
+  </nav>
+  <main class="main" id="main"></main>
+<script>
+let STATUS = null, SIDE = null, MAIL = null, ME = null;
+let pollTimer = null;
+
+async function j(url, opt) {
+  const r = await fetch(url, opt || {});
+  let body = null; try { body = await r.json(); } catch (_) {}
+  if (!r.ok) { const e = new Error((body && body.error) || ("HTTP " + r.status)); e.status = r.status; throw e; }
+  return body;
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+function locTime(iso) { try { return new Date(iso).toLocaleString(); } catch (_) { return iso; } }
+
+function page() { return (location.hash || "#overview").slice(1) || "overview"; }
+function renderNav() {
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.page === page()));
+}
+window.addEventListener("hashchange", () => { renderNav(); stopPoll(); render(); });
+
+function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function startPoll(fn, ms) { stopPoll(); fn(); pollTimer = setInterval(fn, ms); }
+
+async function boot() {
+  try { ME = await j("/api/me"); } catch (e) { return blocked(e); }
+  render();
+}
+function blocked(e) {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "blocked";
+  d.innerHTML = "<h1>Admin required</h1><p class='muted'>" + esc(e.message) + "</p>";
+  const b = document.createElement("a");
+  b.className = "btn"; b.href = "/"; b.textContent = "Go to login";
+  d.append(b);
+  m.append(d);
+  stopPoll();
+}
+
+async function loadStatus() {
+  try { STATUS = await j("/admin/api/status"); } catch (e) { return blocked(e); }
+  if (page() === "overview") renderOverview();
+}
+async function loadSide() {
+  try { SIDE = await j("/admin/api/sidecars"); } catch (e) { return blocked(e); }
+  if (page() === "sidecars") renderSidecars();
+}
+async function loadMail() {
+  try { MAIL = await j("/admin/api/email"); } catch (e) { return blocked(e); }
+  if (page() === "email") renderEmail();
+}
+
+function render() {
+  renderNav();
+  stopPoll();
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  switch (page()) {
+    case "overview": renderOverview(); startPoll(loadStatus, 2000); break;
+    case "models": renderModels(); startPoll(loadStatus, 4000); break;
+    case "sidecars": renderSidecars(); startPoll(loadSide, 5000); break;
+    case "email": renderEmail(); loadMail(); loadSide(); break;
+    case "server": renderServer(); loadStatus(); break;
+    default: renderOverview(); startPoll(loadStatus, 2000);
+  }
+}
+
+function renderOverview() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Overview"; m.append(h);
+  if (!STATUS) { m.append(elP("Loading…")); return; }
+  // Totals.
+  const tot = document.createElement("div");
+  tot.className = "card totals";
+  tot.innerHTML =
+    "<div><b>" + STATUS.totals.slots + "</b>execution slots</div>" +
+    "<div><b>" + STATUS.totals.busy + "</b>busy now</div>" +
+    "<div><b>" + STATUS.totals.queued + "</b>queued (global task queue)</div>" +
+    "<div><b>" + esc(locTime(STATUS.time)) + "</b>now</div>";
+  m.append(tot);
+  // Pools.
+  const pools = document.createElement("div");
+  pools.className = "card";
+  pools.innerHTML = "<h2>Execution-slot pools</h2>";
+  if (!STATUS.pools.length) pools.append(elP("No models configured."));
+  STATUS.pools.forEach(p => pools.append(poolRow(p)));
+  m.append(pools);
+  // Queue.
+  const q = document.createElement("div");
+  q.className = "card";
+  q.innerHTML = "<h2>Global task queue</h2>";
+  const waiting = [];
+  STATUS.pools.forEach(p => p.waiting.forEach(w => waiting.push(Object.assign({ pool: p.display_name || p.id }, w))));
+  if (!waiting.length) q.append(elP("Queue is empty — every turn has a slot."));
+  else {
+    const t = document.createElement("table");
+    t.className = "q";
+    t.innerHTML = "<tr><th>User</th><th>Model pool</th><th>Conversation</th><th>Waiting</th></tr>";
+    waiting.forEach(w => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + esc(w.handle) + "</td><td>" + esc(w.pool) + "</td><td class='kv'>" + esc(w.conversation_id) + "</td><td>" + w.wait_secs + "s</td>";
+      t.append(tr);
+    });
+    q.append(t);
+  }
+  m.append(q);
+}
+
+function poolRow(p) {
+  const d = document.createElement("div");
+  d.className = "pool";
+  const blocks = [];
+  for (let i = 0; i < p.slots; i++) blocks.push("<div class='slot" + (i < p.busy ? " busy" : "") + "'></div>");
+  const pct = p.slots ? Math.round(100 * p.busy / p.slots) : 0;
+  let state = p.busy + "/" + p.slots + " slots";
+  if (p.auto_disabled) state += " — unavailable (auto-disabled)";
+  else if (!p.enabled) state += " — disabled";
+  d.innerHTML =
+    "<div class='pool-head'><span class='pool-name'>" + esc(p.display_name || p.id) + "</span>" +
+    "<span class='pool-prov'>" + esc(p.provider) + "</span>" +
+    "<span class='pool-state'>" + esc(state) + "</span></div>" +
+    "<div class='slots'>" + blocks.join("") + "</div>" +
+    "<div class='util'><i style='width:" + pct + "%'></i></div>";
+  return d;
+}
+
+function renderModels() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Models"; m.append(h);
+  const c = document.createElement("div");
+  c.className = "card";
+  if (!STATUS) { c.append(elP("Loading…")); m.append(c); return; }
+  const t = document.createElement("table");
+  t.className = "q";
+  t.innerHTML = "<tr><th>Display name</th><th>Provider</th><th>Model</th><th>Slots</th><th>Busy</th><th>State</th></tr>";
+  STATUS.pools.forEach(p => {
+    const tr = document.createElement("tr");
+    const st = p.auto_disabled ? "<span class='badge bad'>unavailable</span>" : (p.enabled ? "<span class='badge ok'>enabled</span>" : "<span class='badge bad'>disabled</span>");
+    tr.innerHTML = "<td>" + esc(p.display_name || p.id) + "</td><td>" + esc(p.provider) + "</td><td class='kv'>" + esc(p.id) + "</td><td>" + p.slots + "</td><td>" + p.busy + "</td><td>" + st + "</td>";
+    t.append(tr);
+  });
+  c.append(t);
+  c.append(elP(""));
+  const note = elP("Change a model's slots, enable/disable models, or add providers in the config editor — the running agent picks the changes up immediately (no restart).");
+  c.append(note);
+  const btn = document.createElement("a");
+  btn.className = "btn"; btn.href = "/admin/setup"; btn.textContent = "Open config editor";
+  c.append(document.createElement("br"));
+  c.append(btn);
+  m.append(c);
+}
+
+function renderSidecars() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Sidecars"; m.append(h);
+  const c = document.createElement("div");
+  c.className = "card";
+  c.append(elP("Local services bevin provisions and keeps alive (the supervisor re-launches a down one automatically)."));
+  if (!SIDE) { c.append(elP("Probing…")); m.append(c); return; }
+  const t = document.createElement("table");
+  t.className = "q";
+  t.innerHTML = "<tr><th>Sidecar</th><th>Endpoint</th><th>Status</th></tr>";
+  SIDE.sidecars.forEach(s => {
+    const tr = document.createElement("tr");
+    const st = s.ok ? "<span class='badge ok'>up</span>" : "<span class='badge bad'>" + esc(s.error || "down") + "</span>";
+    tr.innerHTML = "<td>" + esc(s.kind) + "</td><td class='kv'>" + esc(s.endpoint || "—") + "</td><td>" + st + "</td>";
+    t.append(tr);
+  });
+  c.append(t);
+  m.append(c);
+}
+
+function renderEmail() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Email"; m.append(h);
+  const c = document.createElement("div");
+  c.className = "card";
+  if (!MAIL) { c.append(elP("Loading…")); m.append(c); return; }
+  const s = MAIL.smtp || {};
+  c.innerHTML =
+    "<h2>SMTP (saved)</h2>" +
+    "<p>" + (MAIL.configured ? "<span class='badge ok'>configured</span>" : "<span class='badge bad'>not configured</span>") + "</p>" +
+    "<p class='kv'>host " + esc(s.smtp_host || "—") + " : " + esc(s.smtp_port || "—") +
+    "<br>user " + esc(s.username || "—") + " — password " + (s.has_password ? "set" : "not set") +
+    "<br>from " + esc(s.from_address || (s.username || "—")) + " (" + esc(s.from_name || "bevin") + ")" +
+    "<br>STARTTLS " + (s.use_starttls ? "on" : "off") + "</p>";
+  m.append(c);
+  // Test send.
+  const c2 = document.createElement("div");
+  c2.className = "card";
+  c2.innerHTML = "<h2>Send a test email</h2>";
+  const row = document.createElement("div");
+  row.className = "row";
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.placeholder = "you@example.com";
+  const btn = document.createElement("button");
+  btn.className = "btn"; btn.textContent = "Send test email";
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  btn.onclick = async () => {
+    const to = inp.value.trim();
+    if (!to) { msg.textContent = "Enter an address first."; msg.className = "msg err"; return; }
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const r = await j("/admin/api/email/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }) });
+      msg.textContent = "Test email sent to " + r.to + "."; msg.className = "msg ok";
+    } catch (e) {
+      msg.textContent = "Send failed: " + e.message; msg.className = "msg err";
+    } finally { btn.disabled = false; btn.textContent = "Send test email"; }
+  };
+  row.append(inp, btn);
+  c2.append(row, msg);
+  if (!MAIL.configured) {
+    const off = elP("");
+    off.innerHTML = "Email is not configured yet — open the <a href='/admin/setup'>config editor</a> to set it up.";
+    c2.append(off);
+  }
+  m.append(c2);
+}
+
+function renderServer() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Server"; m.append(h);
+  const c = document.createElement("div");
+  c.className = "card";
+  if (!STATUS) { c.append(elP("Loading…")); m.append(c); return; }
+  c.innerHTML =
+    "<h2>Basics</h2>" +
+    "<p class='kv'>data dir " + esc(STATUS.server.data_dir) + "<br>bind " + esc(STATUS.server.bind) + "</p>" +
+    "<p class='muted'>The listen port is set via the CLI (-port) and is not stored in the config.</p>";
+  m.append(c);
+}
+
+function elP(txt) { const p = document.createElement("p"); p.className = "muted"; p.textContent = txt; return p; }
+
+document.getElementById("signout").onclick = async (e) => {
+  e.preventDefault();
+  try { await j("/logout", { method: "POST" }); } catch (_) {}
+  location.href = "/";
+};
+
+boot();
+</script>
+</body>
+</html>
