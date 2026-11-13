@@ -231,6 +231,19 @@ func (s *ServerStore) SetUserEmail(handle, emailAddr string) error {
 	return nil
 }
 
+// SetUserDisplayName sets a user's display name ("" leaves it blank — the
+// login UI falls back to the handle).
+func (s *ServerStore) SetUserDisplayName(handle, name string) error {
+	res, err := s.db.Exec(`UPDATE users SET display_name = ? WHERE handle = ?`, name, handle)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 // SetUserStatus sets active | disabled.
 func (s *ServerStore) SetUserStatus(handle, status string) error {
 	res, err := s.db.Exec(`UPDATE users SET status = ? WHERE handle = ?`, status, handle)

@@ -223,28 +223,49 @@ func (a *Agent) userStore(handle string) (*store.UserStore, error) {
 	return us, nil
 }
 
-// EnsureConversation returns a conversation id, creating it (with a default
-// active model) when convID is empty.
+// newUserConversation creates a conversation with the user's preferred model:
+// their per-user default from agent.toml (set in first-time onboarding) when
+// it is still configured + available, else the server default. The frozen
+// system prompt is set at creation.
+func (a *Agent) newUserConversation(us *store.UserStore, handle, title string) (*store.Conversation, error) {
+	modelID := a.DefaultModelID()
+	if ac, err := config.LoadAgent(filepath.Join(a.dataDir, "users", handle)); err == nil && ac.DefaultModelID != "" {
+		for _, m := range a.Models() {
+			if m.ID == ac.DefaultModelID && m.Available() {
+				modelID = ac.DefaultModelID
+				break
+			}
+		}
+	}
+	if modelID == "" {
+		return nil, fmt.Errorf("no available models to start a conversation")
+	}
+	if title == "" {
+		title = "New conversation"
+	}
+	c, err := us.CreateConversation(title, modelID)
+	if err != nil {
+		return nil, err
+	}
+	// Freeze the system prompt at conversation start. It is the content of
+	// the system message the request builder sends; a profile/input change
+	// later appends a new system message rather than mutating this.
+	if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// EnsureConversation returns a conversation id, creating it (with the
+// user's default active model) when convID is empty.
 func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title string) (string, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", err
 	}
 	if convID == "" {
-		if a.DefaultModelID() == "" {
-			return "", fmt.Errorf("no available models to start a conversation")
-		}
-		if title == "" {
-			title = "New conversation"
-		}
-		c, err := us.CreateConversation(title, a.DefaultModelID())
+		c, err := a.newUserConversation(us, handle, title)
 		if err != nil {
-			return "", err
-		}
-		// Freeze the system prompt at conversation start. It is the content of
-		// the system message the request builder sends; a profile/input change
-		// later appends a new system message rather than mutating this.
-		if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
 			return "", err
 		}
 		return c.ID, nil
@@ -253,6 +274,61 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 		return "", err
 	}
 	return convID, nil
+}
+
+const onboardingTitle = "Meet Bevin"
+
+// OnboardingConversation creates the first-time "Meet Bevin" conversation for
+// a user: their chosen default model, the standard frozen system prompt, and
+// (when it has no messages yet) ONE seeded assistant welcome message. The
+// onboarding content lives in the message, never the prompt, so the
+// conversation stays a normal conversation forever. Idempotent: an existing
+// conversation is reused and re-seeded only when empty.
+func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, welcome string) (string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", err
+	}
+	if conv, err := us.FindConversationByTitle(onboardingTitle); err == nil {
+		if has, err := us.HasMessages(conv.ID); err == nil && !has {
+			if _, err := us.AppendMessage(conv.ID, "assistant", welcome, nil, nil); err != nil {
+				return "", err
+			}
+		}
+		return conv.ID, nil
+	}
+	// modelID was validated by the caller against the enabled set; fall back
+	// to the server default if it is somehow not available.
+	if modelID == "" || !a.ModelAvailable(modelID) {
+		modelID = a.DefaultModelID()
+	}
+	if modelID == "" {
+		return "", fmt.Errorf("no available models to start a conversation")
+	}
+	c, err := us.CreateConversation(onboardingTitle, modelID)
+	if err != nil {
+		return "", err
+	}
+	if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
+		return "", err
+	}
+	if welcome != "" {
+		if _, err := us.AppendMessage(c.ID, "assistant", welcome, nil, nil); err != nil {
+			return "", err
+		}
+	}
+	return c.ID, nil
+}
+
+// ModelAvailable reports whether modelID is configured, enabled and not
+// auto-disabled (i.e. usable for new work right now).
+func (a *Agent) ModelAvailable(modelID string) bool {
+	for _, m := range a.Models() {
+		if m.ID == modelID {
+			return m.Available()
+		}
+	}
+	return false
 }
 
 // runTurn is the shared logic for Turn (non-streaming, emit=nil) and

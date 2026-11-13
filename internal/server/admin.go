@@ -53,8 +53,8 @@ func (a *App) adminStatus(w http.ResponseWriter, _ *http.Request) {
 		queued += len(p.Waiting)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"time": time.Now().UTC().Format(time.RFC3339),
-		"pools": pools,
+		"time":   time.Now().UTC().Format(time.RFC3339),
+		"pools":  pools,
 		"totals": map[string]any{"slots": totalSlots, "busy": busy, "queued": queued},
 		"server": map[string]any{"data_dir": a.dataDir, "bind": a.liveCfg().Bind},
 	})
@@ -159,15 +159,15 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"use_starttls": cfg.Email.UseStartTLS,
 		},
 		"oauth": map[string]any{
-			"enabled":       cfg.Auth.OAuth.Enabled,
-			"name":          cfg.Auth.OAuth.Name,
-			"client_id":     cfg.Auth.OAuth.ClientID,
-			"has_secret":    cfg.Auth.OAuth.ClientSecret != "",
-			"auth_url":      cfg.Auth.OAuth.AuthURL,
-			"token_url":     cfg.Auth.OAuth.TokenURL,
-			"userinfo_url":  cfg.Auth.OAuth.UserinfoURL,
-			"scopes":        cfg.Auth.OAuth.Scopes,
-			"redirect_uri":  cfg.Auth.OAuth.RedirectURI,
+			"enabled":      cfg.Auth.OAuth.Enabled,
+			"name":         cfg.Auth.OAuth.Name,
+			"client_id":    cfg.Auth.OAuth.ClientID,
+			"has_secret":   cfg.Auth.OAuth.ClientSecret != "",
+			"auth_url":     cfg.Auth.OAuth.AuthURL,
+			"token_url":    cfg.Auth.OAuth.TokenURL,
+			"userinfo_url": cfg.Auth.OAuth.UserinfoURL,
+			"scopes":       cfg.Auth.OAuth.Scopes,
+			"redirect_uri": cfg.Auth.OAuth.RedirectURI,
 		},
 	})
 }

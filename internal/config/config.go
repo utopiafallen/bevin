@@ -295,6 +295,10 @@ func (c *ServerConfig) Validate() error {
 			c.Email.FromAddress = c.Email.Username
 		}
 	}
+	// Internal model IDs are what everything references (slot pools,
+	// conversation active model, per-user defaults) — fill any missing ones
+	// (also repairs pre-existing files saved before IDs were derived).
+	assignModelIDs(c.Models)
 	for i := range c.Models {
 		if c.Models[i].Slots < 1 {
 			c.Models[i].Slots = 1 // every model has at least one execution slot
@@ -316,6 +320,52 @@ func (c *ServerConfig) Validate() error {
 		return errors.New("server.toml: auth.session_secret is required")
 	}
 	return nil
+}
+
+// ModelIDSlug derives a model's internal ID from its provider model id:
+// lowercased, non-alphanumerics collapsed to single dashes, capped at 40
+// chars. The internal ID is what every other piece references (conversation
+// active model, per-user default, slot pools, depends_on), so it must never
+// be empty.
+func ModelIDSlug(modelID string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(modelID) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.' || r == ' ' || r == '/':
+			b.WriteRune('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if s == "" {
+		s = "model"
+	}
+	if len(s) > 40 {
+		s = s[:40]
+	}
+	return s
+}
+
+// assignModelIDs fills any missing internal model IDs, deterministically
+// derived from model_id with a collision suffix (m, m-2, m-3, ...) so two
+// entries can never collapse onto one slot pool.
+func assignModelIDs(models []Model) {
+	seen := map[string]bool{}
+	for i := range models {
+		if models[i].ID != "" {
+			seen[models[i].ID] = true
+			continue
+		}
+		base := ModelIDSlug(models[i].ModelID)
+		id, n := base, 2
+		for seen[id] {
+			id = fmt.Sprintf("%s-%d", base, n)
+			n++
+		}
+		models[i].ID = id
+		seen[id] = true
+	}
 }
 
 // DefaultDataDir is the server binary's own directory (cross-platform: works

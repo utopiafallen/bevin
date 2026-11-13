@@ -52,6 +52,29 @@ func (s *UserStore) GetConversation(id string) (*Conversation, error) {
 	return c, nil
 }
 
+// FindConversationByTitle returns the conversation with the given exact title
+// (ErrNotFound when there is none).
+func (s *UserStore) FindConversationByTitle(title string) (*Conversation, error) {
+	c := &Conversation{}
+	err := scanConv(s.db.QueryRow(`SELECT `+convCols+` FROM conversations WHERE title = ?`, title), c)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// HasMessages reports whether the conversation has any messages.
+func (s *UserStore) HasMessages(convID string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, convID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *UserStore) ListConversations() ([]Conversation, error) {
 	rows, err := s.db.Query(`SELECT ` + convCols + ` FROM conversations ORDER BY last_activity_at DESC`)
 	if err != nil {

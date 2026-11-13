@@ -97,6 +97,34 @@
         </div>
       </div>
 
+      <div id="onboardCard" style="display:none;">
+        <div class="eyebrow">First time here</div>
+        <h3 style="margin:.3rem 0 .2rem;">Meet Bevin</h3>
+        <p class="muted" style="margin-top:.2rem;">
+          Bevin is your personal assistant — talk to it, and it keeps up with
+          the conversation. A few quick things before we start:
+        </p>
+        <form id="onboardForm" style="display:flex; flex-direction:column; gap:.55rem; margin-top:.7rem;">
+          <div>
+            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Your name <span>(optional)</span></div>
+            <input id="obName" placeholder="how should Bevin call you?" maxlength="64" autocomplete="off">
+          </div>
+          <div>
+            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Default model <span>(for new conversations)</span></div>
+            <select id="obModel"></select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Email for notifications <span>(optional)</span></div>
+            <input id="obEmail" type="email" placeholder="you@example.com" autocomplete="off">
+          </div>
+          <span id="obErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
+          <div style="display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.2rem;">
+            <button class="btn btn-primary" type="submit">Start chatting</button>
+            <button class="btn btn-ghost" id="obSkip" type="button" title="Finish with the defaults">Skip for now</button>
+          </div>
+        </form>
+      </div>
+
       <div id="chatCard" style="display:none;">
         <div style="display:flex; gap:.5rem; margin:.4rem 0 .2rem; flex-wrap:wrap; align-items:center;">
           <button class="btn btn-ghost" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
@@ -289,6 +317,7 @@
 
     function showLogin() {
       $("loginCard").style.display = "";
+      $("onboardCard").style.display = "none";
       $("chatCard").style.display = "none";
       $("logoutBtn").style.display = "none";
       $("userChip").textContent = "signed out";
@@ -297,12 +326,95 @@
 
     function showChat() {
       $("loginCard").style.display = "none";
+      $("onboardCard").style.display = "none";
       $("chatCard").style.display = "";
       $("logoutBtn").style.display = "";
       $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
       loadModels();
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       if (me && me.role === "admin") $("adminSetupLink").style.display = "";
+    }
+
+    // First-time onboarding ("Meet Bevin"): a regular user who has not
+    // completed it sees a one-screen card instead of the chat; one click
+    // seeds their "Meet Bevin" conversation (with a welcome message) and
+    // opens it. Admins never get here (they have no user UI).
+    async function maybeOnboard() {
+      if (!me || me.role !== "user") { showChat(); return; }
+      try {
+        var r = await fetch("/api/onboarding");
+        if (r.ok) {
+          var j = await r.json();
+          if (j.complete) { showChat(); return; }
+          showOnboard(j);
+          return;
+        }
+      } catch (e) { /* fall through to chat */ }
+      showChat();
+    }
+
+    function showOnboard(state) {
+      $("loginCard").style.display = "none";
+      $("onboardCard").style.display = "";
+      $("chatCard").style.display = "none";
+      $("logoutBtn").style.display = "";
+      $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
+      $("obErr").textContent = "";
+      $("obName").value = (state && state.display_name) || (me && me.display_name) || "";
+      // Model select: the enabled main models, pre-selected to the server
+      // default (an empty select means "server default" too).
+      fetch("/api/models").then(function (r) { return r.json(); }).then(function (j) {
+        var sel = $("obModel");
+        sel.innerHTML = "";
+        (j.models || []).forEach(function (m) {
+          var o = document.createElement("option");
+          o.value = m.id;
+          o.textContent = m.display_name || m.id;
+          sel.appendChild(o);
+        });
+        if (j.default) sel.value = j.default;
+      }).catch(function () { /* select stays empty = server default */ });
+      scrollChat();
+      setTimeout(function () { $("obName").focus(); }, 350);
+    }
+
+    function finishOnboard(skip) {
+      $("obErr").textContent = "";
+      var payload = {
+        display_name: skip ? "" : $("obName").value.trim(),
+        model_id: $("obModel").value,
+        email: skip ? "" : $("obEmail").value.trim()
+      };
+      fetch("/api/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (r) {
+        var je = {};
+        return r.json().then(function (x) { je = x; return { ok: r.ok, j: x }; }).catch(function () { return { ok: r.ok, j: je }; });
+      }).then(function (res) {
+        if (!res.ok) throw (res.j && res.j.error) || "could not finish setup";
+        var j = res.j;
+        convID = j.conversation_id || null;
+        try {
+          if (convID) localStorage.setItem("bevin-conv", convID);
+          else localStorage.removeItem("bevin-conv");
+        } catch (e) {}
+        if (j.display_name) me.display_name = j.display_name;
+        $("chatLog").innerHTML = "";
+        showChat();
+        // Render the seeded welcome message as the first bubble (no
+        // message re-fetch endpoint yet — the server sends it back).
+        if (j.welcome) {
+          var asst = startAssistantMsg();
+          asst.bubble.textContent = j.welcome;
+          $("chatLog").scrollTop = $("chatLog").scrollHeight;
+        }
+        scrollChat();
+        setTimeout(function () { $("message").focus(); }, 350);
+      }).catch(function (err) {
+        $("obErr").textContent = err.message || err || "could not finish setup — try again";
+      });
     }
 
     // Boot: health line + session check (decides login vs chat).
@@ -324,7 +436,7 @@
     (async function boot() {
       try {
         var r = await fetch("/api/me");
-        if (r.ok) { me = await r.json(); showChat(); return; }
+        if (r.ok) { me = await r.json(); maybeOnboard(); return; }
       } catch (e) { /* fall through to login */ }
       showLogin();
     })();
@@ -347,8 +459,14 @@
       // dashboard (GET / does the same redirect for an existing admin
       // session).
       if (me.role === "admin") { location.href = "/admin"; return; }
-      showChat();
+      maybeOnboard();
     });
+
+    $("onboardForm").addEventListener("submit", function (e) {
+      e.preventDefault();
+      finishOnboard(false);
+    });
+    $("obSkip").addEventListener("click", function () { finishOnboard(true); });
 
     $("logoutBtn").addEventListener("click", async function () {
       try { await fetch("/logout", { method: "POST" }); } catch (e) {}

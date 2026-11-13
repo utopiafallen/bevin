@@ -543,19 +543,31 @@ func validateModels(models []config.Model) error {
 	}
 	seen := map[string]bool{}
 	enabled := 0
-	for i, m := range models {
+	for i := range models {
+		m := &models[i]
 		if _, err := provider.New(strings.ToLower(m.Provider), m.BaseURL, m.APIKey); err != nil {
 			return fmt.Errorf("models[%d]: %v", i, err)
 		}
 		if strings.TrimSpace(m.BaseURL) == "" || strings.TrimSpace(m.ModelID) == "" {
 			return fmt.Errorf("models[%d]: base_url and model_id are required", i)
 		}
-		if m.ID != "" {
-			if seen[m.ID] {
-				return fmt.Errorf("duplicate model id %q", m.ID)
+		// The internal ID is what everything references (slot pools,
+		// conversation active model, per-user defaults) — derive it when the
+		// form left it empty (same derivation as config.Validate, so the id
+		// is stable across save + reload).
+		if m.ID == "" {
+			base := config.ModelIDSlug(m.ModelID)
+			id, n := base, 2
+			for seen[id] {
+				id = fmt.Sprintf("%s-%d", base, n)
+				n++
 			}
-			seen[m.ID] = true
+			m.ID = id
 		}
+		if seen[m.ID] {
+			return fmt.Errorf("duplicate model id %q", m.ID)
+		}
+		seen[m.ID] = true
 		if m.Slots < 1 {
 			m.Slots = 1
 		}

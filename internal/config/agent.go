@@ -13,6 +13,12 @@ import (
 // added here as the agent matures.
 type AgentConfig struct {
 	DefaultModelID string `toml:"default_model_id"`
+
+	// OnboardingComplete marks the first-time "Meet Bevin" flow as done
+	// (OnboardingAt records when). Regular users only — the admin has no user
+	// UI.
+	OnboardingComplete bool   `toml:"onboarding_complete"`
+	OnboardingAt       string `toml:"onboarding_at,omitempty"`
 }
 
 // DefaultAgent returns valid zero-value preferences.

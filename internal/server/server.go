@@ -53,14 +53,14 @@ func (r *Router) Swap(h http.Handler) {
 
 // App is the normal-mode HTTP app.
 type App struct {
-	cfg  *config.ServerConfig
-	prov auth.Provider
-	ag   *agent.Agent
-	mux  *http.ServeMux
-	ttl  time.Duration
+	cfg     *config.ServerConfig
+	prov    auth.Provider
+	ag      *agent.Agent
+	mux     *http.ServeMux
+	ttl     time.Duration
 	dataDir string
-	edit *setup.Manager
-	srv  *store.ServerStore
+	edit    *setup.Manager
+	srv     *store.ServerStore
 	// mail is the SMTP sender (nil when email is not configured; notify is a
 	// no-op in that case).
 	mail *email.Sender
@@ -131,6 +131,9 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
+	// First-time onboarding (regular users only — the admin has no user UI).
+	mux.HandleFunc("GET /api/onboarding", a.chatGate(a.onboardingStatus))
+	mux.HandleFunc("POST /api/onboarding", a.chatGate(a.onboardingComplete))
 	// External-IdP (OAuth) login: public routes (they run BEFORE a bevin
 	// session exists) — the status probe for the login page + the
 	// authorization-code flow (login redirect + provider callback).

@@ -368,8 +368,8 @@ func TestAdminConfigEndpoints(t *testing.T) {
 		t.Fatalf("config read code = %d body=%s", w.Code, w.Body.String())
 	}
 	var got struct {
-		Models []config.Model  `json:"models"`
-		Email  map[string]any  `json:"email"`
+		Models []config.Model `json:"models"`
+		Email  map[string]any `json:"email"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
