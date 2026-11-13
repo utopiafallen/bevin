@@ -226,7 +226,7 @@ input:focus, textarea:focus, select:focus {
 [data-theme="dark"] .theme-toggle .ico-moon { display: block; }
 
 /* ---- layout helpers ---- */
-.wrap { max-width: 46rem; margin: 0 auto; padding: 2.2rem 1.2rem 4rem; }
+.wrap { max-width: 57.5rem; margin: 0 auto; padding: 2.2rem 1.2rem 4rem; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 1.1rem 0; }
 .muted { color: var(--text-muted); }
 .eyebrow { font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.72rem; color: var(--brand-strong); }
