@@ -74,6 +74,64 @@ func TestSave0600(t *testing.T) {
 	}
 }
 
+// TestNormalizeBaseURL — bare LAN hosts become canonical absolute URLs
+// (http defaulted, /v1 appended when no path); explicit scheme/path preserved.
+func TestNormalizeBaseURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"localhost.lan:1235", "http://localhost.lan:1235/v1"},
+		{"127.0.0.1:8080/", "http://127.0.0.1:8080/v1"},
+		{"https://api.openai.com/v1", "https://api.openai.com/v1"},
+		{"https://api.openai.com/v1/", "https://api.openai.com/v1"},
+		{"https://api.openai.com", "https://api.openai.com/v1"},
+		{"http://llama:8080/v1", "http://llama:8080/v1"},
+		{"  http://host:1/v1  ", "http://host:1/v1"},
+		{"http://host:1/custom", "http://host:1/custom"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeBaseURL(c.in); got != c.want {
+			t.Errorf("NormalizeBaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestValidateBaseURLSelfHeal — a config saved by an older build with a bare
+// schemeless base (the "unsupported protocol scheme" bug) repairs itself on
+// load, and an undialable base fails validation instead of the first request.
+func TestValidateBaseURLSelfHeal(t *testing.T) {
+	c := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{{Provider: "llama", BaseURL: "localhost.lan:1235", ModelID: "ornith"}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("self-heal: %v", err)
+	}
+	if got := c.Models[0].BaseURL; got != "http://localhost.lan:1235/v1" {
+		t.Fatalf("canonical base = %q, want http://localhost.lan:1235/v1", got)
+	}
+	// Aux bases are healed the same way.
+	a := &ServerConfig{
+		Auth: Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{{Provider: "llama", BaseURL: "http://h:1/v1", ModelID: "m"}},
+		Aux:    []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "127.0.0.1:8081", ModelID: "v"}},
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatalf("aux self-heal: %v", err)
+	}
+	if got := a.Aux[0].BaseURL; got != "http://127.0.0.1:8081/v1" {
+		t.Fatalf("aux canonical base = %q", got)
+	}
+	for _, bad := range []string{"ftp://host/v1", "not a url", "http://"} {
+		b := &ServerConfig{
+			Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+			Models: []Model{{Provider: "openai", BaseURL: bad, ModelID: "m"}},
+		}
+		if err := b.Validate(); err == nil {
+			t.Errorf("malformed base %q accepted", bad)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	c := &ServerConfig{Models: []Model{{Provider: "openai", BaseURL: "u", ModelID: "m"}}, Auth: Auth{SessionSecret: "x"}}
 	if err := c.Validate(); err != nil {

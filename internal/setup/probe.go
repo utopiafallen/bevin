@@ -17,11 +17,14 @@ import (
 var probeClient = &http.Client{Timeout: 15 * time.Second}
 
 // ProbeResult is the outcome of probing an endpoint: the detected provider
-// kind + the models it serves (with context lengths where the API exposes
-// them).
+// kind, the models it serves (with context lengths where the API exposes
+// them), and the RESOLVED base URL — the exact variant that succeeded (the
+// scheme + /v1 as tried). Callers should adopt it so the saved config is the
+// URL that actually works.
 type ProbeResult struct {
 	Provider string               `json:"provider"`
 	Models   []provider.ModelInfo `json:"models"`
+	BaseURL  string               `json:"base_url"`
 }
 
 // ProbeEndpoint is the exported probe (shared by the setup wizard and the
@@ -60,19 +63,24 @@ func probeEndpoint(ctx context.Context, baseURL, apiKey string) (*ProbeResult, e
 		bases = []string{"https://" + base, "http://" + base}
 	}
 	// candidate /models URLs: each base, with /v1 added only if the base does
-	// not already end in /v1.
+	// not already end in /v1. Each candidate remembers the BASE it came from
+	// (the URL with the /models suffix stripped) so the probe can report the
+	// exact base that worked.
 	seen := map[string]bool{}
-	var cands []string
+	type cand struct {
+		base, url string
+	}
+	var cands []cand
 	for _, b := range bases {
-		add := func(u string) {
+		add := func(u, base string) {
 			if !seen[u] {
 				seen[u] = true
-				cands = append(cands, u)
+				cands = append(cands, cand{base: base, url: u})
 			}
 		}
-		add(b + "/models")
+		add(b+"/models", b)
 		if !strings.HasSuffix(b, "/v1") {
-			add(b + "/v1/models")
+			add(b+"/v1/models", b+"/v1")
 		}
 	}
 	// Try the candidate /models URLs IN PARALLEL: a dead or slow variant (e.g.
@@ -84,9 +92,9 @@ func probeEndpoint(ctx context.Context, baseURL, apiKey string) (*ProbeResult, e
 		err error
 	}
 	outCh := make(chan probeOut, len(cands))
-	for _, u := range cands {
-		go func(u string) {
-			b, err := fetchProbe(ctx, u, apiKey)
+	for _, c := range cands {
+		go func(c cand) {
+			b, err := fetchProbe(ctx, c.url, apiKey)
 			if err != nil {
 				outCh <- probeOut{nil, err}
 				return
@@ -96,8 +104,8 @@ func probeEndpoint(ctx context.Context, baseURL, apiKey string) (*ProbeResult, e
 				outCh <- probeOut{nil, cerr}
 				return
 			}
-			outCh <- probeOut{&ProbeResult{Provider: kind, Models: models}, nil}
-		}(u)
+			outCh <- probeOut{&ProbeResult{Provider: kind, Models: models, BaseURL: c.base}, nil}
+		}(c)
 	}
 	var lastErr error
 	for range cands {

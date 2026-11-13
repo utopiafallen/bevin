@@ -121,7 +121,7 @@ async function detectModel(){ const m=S.modelDraft; if(m._detecting) return; if(
   // A new detect clears any prior detect error immediately (re-render now, not
   // after the probe resolves), and disables the Detect button for the duration.
   m._detecting=true; S.formError=null; msg("Detecting "+m.base_url+"…",""); render();
-  try{ const r=await probeDraft(m); applyModelFields(m, r.models); const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); }
+  try{ const r=await probeDraft(m); if(r.base_url){ m.base_url=r.base_url; } applyModelFields(m, r.models); const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); }
   catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
   finally{ m._detecting=false; render(); }
 }
@@ -142,9 +142,9 @@ function applyAuxFields(m, models, i){ const pick=(models.find(mm=>modalitiesFro
 // perception model + its modality. Mirrors detectModel.
 async function detectAux(i){ const m=S.aux[i]; if(m._detecting) return; if(!m.base_url){ S.auxError=S.auxError||{}; S.auxError[i]="Enter the API base URL first."; render(); return; }
   // A new detect clears this card's prior detect error immediately (re-render
-  // now) and disables its Detect button for the duration.
+  // now) and disables the Detect button for the duration.
   m._detecting=true; if(S.auxError) S.auxError[i]=null; msg("Detecting "+m.base_url+"…",""); render();
-  try{ const r=await probeDraft(m); applyAuxFields(m, r.models, i); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); }
+  try{ const r=await probeDraft(m); if(r.base_url){ m.base_url=r.base_url; } applyAuxFields(m, r.models, i); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); }
   catch(e){ S.auxError=S.auxError||{}; S.auxError[i]="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
   finally{ m._detecting=false; render(); }
 }

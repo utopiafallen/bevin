@@ -403,6 +403,13 @@ func (c *ServerConfig) Validate() error {
 		if c.Models[i].DisplayName == "" {
 			c.Models[i].DisplayName = c.Models[i].ModelID
 		}
+		// Canonicalize the base URL (also repairs pre-existing files with a
+		// schemeless "host:port" — such a value made the provider client
+		// fail at request time with "unsupported protocol scheme").
+		c.Models[i].BaseURL = NormalizeBaseURL(c.Models[i].BaseURL)
+	}
+	for i := range c.Aux {
+		c.Aux[i].BaseURL = NormalizeBaseURL(c.Aux[i].BaseURL)
 	}
 	// Required.
 	if len(c.Models) == 0 {
@@ -412,9 +419,62 @@ func (c *ServerConfig) Validate() error {
 		if m.Provider == "" || m.BaseURL == "" || m.ModelID == "" {
 			return fmt.Errorf("server.toml: models[%d] (%q) needs provider, base_url and model_id", i, m.ID)
 		}
+		if err := CheckBaseURL(fmt.Sprintf("models[%d]", i), m.BaseURL); err != nil {
+			return err
+		}
+	}
+	for i, m := range c.Aux {
+		if m.BaseURL != "" {
+			if err := CheckBaseURL(fmt.Sprintf("aux[%d]", i), m.BaseURL); err != nil {
+				return err
+			}
+		}
 	}
 	if c.Auth.SessionSecret == "" {
 		return errors.New("server.toml: auth.session_secret is required")
+	}
+	return nil
+}
+
+// NormalizeBaseURL brings a model's API base URL to the canonical form the
+// provider clients require: an absolute http(s) URL, trailing slashes
+// trimmed, and the /v1 path present. A missing scheme defaults to http (the
+// common case for a local llama.cpp / Ollama on a LAN; an https endpoint
+// should be written with its scheme); a missing path gets /v1 appended
+// (OpenAI-compatible endpoints live under /v1); an existing path — /v1
+// already typed or a custom prefix — is preserved as-is. Applied at every
+// save path (validateModels, CommitEdit) and at load (Validate), so a
+// schemeless "host:port" can never reach the provider client.
+func NormalizeBaseURL(s string) string {
+	u := strings.TrimSpace(s)
+	if u == "" {
+		return ""
+	}
+	// A schemeless value (a bare "host:port" — what users actually type for a
+	// local model) gets the http default. Values that DO carry a scheme
+	// (http, https, or something else like ftp) pass through untouched here;
+	// checkBaseURL is the one that rejects the non-http(s) schemes.
+	if !strings.Contains(u, "://") {
+		u = "http://" + u
+	}
+	u = strings.TrimRight(u, "/")
+	pu, err := url.Parse(u)
+	if err != nil || pu.Scheme == "" || pu.Host == "" {
+		return u // malformed — left as-is for Validate to reject
+	}
+	if pu.Path == "" || pu.Path == "/" {
+		u += "/v1"
+	}
+	return u
+}
+
+// CheckBaseURL rejects a model base URL that is not an absolute http(s) URL
+// — the check that turns a garbage value into a loud config error instead of
+// a request-time "unsupported protocol scheme" failure.
+func CheckBaseURL(where, base string) error {
+	u, err := url.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("server.toml: %s base_url %q must be an absolute http(s) URL, e.g. http://host:port/v1", where, base)
 	}
 	return nil
 }

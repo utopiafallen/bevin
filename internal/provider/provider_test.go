@@ -27,6 +27,23 @@ func mustDecodeBody(t *testing.T, r *http.Request) map[string]any {
 	return b
 }
 
+// TestFactoryRejectsSchemelessBase — a base URL without an http(s) scheme
+// must be rejected at construction (it used to slip through url.Parse and
+// only fail at request time with "unsupported protocol scheme").
+func TestFactoryRejectsSchemelessBase(t *testing.T) {
+	for _, base := range []string{"localhost.lan:1235", "127.0.0.1:8080", "not a url"} {
+		if _, err := New("openai", base, "k"); err == nil {
+			t.Errorf("New(openai, %q) accepted, want error", base)
+		}
+	}
+	if _, err := New("openai", "http://h:1/v1", "k"); err != nil {
+		t.Fatalf("valid base rejected: %v", err)
+	}
+	if _, err := New("nope", "http://h:1/v1", "k"); err == nil {
+		t.Fatal("unknown kind accepted")
+	}
+}
+
 func TestOpenAIChatRequestFormat(t *testing.T) {
 	var body map[string]any
 	var auth string

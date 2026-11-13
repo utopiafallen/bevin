@@ -651,3 +651,69 @@ func TestSetServer(t *testing.T) {
 		t.Fatalf("a rejected base clobbered the stored one: %q", got)
 	}
 }
+
+// TestProbeReportsResolvedBase — probing a bare schemeless host returns the
+// RESOLVED base (the variant that actually answered), so the form can adopt
+// it and the saved config carries a dialable URL instead of "host:port".
+func TestProbeReportsResolvedBase(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":"ornith","object":"model"}]}`))
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	bare := strings.TrimPrefix(ts.URL, "http://")
+	res, err := ProbeEndpoint(context.Background(), bare, "k")
+	if err != nil {
+		t.Fatalf("probe %q: %v", bare, err)
+	}
+	if res.BaseURL != ts.URL+"/v1" {
+		t.Fatalf("resolved base = %q, want %s", res.BaseURL, ts.URL+"/v1")
+	}
+	if len(res.Models) != 1 || res.Models[0].ID != "ornith" {
+		t.Fatalf("models = %+v", res.Models)
+	}
+	// An already-canonical base comes back unchanged.
+	res2, err := ProbeEndpoint(context.Background(), ts.URL+"/v1", "k")
+	if err != nil {
+		t.Fatalf("probe canonical: %v", err)
+	}
+	if res2.BaseURL != ts.URL+"/v1" {
+		t.Fatalf("resolved base = %q, want %s", res2.BaseURL, ts.URL+"/v1")
+	}
+}
+
+// TestValidateModelsCanonicalizes — every save path funnels through
+// validateModels; a bare base must come out canonical there.
+func TestValidateModelsCanonicalizes(t *testing.T) {
+	ms := []config.Model{{Provider: "llama", BaseURL: "localhost.lan:1235", ModelID: "ornith", Enabled: true}}
+	if err := validateModels(ms); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := ms[0].BaseURL; got != "http://localhost.lan:1235/v1" {
+		t.Fatalf("canonical base = %q", got)
+	}
+	bad := []config.Model{{Provider: "llama", BaseURL: "ftp://x", ModelID: "m", Enabled: true}}
+	if err := validateModels(bad); err == nil {
+		t.Fatal("ftp base accepted")
+	}
+}
+
+// TestSetAuxCanonicalizes — aux bases get the same step-level treatment.
+func TestSetAuxCanonicalizes(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	if err := m.SetAux([]config.AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "127.0.0.1:8081", ModelID: "v"}}); err != nil {
+		t.Fatalf("set aux: %v", err)
+	}
+	if got := m.Answers().Aux[0].BaseURL; got != "http://127.0.0.1:8081/v1" {
+		t.Fatalf("aux base = %q", got)
+	}
+	if err := m.SetAux([]config.AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "ftp://x", ModelID: "v"}}); err == nil {
+		t.Fatal("ftp aux base accepted")
+	}
+	// A rejected aux does not clobber the stored one.
+	if got := m.Answers().Aux[0].BaseURL; got != "http://127.0.0.1:8081/v1" {
+		t.Fatalf("a rejected aux clobbered the stored one: %q", got)
+	}
+}

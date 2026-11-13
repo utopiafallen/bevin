@@ -283,7 +283,9 @@ func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
+	// base_url is the RESOLVED variant (scheme + /v1 as tried) — the form
+	// adopts it so the saved config is the URL that actually answered.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models, "base_url": res.BaseURL})
 }
 
 // TestEmail sends a test email. When smtp carries a host, it sends through

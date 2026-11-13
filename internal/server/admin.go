@@ -240,7 +240,9 @@ func (a *App) adminProbeModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
+	// base_url is the RESOLVED variant (scheme + /v1 as tried) — the form
+	// adopts it so the saved config is the URL that actually answered.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models, "base_url": res.BaseURL})
 }
 
 // adminModelsPage / adminEmailPage are the gated entry points to the admin

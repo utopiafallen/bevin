@@ -291,8 +291,18 @@ func (m *Manager) SetModels(models []config.Model) error {
 	return nil
 }
 
-// SetAux stores the aux perception models step.
+// SetAux stores the aux perception models step. Base URLs are canonicalized
+// the same way as main models (the aux models dial the same provider
+// clients) and must be absolute http(s) URLs when present.
 func (m *Manager) SetAux(aux []config.AuxModel) error {
+	for i := range aux {
+		if strings.TrimSpace(aux[i].BaseURL) != "" {
+			aux[i].BaseURL = config.NormalizeBaseURL(aux[i].BaseURL)
+			if err := config.CheckBaseURL(fmt.Sprintf("aux[%d]", i), aux[i].BaseURL); err != nil {
+				return err
+			}
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.Answers.Aux = aux
@@ -584,6 +594,15 @@ func validateModels(models []config.Model) error {
 	enabled := 0
 	for i := range models {
 		m := &models[i]
+		// Canonicalize the base URL before anything else (the probe already
+		// offers the resolved value; this is the server-side guarantee):
+		// schemeless "host:port" -> http://host:port/v1, trailing slashes
+		// trimmed, /v1 added when the path is empty. The saved config is
+		// always the canonical URL the provider clients can dial.
+		m.BaseURL = config.NormalizeBaseURL(m.BaseURL)
+		if err := config.CheckBaseURL(fmt.Sprintf("models[%d]", i), m.BaseURL); err != nil {
+			return err
+		}
 		if _, err := provider.New(strings.ToLower(m.Provider), m.BaseURL, m.APIKey); err != nil {
 			return fmt.Errorf("models[%d]: %v", i, err)
 		}
