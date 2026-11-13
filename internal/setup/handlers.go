@@ -529,18 +529,42 @@ func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
 // those settings (the wizard's email step tests the draft before it is
 // saved); otherwise it sends through the SAVED config (the admin dashboard
 // tests the live config).
+//
+// The contract: a request with an SMTP host ALWAYS dials. The wizard's
+// payload does not carry the draft's Enabled flag (its test section is only
+// shown when the draft is enabled), so Enabled is forced here — relying on
+// email.New's nil-for-unconfigured behavior would otherwise turn the test
+// into a silent no-op that reports success without ever connecting.
 func (m *Manager) TestEmail(ctx context.Context, smtp config.Email, to string) error {
-	if smtp.SMTPHost == "" {
+	if strings.TrimSpace(smtp.SMTPHost) == "" {
 		cfg, err := config.Load(m.dataDir)
 		if err != nil {
 			return fmt.Errorf("email is not configured yet — fill in the SMTP settings first")
 		}
 		smtp = cfg.Email
 	}
-	if smtp.SMTPHost == "" {
+	if strings.TrimSpace(smtp.SMTPHost) == "" {
 		return fmt.Errorf("no SMTP host configured")
 	}
+	// Same defaults the saved config gets at save time (Validate): port 587,
+	// from = username, from name "bevin".
+	smtp.Enabled = true
+	if smtp.SMTPPort <= 0 {
+		smtp.SMTPPort = 587
+	}
+	if smtp.FromAddress == "" {
+		smtp.FromAddress = smtp.Username
+	}
+	if smtp.FromName == "" {
+		smtp.FromName = "bevin"
+	}
+	if smtp.FromAddress == "" {
+		return fmt.Errorf("a from address (or username) is required to send email")
+	}
 	s := email.New(smtp)
+	if s == nil {
+		return fmt.Errorf("no SMTP host configured")
+	}
 	return s.Send(ctx, to, "bevin — test email",
 		"This is a test email from your bevin server.\n\nIf you can read it, your SMTP settings work.\n\n— bevin")
 }

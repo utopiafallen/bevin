@@ -7,10 +7,13 @@ package email
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/smtp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +25,10 @@ import (
 // sites can hold a nil Sender and call Send unconditionally.
 type Sender struct {
 	cfg config.Email
+	// tlsOverride carries test-only TLS settings for the STARTTLS upgrade
+	// (a root pool trusting the test server's self-signed certificate);
+	// production Send leaves it nil.
+	tlsOverride *tls.Config
 }
 
 // New builds a Sender from the email config, or nil when email is not
@@ -37,9 +44,16 @@ func New(cfg config.Email) *Sender {
 func (s *Sender) Configured() bool { return s != nil }
 
 // Send sends a plain-text email to a single recipient. It is a no-op (nil)
-// when the Sender is nil. The context is honored before the send (a cancelled
-// context is returned immediately); the SMTP dial itself has no context — a
-// hung server is bounded by the TCP/OS timeout.
+// when the Sender is nil. The context bounds the dial; the rest of the
+// session runs to completion (an SMTP server that stops answering mid-session
+// is not recoverable anyway).
+//
+// The session is driven manually (not net/smtp's SendMail, which has two
+// shortcomings: it never upgrades to STARTTLS and its dial ignores the
+// context). STARTTLS: bevin always upgrades when the server offers it (so
+// even a plain relay's traffic is encrypted in transit, matching the wizard
+// help text), and it is an ERROR when the config requires it and the server
+// does not offer it.
 func (s *Sender) Send(ctx context.Context, to, subject, body string) error {
 	if s == nil {
 		return nil
@@ -51,14 +65,61 @@ func (s *Sender) Send(ctx context.Context, to, subject, body string) error {
 	if to == "" {
 		return fmt.Errorf("email: no recipient")
 	}
-	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
-	var auth smtp.Auth
+	host := s.cfg.SMTPHost
+	addr := net.JoinHostPort(host, strconv.Itoa(s.cfg.SMTPPort))
+	d := net.Dialer{Timeout: 15 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("email: dial %s: %w", addr, err)
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("email: smtp handshake with %s: %w", addr, err)
+	}
+	defer client.Close()
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		tlsCfg := &tls.Config{ServerName: host}
+		if s.tlsOverride != nil { // test-only: trust the fake server's self-signed cert
+			tlsCfg.RootCAs = s.tlsOverride.RootCAs
+			tlsCfg.InsecureSkipVerify = s.tlsOverride.InsecureSkipVerify
+		}
+		if err := client.StartTLS(tlsCfg); err != nil {
+			return fmt.Errorf("email: STARTTLS with %s: %w", host, err)
+		}
+	} else if s.cfg.UseStartTLS {
+		return fmt.Errorf("email: STARTTLS is enabled but the server %s does not offer it", host)
+	}
 	if s.cfg.Username != "" {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("email: a username is set but the server %s does not offer AUTH", host)
+		}
 		// The server name for PlainAuth is the host we're connecting to (it
 		// is not used for initial-responders unless the server requires it).
-		auth = smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.SMTPHost)
+		if err := client.Auth(smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, host)); err != nil {
+			return fmt.Errorf("email: auth with %s: %w", host, err)
+		}
 	}
-	return smtp.SendMail(addr, auth, s.cfg.FromAddress, []string{to}, buildMessage(s.cfg, to, subject, body))
+	if err := client.Mail(s.cfg.FromAddress); err != nil {
+		return fmt.Errorf("email: MAIL FROM: %w", err)
+	}
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("email: RCPT TO: %w", err)
+	}
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("email: DATA: %w", err)
+	}
+	if _, err := w.Write(buildMessage(s.cfg, to, subject, body)); err != nil {
+		return fmt.Errorf("email: writing message: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("email: end of DATA: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("email: QUIT: %w", err)
+	}
+	return nil
 }
 
 // buildMessage assembles a minimal RFC 5322 plain-text message (UTF-8). The

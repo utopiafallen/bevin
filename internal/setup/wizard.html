@@ -542,7 +542,7 @@ function renderEmail(){
     const to = testTo.value.trim();
     if(!to){ testMsg.textContent = "Enter the address to send the test to."; testMsg.className = "testmsg err"; return; }
     testBtn.setAttribute("disabled",""); testBtn.style.opacity = ".6"; testMsg.textContent = "Sending…"; testMsg.className = "testmsg";
-    const smtp = { smtp_host: e.smtp_host, smtp_port: parseInt(e.smtp_port, 10) || 0, username: e.username, password: e.password, from_address: e.from_address, from_name: e.from_name, use_starttls: e.use_starttls };
+    const smtp = { enabled: e.enabled, smtp_host: e.smtp_host, smtp_port: parseInt(e.smtp_port, 10) || 0, username: e.username, password: e.password, from_address: e.from_address, from_name: e.from_name, use_starttls: e.use_starttls };
     try{
       await api("POST", "/setup/test-email", { to, smtp });
       testMsg.textContent = "Test email sent to " + to + " — check your inbox."; testMsg.className = "testmsg ok";

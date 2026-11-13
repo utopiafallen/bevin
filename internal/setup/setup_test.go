@@ -1,15 +1,18 @@
 package setup
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,6 +345,95 @@ func TestDeriveEmbedder(t *testing.T) {
 	}
 	if got := deriveEmbedder("http://127.0.0.1:8081/v1"); got.BaseURL != "http://127.0.0.1:8081/v1" {
 		t.Fatalf("endpoint with /v1 should not double-suffix: %+v", got)
+	}
+}
+
+// startInlineSMTP is a throwaway single-connection SMTP sink that accepts
+// anything well-formed (used by the TestEmail regression tests).
+func startInlineSMTP(t *testing.T) (string, *atomic.Bool) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	delivered := &atomic.Bool{}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r := bufio.NewReader(conn)
+		fmt.Fprintln(conn, "220 fake")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			cmd := strings.TrimSpace(strings.ToUpper(line))
+			switch {
+			case strings.HasPrefix(cmd, "AUTH"):
+				fmt.Fprintln(conn, "235 Authentication successful")
+			case strings.HasPrefix(cmd, "MAIL FROM:") && strings.Contains(line, "bevin@example.com"):
+				delivered.Store(true)
+				fmt.Fprintln(conn, "250 OK")
+			case cmd == "QUIT":
+				fmt.Fprintln(conn, "221 bye")
+				return
+			case strings.HasPrefix(cmd, "DATA"):
+				fmt.Fprintln(conn, "354 OK")
+			dataLoop:
+				for {
+					mline, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if mline == ".\r\n" || mline == ".\n" {
+						break dataLoop
+					}
+				}
+				fmt.Fprintln(conn, "250 OK")
+			default: // EHLO, RCPT TO, ...
+				if strings.HasPrefix(cmd, "EHLO") || strings.HasPrefix(cmd, "HELO") {
+					fmt.Fprint(conn, "250-fake\n250-AUTH PLAIN\n250 OK\n")
+					continue
+				}
+				fmt.Fprintln(conn, "250 OK")
+			}
+		}
+	}()
+	return ln.Addr().String(), delivered
+}
+
+// TestTestEmailDraftDials — regression for the wizard's test-email button
+// reporting a fake success: the wizard's payload carries no "enabled" flag
+// (the test section is only shown when the draft is enabled), so the backend
+// must NOT let email.New return a nil sender and no-op into a 200 "ok". A
+// draft with a host must actually dial the SMTP server and deliver.
+func TestTestEmailDraftDials(t *testing.T) {
+	m, _, _ := newTestSetup(t) // setup mode: no server.toml saved yet
+	addr, delivered := startInlineSMTP(t)
+	host, portStr, _ := net.SplitHostPort(addr)
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// Draft WITHOUT the enabled flag — the wizard's exact payload shape.
+	err := m.TestEmail(context.Background(), config.Email{
+		SMTPHost: host, SMTPPort: port,
+		Username: "bevin@example.com", FromName: "Bevin",
+	}, "user@example.com")
+	if err != nil {
+		t.Fatalf("draft test-email without enabled flag: %v (the fake-success bug: it must dial, not no-op)", err)
+	}
+	if !delivered.Load() {
+		t.Fatal("the SMTP server never saw the message (no connection was attempted)")
+	}
+
+	// No host at all (setup mode, nothing saved) → an explicit error, not a
+	// silent no-op.
+	if err := m.TestEmail(context.Background(), config.Email{}, "user@example.com"); err == nil {
+		t.Fatal("empty draft with no saved config must error, not silently succeed")
 	}
 }
 
