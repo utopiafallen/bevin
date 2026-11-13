@@ -437,6 +437,46 @@ func TestTestEmailDraftDials(t *testing.T) {
 	}
 }
 
+// TestSetEmailPlaceholderDefaults — a blank email field uses its placeholder
+// value as the default (the wizard's hints: port "587", from name "bevin",
+// from address "blank = the username"); an explicit value is preserved and an
+// out-of-range port is still rejected.
+func TestSetEmailPlaceholderDefaults(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	// Blank port + from fields, only the host + username filled in.
+	if err := m.SetEmail(config.Email{Enabled: true, SMTPHost: "smtp.example.com", Username: "me@example.com"}); err != nil {
+		t.Fatalf("blank port/from fields should use placeholder defaults, got: %v", err)
+	}
+	e := m.Answers().Email
+	if e.SMTPPort != 587 {
+		t.Fatalf("blank port should default to 587 (the placeholder), got %d", e.SMTPPort)
+	}
+	if e.FromName != "bevin" {
+		t.Fatalf("blank from name should default to the placeholder %q, got %q", "bevin", e.FromName)
+	}
+	if e.FromAddress != "me@example.com" {
+		t.Fatalf("blank from address should default to the username, got %q", e.FromAddress)
+	}
+	// An explicit port is preserved (not overwritten by the default).
+	if err := m.SetEmail(config.Email{Enabled: true, SMTPHost: "h", SMTPPort: 25, Username: "u", FromAddress: "u@x"}); err != nil {
+		t.Fatalf("explicit port 25 should be accepted: %v", err)
+	}
+	if m.Answers().Email.SMTPPort != 25 {
+		t.Fatal("an explicit port must be preserved (no defaulting over it)")
+	}
+	// Out-of-range is still rejected; host is still required when enabled.
+	if err := m.SetEmail(config.Email{Enabled: true, SMTPHost: "h", SMTPPort: 99999}); err == nil {
+		t.Fatal("port > 65535 must still be rejected")
+	}
+	if err := m.SetEmail(config.Email{Enabled: true}); err == nil {
+		t.Fatal("an enabled email without a host must still be rejected")
+	}
+	// Disabled: nothing is validated or defaulted (a blank email is valid).
+	if err := m.SetEmail(config.Email{Enabled: false, SMTPHost: "", SMTPPort: 0}); err != nil {
+		t.Fatalf("a disabled/blank email must be accepted: %v", err)
+	}
+}
+
 func TestSetupHandler(t *testing.T) {
 	m, _, _ := newTestSetup(t)
 	transitioned := false

@@ -268,7 +268,8 @@ func (m *Manager) SetSidecars(sc config.Sidecars) error {
 // SetEmail stores the (optional) email-notifier step. Email is optional: when
 // it is not enabled (or has no host) the config is left blank (no sender).
 func (m *Manager) SetEmail(e config.Email) error {
-	if err := validateEmail(e); err != nil {
+	e, err := validateEmail(e)
+	if err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -370,20 +371,34 @@ func validateAdmin(a AdminAnswers) error {
 	return nil
 }
 
-// validateEmail checks the (optional) email-notifier step. When email is not
-// enabled it is a no-op (a blank email is valid). When enabled, a host is
-// required (the sender is built from it).
-func validateEmail(e config.Email) error {
+// validateEmail checks the (optional) email-notifier step and applies the
+// field PLACEHOLDERS as defaults for blank values (the wizard shows them as
+// hints; leaving a field blank uses the hint value): port -> 587 (standard
+// SMTP submission), from name -> "bevin", from address -> the username. When
+// email is not enabled it is a no-op (a blank email is valid); when enabled,
+// a host is required (the sender is built from it).
+func validateEmail(e config.Email) (config.Email, error) {
 	if !e.Enabled {
-		return nil
+		return e, nil
 	}
 	if strings.TrimSpace(e.SMTPHost) == "" {
-		return errors.New("email: an SMTP host is required when email is enabled")
+		return e, errors.New("email: an SMTP host is required when email is enabled")
 	}
-	if e.SMTPPort < 1 || e.SMTPPort > 65535 {
-		return errors.New("email: SMTP port must be 1-65535")
+	if e.SMTPPort <= 0 {
+		e.SMTPPort = 587 // placeholder default (standard SMTP submission port)
+	} else if e.SMTPPort > 65535 {
+		return e, errors.New("email: SMTP port must be 1-65535")
 	}
-	return nil
+	if e.FromName == "" {
+		e.FromName = "bevin" // placeholder default
+	}
+	if e.FromAddress == "" {
+		e.FromAddress = e.Username // placeholder: the username
+	}
+	if e.FromAddress == "" {
+		return e, errors.New("email: a from address (or username) is required when email is enabled")
+	}
+	return e, nil
 }
 
 func validateModels(models []config.Model) error {

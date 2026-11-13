@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"fmt"
 	"math/big"
 	"net"
@@ -262,12 +263,30 @@ func TestBuildMessage(t *testing.T) {
 }
 
 // TestBuildMessageNonASCIISubject verifies a non-ASCII subject is RFC 2047
-// encoded.
+// encoded in the FULL encoded-word form (=?UTF-8?B?data?=) and that it
+// round-trips: the client must be able to decode it back to the original
+// subject (a missing leading/trailing "=" makes clients show the raw
+// "?UTF-8?B?..." string).
 func TestBuildMessageNonASCIISubject(t *testing.T) {
 	cfg := config.Email{FromAddress: "bevin@example.com"}
 	msg := string(buildMessage(cfg, "user@example.com", "héllo", "body"))
-	if !strings.Contains(msg, "Subject: ?UTF-8?B?") {
-		t.Fatalf("non-ASCII subject not encoded:\n%s", msg)
+	const prefix = "Subject: =?UTF-8?B?"
+	i := strings.Index(msg, prefix)
+	if i < 0 {
+		t.Fatalf("subject not encoded as an RFC 2047 encoded-word (=%s...=?)\n%s", "UTF-8?B?", msg)
+	}
+	rest := msg[i+len(prefix):]
+	j := strings.Index(rest, "=?")
+	if j < 0 {
+		t.Fatalf("encoded-word not terminated with =?:\n%s", msg)
+	}
+	b64 := rest[:j]
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("encoded subject is not valid base64: %v (%q)", err, b64)
+	}
+	if string(raw) != "héllo" {
+		t.Fatalf("encoded subject decodes to %q, want %q", string(raw), "héllo")
 	}
 }
 

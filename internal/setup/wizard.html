@@ -719,10 +719,17 @@ async function doNext(){
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
-  // The email step: smtp_port is a string in the draft (from the input); the
-  // server's config expects an int, so normalize it (empty -> 0 -> the server
-  // defaults it to 587).
-  const emailPayload = Object.assign({}, S.email, { smtp_port: parseInt(S.email.smtp_port, 10) || 0 });
+  // The email step: a blank field uses its PLACEHOLDER default (port 587,
+  // from name "bevin", from address = the username) — the server applies the
+  // same defaults in validateEmail (source of truth). Normalize in place so
+  // the review step shows the effective values (the admin step does the same
+  // with its placeholder fallbacks).
+  if (S.email.enabled) {
+    S.email.smtp_port = String(parseInt(S.email.smtp_port, 10) || 587);
+    if (!S.email.from_name) S.email.from_name = "bevin";
+    if (!S.email.from_address && S.email.username) S.email.from_address = S.email.username;
+  }
+  const emailPayload = Object.assign({}, S.email);
   // Aux models: strip the per-draft working state (_models / _lastBase /
   // _detecting) so only the saved config crosses the wire.
   const auxPayload = (S.aux||[]).map(m => { const c = JSON.parse(JSON.stringify(m)); for(const k of Object.keys(c)) if(k.startsWith("_")) delete c[k]; return c; });

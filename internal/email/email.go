@@ -145,12 +145,16 @@ func buildMessage(cfg config.Email, to, subject, body string) []byte {
 }
 
 // encodeHeader RFC 2047-encodes a header value when it contains non-ASCII
-// bytes (plain ASCII is passed through unchanged).
+// bytes (plain ASCII is passed through unchanged). The encoded-word form is
+// =?charset?encoding?data?= — the leading and trailing "=[" are part of the
+// syntax; without them a mail client shows the raw "?UTF-8?B?..." string
+// instead of decoding it. (A single encoded-word needs no trailing
+// whitespace; if a header ever carries several, separate them by a space.)
 func encodeHeader(s string) string {
 	if isASCII(s) {
 		return s
 	}
-	return "?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(s)) + "?"
+	return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(s)) + "=?"
 }
 
 func isASCII(s string) bool {
