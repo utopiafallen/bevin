@@ -279,6 +279,76 @@ func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
 	}
 }
 
+// TestCommitEdit — the admin config pages save a subset of the config areas
+// (models / aux / email) on the existing server.toml WITHOUT re-running
+// sidecar provisioning: the session secret, sidecar endpoints, and the
+// derived embedder are preserved as-is, and the un-saved areas are untouched.
+func TestCommitEdit(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	validAnswers(m)
+	cfg, err := m.Finalize(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Save ONLY models: a fresh catalog (slots clamp applied, a second model
+	// added). Email + sidecars + secret must survive unchanged.
+	newModels := []config.Model{
+		{ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 0, Enabled: true}, // slots 0 -> clamped to 1
+		{ID: "m2", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o-mini", DisplayName: "GPT-4o mini", MaxContext: 128000, Slots: 2, Enabled: true},
+	}
+	got, err := m.CommitEdit(&newModels, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(got.Models))
+	}
+	if got.Models[0].Slots != 1 {
+		t.Fatalf("slots 0 should clamp to 1, got %d", got.Models[0].Slots)
+	}
+	if got.Email != cfg.Email {
+		t.Fatalf("email should be preserved on a models-only save: %+v vs %+v", got.Email, cfg.Email)
+	}
+	if got.Sidecars != cfg.Sidecars {
+		t.Fatalf("sidecars should be preserved on a models-only save")
+	}
+	if got.Auth.SessionSecret != cfg.Auth.SessionSecret {
+		t.Fatal("session secret should be preserved (not regenerated)")
+	}
+	if got.Embedder != cfg.Embedder {
+		t.Fatalf("embedder should be preserved on a models-only save: %+v vs %+v", got.Embedder, cfg.Embedder)
+	}
+	// The change landed on disk (reloading the config sees it).
+	reloaded, err := config.Load(m.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Models) != 2 || reloaded.Models[1].ID != "m2" {
+		t.Fatalf("models-only save should persist to disk, got %+v", reloaded.Models)
+	}
+	// A save with NO areas is not a valid save (the caller rejects it), but an
+	// all-nil CommitEdit is a no-op write of the current config.
+	same, err := m.CommitEdit(nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(same.Models) != 2 {
+		t.Fatalf("all-nil CommitEdit should leave the models alone, got %d", len(same.Models))
+	}
+	// An invalid model catalog is rejected and does NOT clobber the saved one.
+	bad := []config.Model{{ID: "mX", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "x", Enabled: false}} // none enabled
+	if _, err := m.CommitEdit(&bad, nil, nil); err == nil {
+		t.Fatal("expected error for a model catalog with no enabled model")
+	}
+	after, err := config.Load(m.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Models) != 2 {
+		t.Fatalf("a rejected save must not clobber the saved models, got %d", len(after.Models))
+	}
+}
+
 // TestProvisionEditSkipsUnconfigured — in normal mode (a config already
 // exists) the provisioning run keeps only the CONFIGURED sidecars alive; a
 // config that records no sidecars gets none installed (setup mode, by

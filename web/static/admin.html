@@ -215,10 +215,10 @@ function renderModels() {
   });
   c.append(t);
   c.append(elP(""));
-  const note = elP("Change a model's slots, enable/disable models, or add providers in the config editor — the running agent picks the changes up immediately (no restart).");
+  const note = elP("Change a model's slots, enable/disable models, or add providers in the models editor — the running agent picks the changes up immediately (no restart).");
   c.append(note);
   const btn = document.createElement("a");
-  btn.className = "btn"; btn.href = "/admin/setup"; btn.textContent = "Open config editor";
+  btn.className = "btn"; btn.href = "/admin/models"; btn.textContent = "Open the models editor";
   c.append(document.createElement("br"));
   c.append(btn);
   m.append(c);
@@ -288,7 +288,7 @@ function renderEmail() {
   c2.append(row, msg);
   if (!MAIL.configured) {
     const off = elP("");
-    off.innerHTML = "Email is not configured yet — open the <a href='/admin/setup'>config editor</a> to set it up.";
+    off.innerHTML = "Email is not configured yet — open the <a href='/admin/email'>email editor</a> to set it up.";
     c2.append(off);
   }
   m.append(c2);

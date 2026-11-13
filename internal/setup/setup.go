@@ -206,6 +206,44 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 	return cfg, nil
 }
 
+// CommitEdit saves a subset of the config areas the admin config pages edit —
+// a non-nil argument replaces that area, a nil one is left unchanged — on the
+// existing server.toml and returns the saved config. Unlike FinalizeEdit it
+// does NOT run sidecar provisioning: in normal mode the sidecars are
+// server-managed and already running, so their recorded endpoints + the
+// derived embedder are preserved as-is and a model/email edit is a fast,
+// side-effect-free write. The caller hot-reloads the running agent with the
+// returned config (there is no in-memory wizard state involved).
+func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email) (*config.ServerConfig, error) {
+	cfg, err := config.Load(m.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if models != nil {
+		if err := validateModels(*models); err != nil {
+			return nil, err
+		}
+		cfg.Models = *models
+	}
+	if aux != nil {
+		cfg.Aux = *aux
+	}
+	if email != nil {
+		e, err := validateEmail(*email)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Email = e
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if err := config.Save(m.dataDir, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // SetAdmin stores + validates the identity step.
 func (m *Manager) SetAdmin(a AdminAnswers) error {
 	if err := validateAdmin(a); err != nil {

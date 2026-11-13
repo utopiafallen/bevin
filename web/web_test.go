@@ -8,9 +8,14 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 	want := []string{
 		"index.html",
 		"brand.css",
+		"config-forms.css",
+		"config-forms.js",
 		"logo-mark.svg",
 		"favicon.svg",
 		"fonts/nunito-variable.woff2",
+		"admin.html",
+		"admin-models.html",
+		"admin-email.html",
 	}
 	for _, p := range want {
 		f, err := FS.Open("static/" + p)

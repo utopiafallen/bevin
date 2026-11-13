@@ -61,251 +61,6 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/finalize", h.finalize)
 }
 
-// adminGate is a pluggable auth check for the normal-mode edit routes. It
-// returns the authenticated user's role (empty on failure); the caller
-// requires "admin".
-type adminGate func(r *http.Request) (role string, ok bool)
-
-// EditHandler serves the setup wizard in normal mode (to edit the live config).
-// It is gated on an admin session (via the gate function) rather than the
-// one-time setup token, and finalizes via FinalizeEdit (no re-seed, no
-// secret regeneration).
-type EditHandler struct {
-	mgr  *Manager
-	gate adminGate
-}
-
-// NewEditHandler builds the normal-mode edit handler. gate authenticates the
-// request and returns the user's role.
-func NewEditHandler(mgr *Manager, gate adminGate) *EditHandler {
-	return &EditHandler{mgr: mgr, gate: gate}
-}
-
-func (h *EditHandler) admin(w http.ResponseWriter, r *http.Request) bool {
-	role, ok := h.gate(r)
-	if !ok || role != "admin" {
-		http.Error(w, "admin required", http.StatusForbidden)
-		return false
-	}
-	return true
-}
-
-// Routes registers the normal-mode edit routes on mux. The methods are explicit
-// (GET for the page + state, POST for the mutations) rather than any-method, so
-// they don't conflict with the "GET /" static-asset catch-all the normal-mode
-// app registers — Go's ServeMux rejects an any-method route that a method+subtree
-// route would shadow.
-func (h *EditHandler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /admin/setup", h.page)
-	mux.HandleFunc("GET /admin/setup/state", h.state)
-	mux.HandleFunc("POST /admin/setup/advance", h.advance)
-	mux.HandleFunc("POST /admin/setup/back", h.back)
-	mux.HandleFunc("POST /admin/setup/cancel", h.cancel)
-	mux.HandleFunc("POST /admin/setup/test-model", h.testModel)
-	mux.HandleFunc("POST /admin/setup/probe-model", h.probeModel)
-	mux.HandleFunc("POST /admin/setup/test-email", h.testEmail)
-	mux.HandleFunc("POST /admin/setup/sidecars/start", h.sidecarsStart)
-	mux.HandleFunc("GET /admin/setup/sidecars/status", h.sidecarsStatus)
-	mux.HandleFunc("POST /admin/setup/finalize", h.finalize)
-}
-
-func (h *EditHandler) page(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if err := h.mgr.LoadFromConfig(); err != nil {
-		http.Error(w, "failed to load config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = wizardTmpl.Execute(w, map[string]any{"DataDir": h.mgr.dataDir, "Server": map[string]any{"bind": h.mgr.bind, "port": h.mgr.port, "dataDir": h.mgr.dataDir}, "Steps": stepOrder, "Edit": true})
-}
-
-func (h *EditHandler) state(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := h.mgr.LoadFromConfig(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"setup":   true,
-		"answers": h.mgr.Answers(),
-		"steps":   stepOrder,
-		"data_dir": h.mgr.dataDir,
-		"edit":    true,
-	})
-}
-
-func (h *EditHandler) advance(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var p advancePayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var err error
-	switch p.Step {
-	case "server", "admin", "review":
-		// review-only / pre-filled in edit mode
-	case "models":
-		err = h.mgr.SetModels(p.Models)
-	case "aux":
-		err = h.mgr.SetAux(p.Aux)
-	case "sidecars":
-		// display-only; the server auto-provisions the sidecars (no user state)
-	case "email":
-		err = h.mgr.SetEmail(p.Email)
-	default:
-		err = fmt.Errorf("unknown step %q", p.Step)
-	}
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (h *EditHandler) back(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var p struct {
-		Step string `json:"step"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&p)
-	h.mgr.StepBack(p.Step)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (h *EditHandler) cancel(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	h.mgr.Cancel()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (h *EditHandler) testModel(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	var m config.Model
-	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	p, err := provider.New(strings.ToLower(m.Provider), m.BaseURL, m.APIKey)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	models, err := p.Models(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model_count": len(models), "models": models})
-}
-
-func (h *EditHandler) probeModel(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var p struct {
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	res, err := probeEndpoint(r.Context(), p.BaseURL, p.APIKey)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models})
-}
-
-func (h *EditHandler) finalize(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	cfg, err := h.mgr.FinalizeEdit(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	// Hot-reload the running agent with the freshly saved config so the edit
-	// applies without a restart (the first-run finalize has no hook: the
-	// in-process transition builds a brand-new app).
-	reloaded := false
-	if hook := h.mgr.onFinalize; hook != nil {
-		if herr := hook(cfg); herr != nil {
-			log.Printf("bevin: edit finalize: agent reload: %v", herr)
-		} else {
-			reloaded = true
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reloaded": reloaded, "data_dir": cfg.DataDir})
-}
-
-// sidecarsStart (edit mode) starts the provisioning run (idempotent — in edit
-// mode it probes the already-running sidecars, fast) + returns the current
-// status. Gated on an admin session.
-func (h *EditHandler) sidecarsStart(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	h.mgr.StartProvision()
-	writeSidecarsStatus(w, h.mgr)
-}
-
-// sidecarsStatus (edit mode) returns the current per-sidecar provisioning
-// status. Gated on an admin session.
-func (h *EditHandler) sidecarsStatus(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeSidecarsStatus(w, h.mgr)
-}
-
 // gate checks the one-time setup token (query param, echoed into a cookie on
 // first load).
 func (h *Handler) gate(w http.ResponseWriter, r *http.Request) bool {
@@ -348,7 +103,7 @@ type sidecarView struct {
 }
 
 // writeSidecarsStatus serializes the current provisioning state (the per-sidecar
-// progress + the recorded endpoints). Shared by the setup + edit handlers.
+// progress + the recorded endpoints).
 func writeSidecarsStatus(w http.ResponseWriter, mgr *Manager) {
 	done, running, statuses, endpoints := mgr.ProvisionStatus()
 	views := make([]sidecarView, 0, len(statuses))
@@ -570,7 +325,8 @@ func (m *Manager) TestEmail(ctx context.Context, smtp config.Email, to string) e
 }
 
 // handleTestEmail is the shared body of the /setup/test-email (wizard) and
-// /admin/setup/test-email (edit mode) endpoints; the callers do the gating.
+// /admin/api/email/test (admin email editor) endpoints; the callers do the
+// gating.
 func handleTestEmail(w http.ResponseWriter, r *http.Request, m *Manager) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -600,12 +356,6 @@ func (h *Handler) testEmail(w http.ResponseWriter, r *http.Request) {
 	handleTestEmail(w, r, h.mgr)
 }
 
-func (h *EditHandler) testEmail(w http.ResponseWriter, r *http.Request) {
-	if !h.admin(w, r) {
-		return
-	}
-	handleTestEmail(w, r, h.mgr)
-}
 
 // sidecarsStart (setup mode) starts the sidecar provisioning run (idempotent)
 // + returns the current status. The wizard calls this when the admin lands on

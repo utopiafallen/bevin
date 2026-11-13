@@ -24,6 +24,12 @@ type ProbeResult struct {
 	Models   []provider.ModelInfo `json:"models"`
 }
 
+// ProbeEndpoint is the exported probe (shared by the setup wizard and the
+// admin config pages): detect the provider kind + list the endpoint's models.
+func ProbeEndpoint(ctx context.Context, baseURL, apiKey string) (*ProbeResult, error) {
+	return probeEndpoint(ctx, baseURL, apiKey)
+}
+
 // ctxFieldKeys are the keys we recognize as a context-window length, wherever
 // they appear in a model's JSON subtree. The search is forgiving about the
 // data shape — n_ctx can sit at the top level, in a "meta" block, or elsewhere.

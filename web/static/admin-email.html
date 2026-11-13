@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bevin — email</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/brand.css">
+<link rel="stylesheet" href="/config-forms.css">
+<script>
+  (function(){try{var t=localStorage.getItem("bevin-theme");
+    if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+    document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light");}})();
+</script>
+<script src="/config-forms.js"></script>
+<style>
+  /* page chrome (the form component styles live in config-forms.css) */
+  body { max-width: 920px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
+  .page-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; margin: .3rem 0 0; }
+  .card { margin-top: 1rem; }
+  .backlink { color: var(--brand-strong); font-weight: 700; text-decoration: none; }
+  .backlink:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
+  <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+  <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+</button>
+<div>
+  <a class="brand" href="/admin"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
+  <div class="page-title">Email</div>
+</div>
+<p class="small"><a class="backlink" href="/admin">&larr; Back to the dashboard</a> &middot; bevin can email users and the admin (a task finished, something needs attention, &hellip;). When on, it sends through your SMTP server.</p>
+
+<div class="card">
+  <div id="main"></div>
+</div>
+<div class="btns" style="margin-top:.9rem; justify-content:flex-end">
+  <button id="save" class="primary">Save email settings</button>
+</div>
+<div class="msg" id="msg"></div>
+
+<script>
+// Page state: the same shape the shared email form component expects
+// (config-forms.js). _hasPassword is page working state (underscore-prefixed,
+// never sent).
+const PROBE_URL = "/admin/api/probe-model"; // unused here; the shared code references it
+const EMAIL_TEST_URL = "/admin/api/email/test";
+let S = { email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true, _hasPassword:false} };
+
+async function api(method, path, body){ const url = path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
+function msg(text, cls){ const m=document.getElementById("msg"); m.textContent=text||""; m.className="msg"+(cls?" "+cls:""); }
+
+function render(){
+  const main=document.getElementById("main");
+  main.innerHTML="";
+  main.append(renderEmailForm());
+  // The stored password is never returned, so when one is set the field stays
+  // blank with a "leave blank to keep" hint.
+  const pw=document.getElementById("em_pw");
+  if(pw && S.email._hasPassword) pw.placeholder="saved — leave blank to keep";
+}
+
+// save — persist the email config. A blank password keeps the stored one
+// (server-side); a typed password replaces it.
+async function saveEmail(){
+  try{
+    const e = Object.assign({}, S.email);
+    delete e._hasPassword;
+    const r = await api("POST", "/admin/api/config", {email: e});
+    if(e.password){ // now stored — clear the field, show the keep-hint
+      S.email.password = "";
+      S.email._hasPassword = true;
+      render();
+    }
+    msg(r.reloaded ? "Saved — the email settings apply immediately." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
+  }catch(err){
+    msg("Save failed: " + err.message, "err");
+  }
+}
+document.getElementById("save").onclick = saveEmail;
+
+document.getElementById("themeToggle").addEventListener("click", function(){
+  var root=document.documentElement;
+  var next = root.getAttribute("data-theme")==="dark" ? "light" : "dark";
+  root.setAttribute("data-theme",next);
+  try{localStorage.setItem("bevin-theme",next);}catch(e){}
+});
+
+// Load the current config, then render.
+(async function(){
+  try{
+    const d = await api("GET", "/admin/api/config");
+    const e = d.email || {};
+    S.email = {
+      enabled: !!e.enabled,
+      smtp_host: e.smtp_host || "",
+      smtp_port: e.smtp_port || "",
+      username: e.username || "",
+      password: "",
+      from_address: e.from_address || "",
+      from_name: e.from_name || "",
+      use_starttls: e.use_starttls !== false,
+      _hasPassword: !!e.has_password,
+    };
+  }catch(err){ msg("Could not load the config: " + err.message, "err"); }
+  render();
+})();
+</script>
+</body>
+</html>

@@ -6,12 +6,16 @@
 <title>bevin — setup</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/brand.css">
+<link rel="stylesheet" href="/config-forms.css">
 <script>
   (function(){try{var t=localStorage.getItem("bevin-theme");
     if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
     document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light");}})();
 </script>
+<script src="/config-forms.js"></script>
 <style>
+  /* page chrome for the first-time setup wizard (the shared form
+  styles live in config-forms.css, loaded above) */
   /* wizard layout, on top of brand.css (Nunito + warm tokens) */
   body { max-width: 920px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
   .setup-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; margin: .3rem 0 0; }
@@ -21,20 +25,6 @@
   .step.active { background:var(--brand); color:var(--brand-contrast); border-color:transparent; }
   .card { margin-top: 1rem; }
   .model { border:1px dashed var(--border); border-radius:var(--radius); padding:.6rem .85rem; margin-top:.8rem; background:var(--surface-2); }
-  .row { display:flex; gap:.6rem; } .row > div { flex:1; }
-  .btns { display:flex; gap:.5rem; margin-top:1.2rem; flex-wrap:wrap; }
-  .btns button { font:inherit; font-weight:700; cursor:pointer; padding:.55rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); transition:background .15s; }
-  .btns button:hover { background:var(--surface-2); }
-  .btns button.primary { background:var(--brand); color:var(--brand-contrast); border-color:transparent; box-shadow:var(--shadow-sm); }
-  .btns button.primary:hover { background:var(--brand-hover); }
-  .btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
-  .msg { margin-top:.8rem; font-size:.85rem; font-weight:600; }
-  .msg.err { color:var(--danger); } .msg.ok { color:var(--ok); }
-  .testmsg { font-size:.82rem; margin-top:.4rem; min-height:1.1em; }
-  .testmsg.err { color:var(--danger); } .testmsg.ok { color:var(--ok); }
-  .small { font-size:.82rem; color:var(--text-muted); }
-  .hidden { display:none; }
-  .kv { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-2); padding:.1em .4em; border-radius:6px; }
   pre.kv { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:.8rem; overflow:auto; margin:0; }
   /* sidecars step (display-only) — per-sidecar progress + a confirmation banner */
   .sidecar-list { margin-top:.9rem; display:flex; flex-direction:column; gap:.55rem; }
@@ -57,16 +47,6 @@
   .sidecar-banner.ok { color:var(--ok); border-color:var(--ok); }
   .sidecar-banner.err { color:var(--danger); border-color:var(--danger); }
   .sidecar-retry { font:inherit; font-weight:700; margin-left:.5rem; padding:.2rem .6rem; border:1px solid var(--danger); border-radius:var(--radius); background:transparent; color:var(--danger); cursor:pointer; }
-  .pw-wrap { display:flex; gap:.4rem; align-items:center; }
-  .pw-wrap input { flex:1; }
-  .pw-toggle { font:inherit; font-size:.78rem; font-weight:700; white-space:nowrap; padding:.3rem .6rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text-muted); cursor:pointer; }
-  .pw-toggle:hover { background:var(--surface-2); }
-  /* score sliders — a progress bar whose fill goes red (1) → yellow (5) → green (10) */
-  .score-field { margin-top:.55rem; }
-  .score-field > label { display:block; font-size:.82rem; font-weight:600; margin-bottom:.25rem; }
-  .score-row { display:flex; align-items:center; gap:.55rem; }
-  .score-row .score { flex:1; }
-  .score-val { font-family:var(--font-mono); font-size:.78rem; font-weight:700; min-width:1.6em; text-align:center; color:var(--text-muted); }
   /* slider — the fill's right edge must land on the thumb center. Two non-obvious
      resets, both of which used to break alignment in real browsers:
      (1) padding:0 — the global `input` rule sets padding:0.6rem 0.85rem, so the
@@ -78,51 +58,8 @@
      With padding:0 + no border, the thumb (18px, box-sizing:border-box) travels the
      full clientWidth, so the JS-computed fill position (see scoreFill) lands on the
      thumb center at every value + width. */
-  input.score { -webkit-appearance:none; appearance:none; padding:0; width:100%; height:10px; border-radius:6px; border:none; box-shadow: inset 0 0 0 1px var(--border); outline:none; cursor:pointer; --thumb:18px; --pos:calc(var(--val,0) * (100% - var(--thumb)) + var(--thumb)/2); background:linear-gradient(to right, var(--score-color, var(--surface)) var(--pos), var(--surface) var(--pos)); }
-  input.score::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
-  input.score::-moz-range-thumb { box-sizing:border-box; width:18px; height:18px; border-radius:50%; background:var(--surface); border:2px solid var(--text-muted); cursor:pointer; }
-  input.score:disabled { opacity:.5; cursor:not-allowed; }
-  /* Enable for users — a Yes/No segmented button that fills the field width */
-  .yesno { display:flex; width:100%; border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
-  .yesno button { flex:1; font:inherit; font-weight:700; padding:.5rem; border:none; background:var(--surface); color:var(--text-muted); cursor:pointer; transition:background .15s; }
-  .yesno button + button { border-left:1px solid var(--border); }
-  .yesno button.sel { background:var(--brand); color:var(--brand-contrast); }
-  .yesno button:not(.sel):hover { background:var(--surface-2); }
-  .yesno button:disabled { opacity:.5; cursor:not-allowed; }
-  /* add/edit model form — split into two labelled halves */
-  .config-half { border:1px solid var(--border); border-radius:var(--radius); padding:.8rem 1rem; margin-top:.8rem; background:var(--surface); }
-  .config-half > h4 { margin:0 0 .7rem; font-size:.8rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
-  .form-btns { display:flex; justify-content:center; gap:.6rem; margin-top:.85rem; }
-  .form-btns button { font:inherit; font-weight:700; cursor:pointer; padding:.5rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); }
-  .form-btns button.primary { background:var(--brand); color:var(--brand-contrast); border-color:transparent; box-shadow:var(--shadow-sm); }
-  .form-btns button.ghost { background:transparent; border-color:transparent; color:var(--text-muted); }
-  .form-err { margin-top:.55rem; font-size:.82rem; font-weight:600; color:var(--danger); }
-  .field-help { font-size:.78rem; color:var(--text-muted); margin:.15rem 0 .1rem; }
-  .scores-header { margin:.9rem 0 .1rem; font-size:.78rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
-  input.ctx-disabled { opacity:.65; cursor:not-allowed; }
-  /* model list table */
-  .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
-  .model-table th, .model-table td { text-align:left; padding:.36rem .45rem; border-bottom:1px solid var(--border); }
-  .model-table th { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
-  .model-table .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
-  .model-table .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
-  .model-table .reorder button:disabled { opacity:.35; cursor:default; }
-  .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
-  .model-table .row-btn:hover { background:var(--surface-2); }
-  .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
-  .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px; }
-  .model-table .baseurl { max-width:160px; }
-  .model-table .badge-unavail { display:inline-block; font-size:.7rem; font-weight:700; color:var(--danger); background:color-mix(in srgb, var(--danger) 14%, transparent); padding:.08rem .42rem; border-radius:999px; }
-  .form-notice { font-size:.82rem; color:var(--text); background:color-mix(in srgb, var(--warn) 14%, transparent); border:1px solid var(--warn); padding:.5rem .7rem; border-radius:var(--radius); margin:.6rem 0; }
-  /* aux step — each aux model is a stacked pair of config-halves (provider + perception) */
-  .aux-block { margin-top: 0.6rem; }
-  .aux-block + .aux-block { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 0.5rem; }
-  .aux-block .config-half { margin-top: 0.6rem; }
-  /* aux perception — modality checkboxes (one or more) */
-  .modality-checks { display:flex; gap:1rem; flex-wrap:wrap; margin-top:.2rem; }
-  .modality-check { display:inline-flex; align-items:center; gap:.4rem; font-size:.85rem; cursor:pointer; user-select:none; }
-  .modality-check input { margin:0; accent-color: var(--brand); }
 </style>
+
 </head>
 <body>
 <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
@@ -151,17 +88,13 @@
 <script>
 const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
-const IS_EDIT = {{if .Edit}}true{{else}}false{{end}};
-// In edit mode the routes are namespaced under /admin and the admin-identity
-// step is skipped (the admin already exists), so start on the models step.
-let idx = IS_EDIT ? Math.max(0, STEPS.indexOf("models")) : 0;
+let idx = 0;
+// Endpoint constants for the shared form components (config-forms.js): the
+// model Detect probe + the draft test-email send. The admin config pages
+// define the same names pointing at their own /admin/api/* endpoints.
+const PROBE_URL = "/setup/probe-model";
+const EMAIL_TEST_URL = "/setup/test-email";
 let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
-
-function el(tag, attrs, ...kids){ const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs||{})){ if(k==="class")e.className=v; else if(k==="text")e.textContent=v; else e.setAttribute(k,v);} for(const c of kids){ if(c==null) continue; e.append(c.nodeType?c:document.createTextNode(c)); } return e; }
-function msg(t, cls){ const m=document.getElementById("msg"); m.textContent=t||""; m.className="msg"+(cls?" "+cls:""); }
-function field(label, input){ return el("div",{},el("label",{},label),input); }
-function inp(id, val, ph){ const i=el("input",{id, value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); return i; }
-function pwfield(label, id, val, ph){ const i=el("input",{id, type:"password", value:val||"", placeholder:ph||""}); i.addEventListener("input",()=>sync(id,i.value)); const b=el("button",{type:"button", class:"pw-toggle"}, "Show"); b.onclick=function(){ const show=i.type==="password"; i.type=show?"text":"password"; b.textContent=show?"Hide":"Show"; b.setAttribute("aria-pressed", show?"true":"false"); }; const wrap=el("div",{class:"pw-wrap"},i,b); return el("div",{},el("label",{},label),wrap); }
 
 // ---- per-step renderers ----
 function renderServer(){ return el("div",{},
@@ -187,213 +120,10 @@ function renderModels(){
   d.append(renderModelList());
   return d;
 }
-function renderModelForm(){
-  const m=S.modelDraft, editing=S.editingIndex!==-1;
-  const f=el("div",{});
-  // half A: provider configuration (shared with the aux step)
-  f.append(renderProviderHalf("mf", m, {
-    knownBases: allKnownBases(),
-    detect: () => detectModel(),
-    clearBtn: { label: editing ? "Cancel" : "Clear", fn: cancelEdit },
-    getError: () => S.formError,
-    clearError: () => { S.formError = null; }
-  }));
-  // half B: in-agent UI configuration (what users see)
-  const halfB=el("div",{class:"config-half"}, el("h4",{}, "In-agent UI (what users see)"));
-  // Model (the provider's model id)
-  const sel=el("select",{id:"mf_sel"});
-  const allModels=m._models||[];
-  const available=allModels.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); // hide models already added for this provider
-  if(!allModels.length){ sel.append(el("option",{value:""},"— press Detect —")); }
-  else if(!available.length){ sel.append(el("option",{value:"", disabled:true, selected:true}, "all "+allModels.length+" model(s) from this provider are already added")); }
-  else { available.forEach(mm=>{ const o=el("option",{value:mm.ID}, mm.ID+(mm.MaxContext?"  ("+mm.MaxContext+" tokens)":"")); if(m.model_id===mm.ID) o.selected=true; sel.append(o); }); }
-  sel.addEventListener("change",()=>{ m.model_id=sel.value; const mm=allModels.find(x=>x.ID===sel.value); if(mm&&mm.MaxContext){ m.max_context=String(mm.MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } S.formError=null; render(); });
-  // Max context
-  const ctx=el("input",{id:"mf_ctx", value:m.max_context||"", class:m.context_auto?"ctx-disabled":null});
-  if(m.context_auto) ctx.setAttribute("disabled","");
-  ctx.addEventListener("input",()=>{ m.max_context=ctx.value; m.context_auto=false; S.formError=null; });
-  // Display name — a combobox (text input + a datalist of the existing display names).
-  // Picking an existing name inherits its R/K/S + enabled state and locks them, so all
-  // models sharing a display name stay consistent.
-  const disp=el("input",{id:"mf_disp", value:m.display_name||"", list:"disp_names", autocomplete:"off"});
-  const dl=el("datalist",{id:"disp_names"});
-  [...new Set(S.models.map(x=>(x.display_name||"").trim()).filter(Boolean))].forEach(n=>{ dl.append(el("option",{value:n})); });
-  // Enable for users — a Yes/No segmented button
-  const locked=(m.lockedTo!==null && m.lockedTo!==undefined);
-  const en=el("div",{class:"yesno"});
-  const yesB=el("button",{type:"button", class:m.enabled?"sel":""}, "Yes");
-  const noB=el("button",{type:"button", class:!m.enabled?"sel":""}, "No");
-  if(locked){ yesB.setAttribute("disabled",""); noB.setAttribute("disabled",""); }
-  yesB.addEventListener("click",()=>{ if(locked)return; m.enabled=true; S.formError=null; render(); });
-  noB.addEventListener("click",()=>{ if(locked)return; m.enabled=false; S.formError=null; render(); });
-  en.append(yesB,noB);
-  // Execution slots — per-model concurrency (scheduling, not a user-visible
-  // knob; the admin dashboard visualizes each model's pool). The min-1 clamp
-  // also lives in the server's config.Validate.
-  const slotsInp = el("input", {id:"mf_slots", type:"number", min:"1", step:"1", value:String(m.slots||1), style:"max-width:6rem"});
-  slotsInp.addEventListener("input", ()=>{ m.slots = slotsInp.value; S.formError=null; });
-  halfB.append(
-    field("Model", sel),
-    // Max context — the help text sits under the label (above the input)
-    el("div",{},
-      el("label",{},"Max context"),
-      el("p",{class:"field-help"},"The model's maximum context window in tokens — required so the agent knows how much history and prompt it can use before truncating or compacting. Auto-filled from the provider when it exposes it; enter it manually otherwise."),
-      ctx),
-    el("div",{class:"row"},
-      field("Display name", el("div",{}, disp, dl)),
-      field("Enable for users", en)),
-    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
-    el("div",{},
-      el("label",{},"Execution slots"),
-      el("p",{class:"field-help"},"How many turns of this model may run at the same time (1 = strictly one at a time). Extra concurrent turns wait their turn in a queue."),
-      slotsInp)
-  );
-  if(m.auto_disabled){ halfB.append(el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.")); }
-  halfB.append(
-    el("h5",{class:"scores-header"},"Scores (1-10)"),
-    el("p",{class:"field-help"},"Help the user gauge a model's strengths when picking one for a conversation — informational only; it does not change how the agent runs."),
-    scoreSlider("Reasoning (1-10)","mf_r", m.metadata.reasoning||5, (v)=>{ m.metadata.reasoning=v; }, locked),
-    scoreSlider("Knowledge (1-10)","mf_k", m.metadata.knowledge||5, (v)=>{ m.metadata.knowledge=v; }, locked),
-    scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }, locked)
-  );
-  f.append(halfB);
-  // the save button
-  f.append(el("div",{class:"btns"}, el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
-  // wire the display-name input (base + key are wired inside renderProviderHalf)
-  disp.addEventListener("input",()=>{ m.display_name=disp.value; });
-  disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });
-  return f;
-}
-function renderModelList(){
-  const w=el("div",{});
-  if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
-  const t=el("table",{class:"model-table"});
-  t.append(el("thead",{}, el("tr",{},
-    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
-  const tb=el("tbody",{});
-  S.models.forEach((m,i)=>{
-    const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
-    const dn=el("button",{title:"Move down", onclick:`reorderModel(${i},1)`}, "\u25bc"); if(i===S.models.length-1) dn.setAttribute("disabled","");
-    tb.append(el("tr",{},
-      el("td",{}, el("div",{class:"reorder"}, up, dn)),
-      el("td",{}, el("span",{class:"kv", title:m.display_name||""}, m.display_name||"(unnamed)")),
-      el("td",{}, m.provider||"—"),
-      el("td",{}, el("span",{class:"kv baseurl", title:m.base_url||""}, m.base_url||"—")),
-      el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
-      el("td",{}, m.max_context?m.max_context:"auto"),
-      el("td",{}, String(m.slots||1)),
-      el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
-      el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
-      el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
-  });
-  t.append(tb);
-  w.append(t);
-  return w;
-}
-// renderProviderHalf — the shared "Provider configuration" block used by BOTH
-// the main-model form and each aux model: a base URL (a combobox over the
-// already-configured providers) + an API key + a Detect button + the detected
-// provider label. `draft` is the object being edited (S.modelDraft or
-// S.aux[i]); opts carries the form-specific callbacks:
-//   knownBases  — base URLs for the datalist (main + aux, deduped)
-//   detect      — the full probe (closure); called by the Detect button, on
-//                 Enter in the Base URL field, and on a committed base-URL
-//                 change for a known provider (always a live probe — detection
-//                 results are never cached, so provider model changes are
-//                 picked up immediately)
-//   clearBtn    — { label, fn } or null (the ghost button beside Detect)
-//   getError    — () => string|null (this half's inline error)
-//   clearError  — () => void
-function renderProviderHalf(prefix, draft, opts){
-  const knownBases = opts.knownBases || [];
-  const detect = opts.detect;
-  const clearBtn = opts.clearBtn || null;
-  const getError = opts.getError || null;
-  const clearError = opts.clearError || null;
-  const half = el("div", {class:"config-half"}, el("h4",{}, "Provider configuration"));
-  const base = inp(prefix+"_base", draft.base_url, "https://api.openai.com");
-  base.setAttribute("list", prefix+"_base_urls");
-  const baseDl = el("datalist", {id:prefix+"_base_urls"});
-  [...new Set(knownBases.filter(Boolean))].forEach(u => baseDl.append(el("option", {value:u})));
-  const key = inp(prefix+"_key", draft.api_key, "blank for a local llama-server");
-  const provLabel = draft.provider ? el("span", {class:"kv"}, draft.provider) : el("span", {class:"small"}, "— press Detect —");
-  const btns = el("div", {class:"form-btns"});
-  if(clearBtn){ const cb = el("button", {class:"ghost"}, clearBtn.label); cb.onclick = clearBtn.fn; btns.append(cb); }
-  // The Detect button is disabled (with a "Detecting…" label) while this draft's
-  // probe is in flight, so the user can't fire overlapping requests if the probe
-  // takes a few seconds.
-  const db = el("button", {class:"primary"}, draft._detecting ? "Detecting…" : "Detect");
-  db.onclick = detect;
-  if(draft._detecting){ db.setAttribute("disabled",""); db.style.opacity = ".6"; db.style.cursor = "default"; }
-  btns.append(db);
-  half.append(
-    el("div", {class:"row"}, field("Base URL", el("div",{}, base, baseDl)), field("API key", key)),
-    btns,
-    field("Provider", provLabel)
-  );
-  if(getError && getError()){ half.append(el("p", {class:"form-err"}, getError())); }
-  // Sync the base URL on every keystroke, but do NOT auto-detect — the probe
-  // must not fire while the user is still typing.
-  base.addEventListener("input", () => { draft.base_url = base.value; if(clearError) clearError(); });
-  // Enter in the Base URL field triggers detection (both main + aux, for
-  // consistency) — the quick way to probe a freshly typed endpoint.
-  base.addEventListener("keydown", (ev) => { if(ev.key === "Enter"){ ev.preventDefault(); detect(); } });
-  // Committing a value (blurring, or a combobox selection) for a KNOWN provider
-  // re-probes it live — never from a cache, so a provider's model list changes
-  // are always picked up. draft._lastBase (per form) avoids re-triggering on
-  // the same value.
-  base.addEventListener("change", () => {
-    draft.base_url = base.value; if(clearError) clearError();
-    const nb = (base.value||"").trim();
-    const prev = draft._lastBase || "";
-    draft._lastBase = base.value;
-    if(nb && isKnownBase(nb) && normBase(nb) !== normBase(prev)) detect();
-  });
-  key.addEventListener("input", () => { draft.api_key = key.value; if(clearError) clearError(); });
-  if(draft._lastBase === undefined) draft._lastBase = draft.base_url; // initial sync (no auto-detect of the current value)
-  return half;
-}
 function renderAux(){
   const d = el("div", {}, el("h3",{}, "4. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip. Add one, enter its base URL, and press Detect: the provider and the model's modalities are detected where the provider exposes them (llama does; most others don't), otherwise set them manually. A single model may perceive one or more modalities."));
-  if(!S.aux.length){ d.append(el("p",{class:"empty-list"},"No aux models yet — add one below.")); }
-  S.aux.forEach((m,i) => d.append(renderAuxCard(i)));
-  d.append(el("div",{class:"btns"},el("button",{onclick:"addAux()"},"+ Add aux model")));
+  d.append(renderAuxSection());
   return d;
-}
-function renderAuxCard(i){
-  const m = S.aux[i];
-  const wrap = el("div", {class:"aux-block"});
-  wrap.append(renderProviderHalf("af"+i, m, {
-    knownBases: allKnownBases(),
-    detect: () => detectAux(i),
-    clearBtn: { label: "Clear", fn: () => { S.aux[i] = freshAux(); render(); } },
-    getError: () => (S.auxError && S.auxError[i]) || null,
-    clearError: () => { if(S.auxError) S.auxError[i] = null; }
-  }));
-  wrap.append(renderAuxPerception(i));
-  wrap.append(el("div",{class:"btns"}, el("button",{class:"ghost", onclick:"removeAux("+i+")"},"Remove this aux model")));
-  return wrap;
-}
-function renderAuxPerception(i){
-  const m = S.aux[i];
-  const ph = el("div", {class:"config-half"}, el("h4",{}, "Perception model"));
-  const sel = el("select", {id:"a_sel_"+i});
-  const allModels = m._models || [];
-  if(!allModels.length){ sel.append(el("option", {value:""}, "— press Detect —")); }
-  else { allModels.forEach(mm => { const mods = modalitiesFromModel(mm); const hint = mods.length ? "  ("+mods.join(", ")+")" : ""; const o = el("option", {value:mm.ID}, mm.ID + hint); if(m.model_id===mm.ID) o.selected=true; sel.append(o); }); }
-  sel.addEventListener("change", () => { m.model_id = sel.value; const mm = allModels.find(x=>x.ID===sel.value); const mods = modalitiesFromModel(mm); if(mods.length) m.kinds = mods; render(); });
-  const modWrap = el("div", {class:"modality-checks"});
-  ["vision","audio","video"].forEach(v => {
-    const cb = el("input", {type:"checkbox", id:"a_mod_"+i+"_"+v});
-    if((m.kinds||[]).includes(v)) cb.checked = true;
-    cb.addEventListener("change", () => { const s=new Set(m.kinds||[]); if(cb.checked) s.add(v); else s.delete(v); m.kinds=[...s]; });
-    modWrap.append(el("label", {class:"modality-check"}, cb, v));
-  });
-  ph.append(
-    field("Model", sel),
-    field("Modalities (input)", modWrap),
-    el("p",{class:"field-help"},"Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."));
-  return ph;
 }
 // ---- sidecars step (display-only) ----
 // The server auto-provisions the sidecars. This step shows per-sidecar progress
@@ -491,79 +221,10 @@ async function pollSidecars(){
 }
 function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
 function renderEmail(){
-  const e = S.email;
   const d = el("div",{});
   d.append(el("h3",{}, "6. Email notifications (optional)"));
-  d.append(el("p",{class:"small"},"bevin can email users and the admin (a task finished, something needs attention, …). Leave it off to skip — you can add it later in Settings. When on, bevin sends through your SMTP server."));
-  // Enable toggle (Yes/No).
-  const en = el("div",{class:"yesno"});
-  const yesB = el("button",{type:"button", class:e.enabled?"sel":""}, "Yes");
-  const noB = el("button",{type:"button", class:!e.enabled?"sel":""}, "No");
-  yesB.addEventListener("click",()=>{ e.enabled=true; render(); });
-  noB.addEventListener("click",()=>{ e.enabled=false; render(); });
-  en.append(yesB,noB);
-  d.append(field("Enable email notifications", en));
-  if(!e.enabled){
-    d.append(el("p",{class:"small"},"Email is off — bevin will not send any email. The rest of this step is skipped."));
-    return d;
-  }
-  // SMTP config (shown when enabled).
-  d.append(el("h4",{style:"margin-top:1rem"},"SMTP server"));
-  const host = inp("em_host", e.smtp_host, "smtp.example.com");
-  host.addEventListener("input",()=>{ e.smtp_host=host.value; });
-  const port = inp("em_port", e.smtp_port, "587");
-  port.type = "number"; port.min = "1"; port.max = "65535";
-  port.addEventListener("input",()=>{ e.smtp_port=port.value; });
-  const user = inp("em_user", e.username, "you@example.com");
-  user.addEventListener("input",()=>{ e.username=user.value; });
-  const passInput = el("input",{id:"em_pw", type:"password", value:e.password||"", placeholder:"SMTP password / app password"});
-  passInput.addEventListener("input",()=>{ e.password=passInput.value; });
-  const passToggle = el("button",{type:"button", class:"pw-toggle"}, "Show");
-  passToggle.onclick=function(){ const show=passInput.type==="password"; passInput.type=show?"text":"password"; passToggle.textContent=show?"Hide":"Show"; };
-  const passWrap = el("div",{class:"pw-wrap"}, passInput, passToggle);
-  const fromAddr = inp("em_from", e.from_address, "blank = the username");
-  fromAddr.addEventListener("input",()=>{ e.from_address=fromAddr.value; });
-  const fromName = inp("em_fromname", e.from_name, "bevin");
-  fromName.addEventListener("input",()=>{ e.from_name=fromName.value; });
-  // Encryption (STARTTLS / Off).
-  const tls = el("div",{class:"yesno"});
-  const tlsYes = el("button",{type:"button", class:e.use_starttls?"sel":""}, "STARTTLS");
-  const tlsNo = el("button",{type:"button", class:!e.use_starttls?"sel":""}, "Off");
-  tlsYes.addEventListener("click",()=>{ e.use_starttls=true; render(); });
-  tlsNo.addEventListener("click",()=>{ e.use_starttls=false; render(); });
-  tls.append(tlsYes,tlsNo);
-  d.append(
-    el("div",{class:"row"}, field("SMTP host", host), field("Port", port)),
-    field("Username", user),
-    el("div",{}, el("label",{}, "Password"), passWrap),
-    el("div",{class:"row"}, field("From address", fromAddr), field("From name", fromName)),
-    field("Encryption", tls),
-    el("p",{class:"field-help"},"Port 587 + STARTTLS is the usual submission setup. A local relay may use 25 without STARTTLS — set Encryption to Off in that case (bevin still upgrades to TLS when the server offers it).")
-  );
-  // Test send — probe the SMTP settings (as typed, before saving) against a
-  // real send. The draft SMTP config goes with the request (the server tests
-  // it transiently; nothing is saved by this).
-  d.append(el("h4",{style:"margin-top:1.2rem"},"Send a test email"));
-  const testRow = el("div",{class:"form-btns"});
-  const testTo = el("input", {id:"em_test_to", placeholder:"you@example.com"});
-  const testBtn = el("button", {class:"primary"}, "Send test email");
-  const testMsg = el("p", {class:"testmsg"});
-  testBtn.onclick = async () => {
-    const to = testTo.value.trim();
-    if(!to){ testMsg.textContent = "Enter the address to send the test to."; testMsg.className = "testmsg err"; return; }
-    testBtn.setAttribute("disabled",""); testBtn.style.opacity = ".6"; testMsg.textContent = "Sending…"; testMsg.className = "testmsg";
-    const smtp = { enabled: e.enabled, smtp_host: e.smtp_host, smtp_port: parseInt(e.smtp_port, 10) || 0, username: e.username, password: e.password, from_address: e.from_address, from_name: e.from_name, use_starttls: e.use_starttls };
-    try{
-      await api("POST", "/setup/test-email", { to, smtp });
-      testMsg.textContent = "Test email sent to " + to + " — check your inbox."; testMsg.className = "testmsg ok";
-    }catch(err){
-      testMsg.textContent = "Test send failed: " + err.message + " — check the SMTP settings."; testMsg.className = "testmsg err";
-    }finally{
-      testBtn.removeAttribute("disabled"); testBtn.style.opacity = "";
-    }
-  };
-  testRow.append(testTo, testBtn);
-  d.append(testRow, testMsg);
+  d.append(el("p",{class:"small"},"bevin can email users and the admin (a task finished, something needs attention, \u2026). Leave it off to skip — you can add it later in Settings. When on, bevin sends through your SMTP server."));
+  d.append(renderEmailForm());
   return d;
 }
 function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
@@ -581,144 +242,14 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
 }
 const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
 
-// ---- model form helpers ----
-function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}; }
-// base-URL normalization for "is this the same provider?" comparisons — match the
-// server probe, which treats scheme/host variants and a trailing /v1 as the same
-// endpoint (it tries /models and /v1/models). Trim, drop trailing slashes, drop /v1.
-function normBase(u){ return (u||"").trim().replace(/\/+$/,"").replace(/\/v1$/i,""); }
-// is this model id already added for this base URL (i.e. already in the model list for this provider)?
-function modelAlreadyAdded(id, base){ return S.models.some(x => x.model_id===id && normBase(x.base_url)===normBase(base)); }
-// allKnownBases — every base URL configured anywhere (main models + aux), deduped.
-// Feeds the Base URL combobox so an endpoint entered in one step can be
-// re-selected in another.
-function allKnownBases(){ const s=new Set(); const add=x=>{ const u=(x.base_url||"").trim(); if(u)s.add(u); }; S.models.forEach(add); S.aux.forEach(add); return [...s]; }
-// is this base URL already a configured provider (main or aux)? drives the
-// live re-probe when re-selecting an existing provider from the Base URL
-// combobox (detection results are never cached — the probe is always fresh).
-function isKnownBase(base){ return allKnownBases().some(u => normBase(u)===normBase(base)); }
-function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
-function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
-// lock the R/K/S + enabled to a display name's pre-existing values (so every model
-// sharing a display name stays consistent); unlock when the name is new (keeps the
-// current R/K/S + enabled)
-function syncDispLock(){
-  const m=S.modelDraft;
-  const name=(m.display_name||"").trim();
-  const match=S.models.find(x=>(x.display_name||"").trim()===name);
-  if(match){
-    if(m.lockedTo!==name){ m.metadata=deepCopy(match.metadata); m.enabled=match.enabled; m.lockedTo=name; }
-  } else if(m.lockedTo!==null && m.lockedTo!==undefined){
-    m.lockedTo=null; // unlock — keep the current R/K/S + enabled
-  }
-}
-function suggestedFix(err){
-  const e=String(err).toLowerCase();
-  if(e.includes("401")||e.includes("403")||e.includes("unauthorized")||e.includes("forbidden")) return "check the API key.";
-  if(e.includes("404")) return "check the base URL (the /models path was not found there).";
-  if(e.includes("timeout")||e.includes("deadline")||e.includes("refused")||e.includes("connection")||e.includes("no such host")) return "check the base URL is reachable from this machine (correct host, port, and network).";
-  if(e.includes("no models")) return "the endpoint is reachable but listed no models — check the base URL.";
-  if(e.includes("could not parse")) return "the endpoint did not return a recognized /models list — check the base URL.";
-  return "check the base URL (and API key if the provider needs one).";
-}
-function saveModel(){
-  const m=S.modelDraft;
-  if(!m.base_url){ S.formError="Base URL is required."; render(); return; }
-  if(!m.model_id){ S.formError="Pick a model — press Detect to list the provider's models."; render(); return; }
-  if(!m.display_name){ S.formError="Display name is required (what users will see)."; render(); return; }
-  if(!m.max_context){ S.formError="Max context is required — the provider did not expose it, so enter it manually."; render(); return; }
-  const wasEditing=S.editingIndex!==-1;
-  const toSave=deepCopy(m); delete toSave._models; delete toSave._lastBase; delete toSave._detecting;
-  // max_context is a string in the draft (from the input); the server's config
-  // expects an int, so normalize it before the model enters S.models.
-  const mc=parseInt(toSave.max_context,10);
-  if(!Number.isFinite(mc) || mc<=0){ S.formError="Max context must be a positive integer (tokens)."; render(); return; }
-  toSave.max_context=mc;
-  // Execution slots: a whole number >= 1 (the server clamps to 1 anyway; the
-  // form rejects invalid input so the error shows near the field).
-  const sl=parseInt(toSave.slots,10);
-  if(!Number.isFinite(sl) || sl<1){ S.formError="Execution slots must be a whole number >= 1."; render(); return; }
-  toSave.slots=sl;
-  if(!wasEditing){ S.models.push(toSave); } else { const idx=Math.min(S.editingIndex,S.models.length); S.models.splice(idx,0,toSave); }
-  resetDraft(); render(); msg(wasEditing?"Model saved.":"Model added.","ok");
-}
-function editModel(i){
-  S.editOriginal=deepCopy(S.models[i]);
-  S.modelDraft=deepCopy(S.models[i]);
-  S.editingIndex=i; S.models.splice(i,1); S.formError=null;
-  syncDispLock(); // lock the R/K/S + enabled if this display name is shared with another model
-  render();
-  const b=document.getElementById("mf_base"); if(b) b.scrollIntoView({behavior:"smooth",block:"center"});
-}
-function cancelEdit(){
-  if(S.editingIndex!==-1 && S.editOriginal){
-    const idx=Math.min(S.editingIndex,S.models.length);
-    S.models.splice(idx,0,S.editOriginal);
-  }
-  resetDraft(); render();
-}
-function reorderModel(i,dir){
-  const j=i+dir;
-  if(j<0||j>=S.models.length) return;
-  [S.models[i],S.models[j]]=[S.models[j],S.models[i]];
-  render();
-}
-// score slider — a progress bar whose fill goes red (1) → yellow (5) → green (10)
-function scoreColor(v){ const hue = v<=5 ? (v-1)/4*60 : 60+(v-5)/5*60; return "hsl("+hue+",70%,45%)"; }
-function scoreFill(input){ const v=parseInt(input.value,10)||1; input.style.setProperty("--score-color",scoreColor(v)); const f=(v-1)/9; input.style.setProperty("--val",f); const W=input.clientWidth; if(W>0){ input.style.setProperty("--pos",(f*(W-18)+9)+"px"); } }
-function refreshScoreFills(){ requestAnimationFrame(function(){ document.querySelectorAll("input.score").forEach(scoreFill); }); }
-let _scoreResize=null; window.addEventListener("resize",function(){ if(_scoreResize)clearTimeout(_scoreResize); _scoreResize=setTimeout(refreshScoreFills,120); });
-function scoreSlider(label, id, val, onChange, disabled){ const v=val||5; const s=el("input",{type:"range", id, min:"1", max:"10", value:String(v), class:"score"}); if(disabled) s.setAttribute("disabled",""); scoreFill(s); const valEl=el("span",{class:"score-val"}, String(v)); s.addEventListener("input",()=>{ scoreFill(s); valEl.textContent=s.value; if(onChange)onChange(parseInt(s.value,10)); }); return el("div",{class:"score-field"}, el("label",{},label), el("div",{class:"score-row"}, s, valEl)); }
-// probeDraft — call the probe endpoint for a draft (main or aux) and learn the
-// provider + list the models (with modalities where the provider exposes
-// them). The result is never cached: every detect is a live probe, so a
-// provider's model list changes are picked up immediately. Shared by the
-// main-model and aux steps.
-async function probeDraft(draft){ const r=await api("POST","/setup/probe-model",{base_url:draft.base_url, api_key:draft.api_key}); draft.provider=r.provider; draft._models=r.models; return r; }
-// applyModelFields — apply the detected models to a MAIN model draft: pick the
-// first model not yet added for this provider + auto-fill its context (the
-// original detectModel behavior).
-function applyModelFields(m, models){ const avail=models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); if(avail.length && !avail.some(x=>x.ID===m.model_id)){ m.model_id=avail[0].ID; if(avail[0].MaxContext){ m.max_context=String(avail[0].MaxContext); m.context_auto=true; } else { m.max_context=""; m.context_auto=false; } } }
-// detect — call the probe endpoint, learn the provider, list the models + context lengths
-async function detectModel(){ const m=S.modelDraft; if(m._detecting) return; if(!m.base_url){ S.formError="Enter the API base URL first."; render(); return; }
-  // A new detect clears any prior detect error immediately (re-render now, not
-  // after the probe resolves), and disables the Detect button for the duration.
-  m._detecting=true; S.formError=null; msg("Detecting "+m.base_url+"…",""); render();
-  try{ const r=await probeDraft(m); applyModelFields(m, r.models); const avail=r.models.filter(mm=>!modelAlreadyAdded(mm.ID, m.base_url)); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found ("+avail.length+" not yet added).","ok"); }
-  catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
-  finally{ m._detecting=false; render(); }
-}
-function freshAux(){ return {kinds:[], provider:"", base_url:"", api_key:"", model_id:""}; }
-function addAux(){ S.aux.push(freshAux()); render(); }
-function removeAux(i){ S.aux.splice(i,1); if(S.auxError) delete S.auxError[i]; render(); }
-// modalitiesFromModel — the input modalities a detected model exposes (one or
-// more of vision|audio|video), mapped from the probe's InputModalities. Returns
-// [] when the provider doesn't expose them (e.g. OpenAI) → the user sets them
-// manually. A single model may perceive several modalities (e.g. a VLM).
-function modalitiesFromModel(mm){ const inM=(mm.InputModalities||[]).map(s=>String(s).toLowerCase()); const out=[]; if(inM.includes("image")||inM.includes("vision")) out.push("vision"); if(inM.includes("audio")) out.push("audio"); if(inM.includes("video")) out.push("video"); return out; }
-// applyAuxFields — apply the detected models to an AUX draft: pick the first
-// model that exposes a perception modality (else the first model) + set its
-// kinds (one or more) where the provider exposes them. No dedupe — the same
-// model may be used for several modalities.
-function applyAuxFields(m, models, i){ const pick=(models.find(mm=>modalitiesFromModel(mm).length) || models[0]); if(pick){ m.model_id=pick.ID; const mods=modalitiesFromModel(pick); if(mods.length) m.kinds=mods; } }
-// detectAux — probe the provider for aux model i, list its models, auto-pick a
-// perception model + its modality. Mirrors detectModel.
-async function detectAux(i){ const m=S.aux[i]; if(m._detecting) return; if(!m.base_url){ S.auxError=S.auxError||{}; S.auxError[i]="Enter the API base URL first."; render(); return; }
-  // A new detect clears this card's prior detect error immediately (re-render
-  // now) and disables its Detect button for the duration.
-  m._detecting=true; if(S.auxError) S.auxError[i]=null; msg("Detecting "+m.base_url+"…",""); render();
-  try{ const r=await probeDraft(m); applyAuxFields(m, r.models, i); msg("Detected "+r.provider+" — "+r.models.length+" model(s) found.","ok"); }
-  catch(e){ S.auxError=S.auxError||{}; S.auxError[i]="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
-  finally{ m._detecting=false; render(); }
-}
 // ---- nav ----
 function sync(id, v){ /* handled by per-field listeners */ }
 function render(){
   document.getElementById("body").innerHTML="";
   document.getElementById("body").append(RENDER[STEPS[idx]]());
   const st=document.getElementById("steps");
-  if(IS_EDIT){ st.style.display="none"; } else { st.style.display=""; st.innerHTML="";
-    STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); }); }
+  st.style.display=""; st.innerHTML="";
+  STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); });
   document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
   refreshScoreFills();
@@ -726,7 +257,7 @@ function render(){
   // the admin lands on it (startSidecars guards against re-starting the poll).
   if(STEPS[idx] === "sidecars" && !_sidecarTimer){ startSidecars(); }
 }
-async function api(method, path, body){ const url = IS_EDIT ? "/admin" + path : path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
+async function api(method, path, body){ const url = path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, sidecars via id-based reads)
@@ -763,14 +294,12 @@ async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("PO
   // to the admin dashboard (a real button, not a link into the user UI).
   const body = document.getElementById("body");
   body.innerHTML = "";
-  const h = el("h3", {}, IS_EDIT ? "Config updated" : "Setup complete");
+  const h = el("h3", {}, "Setup complete");
   body.append(h);
-  body.append(el("p", {}, IS_EDIT
-    ? (r.reloaded ? "Your changes are saved and the running agent picked them up — no restart needed." : "Your changes are saved to server.toml. The running agent could not pick them up in place (see the server log) — restart bevin to apply them.")
-    : "bevin is running in normal mode. The admin account you just created signs in to the admin dashboard."));
+  body.append(el("p", {}, "bevin is running in normal mode. The admin account you just created signs in to the admin dashboard."));
   // The button lives in a .btns container — that's where the button styling
   // (base + .primary) is scoped — so it matches the wizard's design language.
-  const b = el("button", {class:"primary"}, IS_EDIT ? "Back to the admin dashboard" : "Go to the admin dashboard");
+  const b = el("button", {class:"primary"}, "Go to the admin dashboard");
   b.onclick = () => { location.href = "/admin"; };
   body.append(el("div", {class:"btns", style:"margin-top:1rem"}, b));
   document.getElementById("finalize").classList.add("hidden");

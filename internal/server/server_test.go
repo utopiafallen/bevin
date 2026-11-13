@@ -16,6 +16,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/email"
+	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -301,6 +302,161 @@ func fakeOAIStream(t *testing.T) *httptest.Server {
 		emit(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`)
 		emit("[DONE]")
 	}))
+}
+
+// configApp builds an App with a real agent + edit Manager + a valid saved
+// config (the admin config endpoints exercise all three).
+func configApp(t *testing.T) (*App, *config.ServerConfig) {
+	t.Helper()
+	dir := t.TempDir()
+	srv, err := store.OpenServer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	if _, err := srv.CreateUser("admin", "Admin", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-test", "admin", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	prov := auth.NewInternalProvider(srv, time.Hour)
+
+	oai := fakeOAIStream(t)
+	t.Cleanup(oai.Close)
+	cfg := &config.ServerConfig{
+		DataDir: dir,
+		Auth:    config.Auth{SessionTTLSeconds: 3600, SessionSecret: "test-secret"},
+		Models: []config.Model{{
+			ID: "m1", Provider: "openai", BaseURL: oai.URL + "/v1",
+			APIKey: "sk-test", ModelID: "gpt-4o", DisplayName: "GPT-4o",
+			MaxContext: 128000, Slots: 1, Enabled: true,
+		}},
+	}
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := agent.New(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	edit := setup.New(dir, cfg.Bind, 0, srv, prov, nil)
+	a := &App{cfg: cfg, prov: prov, ag: ag, srv: srv, ttl: time.Hour, dataDir: dir, edit: edit}
+	a.routes()
+	return a, cfg
+}
+
+// TestAdminConfigEndpoints — the admin config pages' read/save API: admin
+// gating, the models save (persisted + hot-reloaded into the agent), the
+// nothing-to-save rejection, and the email placeholder defaults (a blank port
+// is saved as 587, the password is preserved when left blank).
+func TestAdminConfigEndpoints(t *testing.T) {
+	a, cfg := configApp(t)
+
+	// No session -> 403 on the config API.
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/config", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated config read code = %d, want 403", w.Code)
+	}
+
+	// Admin read: the saved models + the email (password masked).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("config read code = %d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Models []config.Model  `json:"models"`
+		Email  map[string]any  `json:"email"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Models) != 1 || got.Models[0].ID != "m1" {
+		t.Fatalf("config read models = %+v", got.Models)
+	}
+	if _, has := got.Email["has_password"]; !has {
+		t.Fatalf("email read missing has_password: %+v", got.Email)
+	}
+	if _, has := got.Email["password"]; has {
+		t.Fatalf("email read must not return the password: %+v", got.Email)
+	}
+
+	// Save a model edit: slots 1 -> 3. It must persist to disk AND hot-reload
+	// the running agent (the pool capacity changes without a restart).
+	w = httptest.NewRecorder()
+	edited := []config.Model{{ID: "m1", Provider: "openai", BaseURL: cfg.Models[0].BaseURL, APIKey: "sk-test", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 3, Enabled: true}}
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"models": edited}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("config save code = %d body=%s", w.Code, w.Body.String())
+	}
+	var saveRes struct {
+		OK       bool `json:"ok"`
+		Reloaded bool `json:"reloaded"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &saveRes)
+	if !saveRes.OK || !saveRes.Reloaded {
+		t.Fatalf("save result = %+v, want ok+reloaded", saveRes)
+	}
+	onDisk, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Models[0].Slots != 3 {
+		t.Fatalf("saved slots = %d, want 3", onDisk.Models[0].Slots)
+	}
+	pools := a.ag.Pools()
+	if len(pools) != 1 || pools[0].Slots != 3 {
+		t.Fatalf("agent pools after save = %+v, want m1 with 3 slots", pools)
+	}
+	// The session secret is preserved (a save is not a re-setup).
+	if onDisk.Auth.SessionSecret != "test-secret" {
+		t.Fatal("session secret should be preserved on a config save")
+	}
+
+	// Nothing to save -> 400.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty save code = %d, want 400", w.Code)
+	}
+
+	// An invalid catalog is rejected + does not clobber the saved one.
+	w = httptest.NewRecorder()
+	bad := []config.Model{{ID: "m1", Provider: "openai", BaseURL: cfg.Models[0].BaseURL, APIKey: "sk-test", ModelID: "gpt-4o", Enabled: false}}
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"models": bad}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid save code = %d, want 400", w.Code)
+	}
+	after, _ := config.Load(a.dataDir)
+	if after.Models[0].Slots != 3 {
+		t.Fatalf("a rejected save must not clobber the saved config, slots = %d", after.Models[0].Slots)
+	}
+
+	// Email save: a blank port takes the 587 placeholder default; a blank
+	// password keeps the stored one.
+	seed := &config.ServerConfig{DataDir: a.dataDir, Auth: cfg.Auth, Models: onDisk.Models,
+		Email: config.Email{Enabled: true, SMTPHost: "smtp.example.com", SMTPPort: 2525, Username: "bevin@example.com", Password: "old-pw", FromName: "Bevin"}}
+	if err := config.Save(a.dataDir, seed); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"email": map[string]any{
+		"enabled": true, "smtp_host": "smtp.example.com", "smtp_port": 0,
+		"username": "bevin@example.com", "password": "", "from_name": "Bevin",
+	}}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("email save code = %d body=%s", w.Code, w.Body.String())
+	}
+	emailAfter, _ := config.Load(a.dataDir)
+	if emailAfter.Email.SMTPPort != 587 {
+		t.Fatalf("blank port should save as 587, got %d", emailAfter.Email.SMTPPort)
+	}
+	if emailAfter.Email.Password != "old-pw" {
+		t.Fatalf("a blank password should keep the stored one, got %q", emailAfter.Email.Password)
+	}
 }
 
 // TestSendMessageStream verifies the SSE chat endpoint: it emits "message"

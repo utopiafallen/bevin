@@ -64,6 +64,9 @@ type App struct {
 	// mail is the SMTP sender (nil when email is not configured; notify is a
 	// no-op in that case).
 	mail *email.Sender
+	// cfgMu guards cfg + mail: a config save (the admin config pages) swaps
+	// both in under the lock so readers never see a torn state.
+	cfgMu sync.RWMutex
 	// supCancel stops the sidecar supervisor (started by NewNormal).
 	supCancel context.CancelFunc
 }
@@ -79,11 +82,9 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 		return nil, err
 	}
 	edit := setup.New(dataDir, cfg.Bind, 0, srv, prov, nil)
-	// After an edit finalize, hot-reload the running agent with the freshly
-	// saved config (models, slot counts, provider endpoints) — no restart.
-	edit.SetOnFinalize(func(newCfg *config.ServerConfig) error { return ag.Reload(newCfg) })
 	// Build the SMTP sender (nil when email is not configured; notify is a
-	// no-op in that case).
+	// no-op in that case). A config save (adminConfigSave) swaps cfg + mail +
+	// hot-reloads the agent via applyConfig.
 	mail := email.New(cfg.Email)
 	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit, srv: srv, mail: mail}
 	a.routes()
@@ -130,18 +131,55 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /admin/api/sidecars", a.requireAdmin(a.adminSidecars))
 	mux.HandleFunc("GET /admin/api/email", a.requireAdmin(a.adminEmail))
 	mux.HandleFunc("POST /admin/api/email/test", a.requireAdmin(a.adminEmailTest))
-	// Normal-mode edit: re-run the setup wizard to edit the live config, gated
-	// on an admin session.
-	edit := setup.NewEditHandler(a.edit, a.adminGate)
-	edit.Routes(mux)
+	// Admin config pages (the setup wizard is first-time only; in normal mode
+	// the admin edits the live config in dedicated pages that reuse the
+	// wizard's form components): the gated entry points + the config APIs
+	// (read / save + the model Detect probe).
+	mux.HandleFunc("GET /admin/models", a.adminModelsPage)
+	mux.HandleFunc("GET /admin/email", a.adminEmailPage)
+	mux.HandleFunc("GET /admin/api/config", a.requireAdmin(a.adminConfig))
+	mux.HandleFunc("POST /admin/api/config", a.requireAdmin(a.adminConfigSave))
+	mux.HandleFunc("POST /admin/api/probe-model", a.requireAdmin(a.adminProbeModel))
 	if sub, err := fs.Sub(web.FS, "static"); err == nil {
 		mux.Handle("GET /", http.FileServerFS(sub))
 	}
 	a.mux = mux
 }
 
+// liveCfg / liveMail read the app's live config + SMTP sender under the lock
+// (a config save swaps them in via applyConfig).
+func (a *App) liveCfg() *config.ServerConfig {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg
+}
+
+func (a *App) liveMail() *email.Sender {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.mail
+}
+
+// applyConfig applies a freshly saved config without a restart: hot-reload the
+// running agent (models, slot pools, provider endpoints) + swap the app's live
+// config + SMTP sender. It reports whether the agent reload succeeded — when
+// it fails the config is still saved on disk (the agent keeps the old one
+// until the next restart).
+func (a *App) applyConfig(cfg *config.ServerConfig) (reloaded bool) {
+	err := a.ag.Reload(cfg)
+	a.cfgMu.Lock()
+	a.cfg = cfg
+	a.mail = email.New(cfg.Email)
+	a.cfgMu.Unlock()
+	if err != nil {
+		log.Printf("bevin: agent reload after config save: %v", err)
+		return false
+	}
+	return true
+}
+
 // adminGate authenticates the request and returns the user's role (empty on
-// failure). Used by the normal-mode edit routes to require an admin.
+// failure).
 func (a *App) adminGate(r *http.Request) (string, bool) {
 	tok, err := auth.SessionToken(r)
 	if err != nil {
@@ -336,7 +374,7 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 // no-op when email is not configured, the user has no email address, or the
 // send fails (the failure is logged, not returned).
 func (a *App) notify(handle, subject, body string) {
-	if a.mail == nil {
+	if a.liveMail() == nil {
 		return
 	}
 	u, err := a.srv.GetUser(handle)
@@ -344,10 +382,11 @@ func (a *App) notify(handle, subject, body string) {
 		return
 	}
 	to := u.Email
+	m := a.liveMail()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := a.mail.Send(ctx, to, subject, body); err != nil {
+		if err := m.Send(ctx, to, subject, body); err != nil {
 			log.Printf("notify %s: %v", u.Handle, err)
 		}
 	}()
@@ -358,7 +397,7 @@ func (a *App) notify(handle, subject, body string) {
 func (a *App) emailAddress(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"configured": a.mail != nil,
+		"configured": a.liveMail() != nil,
 		"email":      u.Email,
 	})
 }

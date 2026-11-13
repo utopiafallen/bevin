@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bevin — models</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/brand.css">
+<link rel="stylesheet" href="/config-forms.css">
+<script>
+  (function(){try{var t=localStorage.getItem("bevin-theme");
+    if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+    document.documentElement.setAttribute("data-theme",t);}catch(e){document.documentElement.setAttribute("data-theme","light");}})();
+</script>
+<script src="/config-forms.js"></script>
+<style>
+  /* page chrome (the form component styles live in config-forms.css) */
+  body { max-width: 920px; margin: 0 auto; padding: 1.4rem 1.2rem 4rem; }
+  .page-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; margin: .3rem 0 0; }
+  .card { margin-top: 1rem; }
+  .backlink { color: var(--brand-strong); font-weight: 700; text-decoration: none; }
+  .backlink:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
+  <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+  <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path></svg>
+</button>
+<div>
+  <a class="brand" href="/admin"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
+  <div class="page-title">Models</div>
+</div>
+<p class="small"><a class="backlink" href="/admin">&larr; Back to the dashboard</a> &middot; Each change saves immediately — the running agent picks it up without a restart.</p>
+
+<div class="card">
+  <div id="main"></div>
+</div>
+<div class="msg" id="msg"></div>
+
+<script>
+// Page state: the same shape the setup wizard's shared form components
+// expect (config-forms.js) + the page's own globals (api / msg / render /
+// the endpoint constants).
+const PROBE_URL = "/admin/api/probe-model";
+const EMAIL_TEST_URL = "/admin/api/email/test"; // unused here; the shared email form references it
+let S = { models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], auxError: {}, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+
+async function api(method, path, body){ const url = path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
+function msg(text, cls){ const m=document.getElementById("msg"); m.textContent=text||""; m.className="msg"+(cls?" "+cls:""); }
+function q(s){ return document.querySelector(s); }
+
+// stripWorking — drop the per-draft working state (_models / _detecting /
+// _lastBase) before a payload crosses the wire (same rule as the wizard).
+function stripWorking(o){ if(!o || typeof o !== "object") return o; if(Array.isArray(o)) return o.map(stripWorking); const c={}; for(const k of Object.keys(o)) if(!k.startsWith("_")) c[k]=o[k]; return c; }
+
+// render — this page's step: main models (form + list) + aux models.
+function render(){
+  const main=document.getElementById("main");
+  main.innerHTML="";
+  main.append(el("h3",{}, "Main models"));
+  main.append(el("p",{class:"small"},"The chat models users can switch between. List order is the order users see when choosing a model."));
+  main.append(renderModelForm());
+  main.append(renderModelList());
+  main.append(el("h3",{style:"margin-top:1.6rem"}, "Aux perception models"));
+  main.append(el("p",{class:"small"},"Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip."));
+  main.append(renderAuxSection());
+  refreshScoreFills();
+}
+
+// commit — persist the current models + aux (per action, via the shared
+// components' notifyConfigChanged hook). A single in-flight guard: rapid
+// actions (e.g. reorder) queue at most one follow-up.
+let _committing = false, _commitPending = false;
+async function commit(area){
+  if(_committing){ _commitPending = true; return; }
+  _committing = true;
+  try{
+    const r = await api("POST", "/admin/api/config", {models: stripWorking(S.models), aux: stripWorking(S.aux)});
+    msg(r.reloaded ? "Saved — the running agent picked up the changes." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
+  }catch(e){
+    msg("Save failed: " + e.message, "err");
+  }finally{
+    _committing = false;
+    if(_commitPending){ _commitPending = false; commit(area); }
+  }
+}
+window.onConfigChanged = function(area){ commit(area); };
+
+document.getElementById("themeToggle").addEventListener("click", function(){
+  var root=document.documentElement;
+  var next = root.getAttribute("data-theme")==="dark" ? "light" : "dark";
+  root.setAttribute("data-theme",next);
+  try{localStorage.setItem("bevin-theme",next);}catch(e){}
+});
+
+// Load the current config, then render.
+(async function(){
+  try{
+    const d = await api("GET", "/admin/api/config");
+    S.models = d.models || [];
+    S.aux = d.aux || [];
+  }catch(e){ msg("Could not load the config: " + e.message, "err"); }
+  render();
+})();
+</script>
+</body>
+</html>

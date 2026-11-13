@@ -108,6 +108,9 @@ func main() {
 			serveBrandingAsset(mux, sub, "/logo-mark.svg", "logo-mark.svg", "image/svg+xml")
 			serveBrandingAsset(mux, sub, "/favicon.svg", "favicon.svg", "image/svg+xml")
 			serveBrandingAsset(mux, sub, "/fonts/nunito-variable.woff2", "fonts/nunito-variable.woff2", "font/woff2")
+			// The wizard's form components (shared with the admin config pages).
+			serveBrandingAsset(mux, sub, "/config-forms.css", "config-forms.css", "text/css; charset=utf-8")
+			serveBrandingAsset(mux, sub, "/config-forms.js", "config-forms.js", "text/javascript; charset=utf-8")
 		}
 		router.Swap(mux)
 		fmt.Printf("\nbevin: setup mode — open the wizard:\n\n  http://%s:%d/setup?token=%s\n\n", displayHost(*bind), *port, token)
