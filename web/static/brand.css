@@ -156,15 +156,24 @@ input:focus, textarea:focus, select:focus {
 
 /* ---- chat bubbles ---- */
 .msg { display: flex; flex-direction: column; margin: 0.5rem 0; max-width: 82%; }
-.msg .who { font-size: 0.72rem; color: var(--text-muted); margin: 0 0.2rem; font-weight: 700; }
+.msg .msg-head { display: flex; gap: 0.5rem; align-items: baseline; margin: 0 0.2rem; }
+.msg .who { font-size: 0.72rem; color: var(--text-muted); font-weight: 700; }
+.msg .when { font-size: 0.68rem; color: var(--text-muted); font-weight: 500; opacity: 0.85; }
 .msg .bubble {
   padding: 0.6rem 0.95rem; border-radius: 18px; font-weight: 500;
   background: var(--surface); border: 1px solid var(--border);
+  white-space: pre-wrap; word-wrap: break-word;
 }
 .msg-user { align-items: flex-end; align-self: flex-end; margin-left: auto; }
+.msg-user .msg-head { justify-content: flex-end; }
 .msg-user .bubble { background: var(--brand-soft); border-color: transparent; border-bottom-right-radius: 6px; }
 .msg-assistant { align-items: flex-start; align-self: flex-start; }
 .msg-assistant .bubble { border-bottom-left-radius: 6px; }
+.msg .error-text { color: var(--danger, #c0392b); }
+.msg details.reasoning { margin: 0 0.2rem 0.3rem; font-size: 0.8rem; color: var(--text-muted); max-width: 100%; }
+.msg details.reasoning summary { cursor: pointer; font-size: 0.72rem; font-weight: 700; }
+.msg details.reasoning pre { white-space: pre-wrap; font-family: inherit; margin: 0.3rem 0 0; }
+#chatLog { max-height: 26rem; overflow-y: auto; padding-right: 0.25rem; }
 
 /* ---- chips / badges ---- */
 .chip {

@@ -23,7 +23,7 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
 	}
 	for _, m := range turns {
-		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Text: m.Content})
+		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Text: withTimestamp(m)})
 	}
 	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
 		System:   []provider.ContentPart{{Text: summarizationSystemPrompt}},
@@ -37,10 +37,12 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 
 // compactIfNeeded checks whether the conversation's prompt (frozen system
 // prompt + latest summary + raw turns since it) exceeds the summarization
-// budget, and if so produces + stores a new chained summary (folding in the
-// previous summary + the raw turns since it). Full history is retained in the
-// store; the summary only changes what the request builder sends. It is a no-op
-// when the prompt is under budget or there is no older turn to fold.
+// budget, and if so produces + stores a new chained summary. The summary folds
+// in the previous summary + the older raw turns — EXCEPT the last keepLastTurns
+// turns, which are preserved verbatim so the chat resumes exactly where it left
+// off. Full history is retained in the store; the summary only changes what the
+// request builder sends. It is a no-op when the prompt is under budget or there
+// is no older turn to fold (only the last keepLastTurns remain).
 //
 // actualTokens, when > 0, is the API-reported prompt size for the most recent
 // call (used in preference to the char/4 estimate) — the provider's usage
@@ -59,12 +61,15 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		return nil
 	}
 	prevSummary, turns := latestSummaryAndTurns(hist)
-	if len(turns) == 0 {
-		// Over budget only because of the system prompt + summary (nothing to
-		// fold). Leave it — there is no older turn to compact.
+	if len(turns) <= keepLastTurns {
+		// Nothing older to fold — the last keepLastTurns turns are always kept
+		// verbatim (the chat resumes exactly where it left off). Leave it.
 		return nil
 	}
-	summary, err := a.summarize(ctx, p, conv.ActiveModelID, prevSummary, turns)
+	// Summarize the older turns; the last keepLastTurns stay as raw turns so the
+	// chat resumes exactly where it left off.
+	toSummarize := turns[:len(turns)-keepLastTurns]
+	summary, err := a.summarize(ctx, p, conv.ActiveModelID, prevSummary, toSummarize)
 	if err != nil {
 		return err
 	}

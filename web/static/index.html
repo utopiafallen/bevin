@@ -33,8 +33,11 @@
   <div class="wrap">
     <header class="topbar">
       <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
-      <span class="chip"><span class="dot"></span> brand preview</span>
-      <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/setup" style="display:none;" title="Edit models &amp; config (admin)">Models</a>
+      <div style="display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end;">
+        <span class="chip"><span class="dot"></span> <span id="userChip">signed out</span></span>
+        <button class="btn btn-ghost" id="logoutBtn" type="button" style="display:none; padding:.25rem .7rem;">Sign out</button>
+        <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/setup" style="display:none;" title="Edit models &amp; config (admin)">Models</a>
+      </div>
     </header>
 
     <section class="card" style="margin-bottom:1rem;">
@@ -45,13 +48,13 @@
         rounded and friendly. Warm neutrals, a sun over a layer of warm amber waves, light and dark themes.
       </p>
       <div style="display:flex; gap:.6rem; flex-wrap:wrap;">
-        <button class="btn btn-primary">Get started</button>
-        <button class="btn">Learn more</button>
-        <button class="btn btn-ghost">Sign in</button>
+        <button class="btn btn-primary" id="heroStart" type="button">Get started</button>
+        <button class="btn" id="heroMore" type="button">Learn more</button>
+        <button class="btn btn-ghost" id="heroSignIn" type="button">Sign in</button>
       </div>
     </section>
 
-    <section class="grid" style="margin-bottom:1rem;">
+    <section class="grid" id="brandGrid" style="margin-bottom:1rem;">
       <div class="card">
         <h3>Color</h3>
         <div class="swatches">
@@ -73,25 +76,30 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="chatSection">
       <h3>Conversation</h3>
-      <div class="msg msg-assistant">
-        <span class="who">bevin</span>
-        <span class="bubble">Good morning. What would you like to get done today?</span>
+
+      <div id="loginCard">
+        <p class="muted" style="margin-top:.2rem;">Sign in to start a conversation.</p>
+        <form id="loginForm" style="display:flex; flex-direction:column; gap:.5rem; margin-top:.6rem;">
+          <input id="handle" placeholder="handle" autocomplete="username" required>
+          <input id="password" type="password" placeholder="password" autocomplete="current-password" required>
+          <button class="btn btn-primary" type="submit">Sign in</button>
+          <span id="loginErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
+        </form>
       </div>
-      <div class="msg msg-user">
-        <span class="who">you</span>
-        <span class="bubble">Help me plan my afternoon.</span>
+
+      <div id="chatCard" style="display:none;">
+        <div style="display:flex; gap:.5rem; margin:.4rem 0 .2rem; flex-wrap:wrap; align-items:center;">
+          <button class="btn btn-ghost" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
+          <span id="modelInfo" class="chip chip-ghost" title="This conversation's model (set server-side)"></span>
+        </div>
+        <div id="chatLog"></div>
+        <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
+          <input id="message" placeholder="Say something&hellip;" autocomplete="off">
+          <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
+        </form>
       </div>
-      <div class="msg msg-assistant">
-        <span class="who">bevin</span>
-        <span class="bubble">Of course — a soft yellow, a warm font, and a little calm. Let's start.</span>
-      </div>
-      <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
-        <input id="message" placeholder="Say something&hellip;" autocomplete="off">
-        <button class="btn btn-primary" type="submit">Send</button>
-      </form>
-      <div id="chatLog"></div>
     </section>
 
     <p class="muted" style="text-align:center; margin-top:2rem; font-size:.85rem;">
@@ -108,37 +116,242 @@
       try { localStorage.setItem("bevin-theme", next); } catch (e) {}
     });
 
-    fetch("/health").then(function (r) { return r.json(); })
-      .then(function (j) { document.getElementById("health").textContent = "health " + (j.status || "ok"); })
-      .catch(function (e) { document.getElementById("health").textContent = "preview (no server)"; });
+    function $(id) { return document.getElementById(id); }
 
-    // Reveal the admin model-editor link if the session user is an admin.
-    fetch("/api/me").then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        if (j && j.role === "admin") {
-          var el = document.getElementById("adminSetupLink");
-          if (el) el.style.display = "";
-        }
-      }).catch(function () {});
-
-    var form = document.getElementById("chat");
-    var log = document.getElementById("chatLog");
-    function add(who, text) {
-      var m = document.createElement("div");
-      m.className = "msg " + (who === "you" ? "msg-user" : "msg-assistant");
-      m.innerHTML = '<span class="who">' + (who === "you" ? "you" : "bevin") + '</span><span class="bubble"></span>';
-      m.querySelector(".bubble").textContent = text;
-      log.appendChild(m);
+    // Messages are timestamped in UTC (new Date().toISOString()); the display
+    // localizes to the browser's current locale.
+    function fmtWhen(d) {
+      try { return d.toLocaleString(); } catch (e) { return d.toISOString(); }
     }
-    form.addEventListener("submit", function (e) {
+
+    var me = null;
+    var convID = null;
+    var sending = false;
+
+    function scrollChat() { $("chatSection").scrollIntoView({ behavior: "smooth", block: "start" }); }
+
+    function addUserMsg(text, iso) {
+      var m = document.createElement("div");
+      m.className = "msg msg-user";
+      m.innerHTML = '<div class="msg-head"><span class="who"></span><span class="when"></span></div><span class="bubble"></span>';
+      m.querySelector(".who").textContent = (me && (me.display_name || me.handle)) || "you";
+      var d = new Date(iso);
+      var when = m.querySelector(".when");
+      when.textContent = fmtWhen(d);
+      when.title = d.toUTCString(); // full UTC on hover
+      m.querySelector(".bubble").textContent = text;
+      $("chatLog").appendChild(m);
+      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+    }
+
+    // Creates the assistant message element (head + optional reasoning +
+    // bubble). Returns the handles so the stream can fill them incrementally.
+    function startAssistantMsg() {
+      var m = document.createElement("div");
+      m.className = "msg msg-assistant";
+      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><span class="bubble"></span>';
+      var d = new Date();
+      var when = m.querySelector(".when");
+      when.textContent = fmtWhen(d);
+      when.title = d.toUTCString();
+      $("chatLog").appendChild(m);
+      return {
+        m: m,
+        details: m.querySelector("details.reasoning"),
+        pre: m.querySelector("details.reasoning pre"),
+        bubble: m.querySelector(".bubble")
+      };
+    }
+
+    function addErrorMsg(text) {
+      var m = document.createElement("div");
+      m.className = "msg msg-assistant";
+      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><span class="bubble error-text"></span>';
+      var d = new Date();
+      m.querySelector(".when").textContent = fmtWhen(d);
+      m.querySelector(".bubble").textContent = text;
+      $("chatLog").appendChild(m);
+      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+    }
+
+    function addNote(text) {
+      var p = document.createElement("p");
+      p.className = "muted";
+      p.style.textAlign = "center";
+      p.style.fontSize = ".8rem";
+      p.textContent = text;
+      $("chatLog").appendChild(p);
+    }
+
+    async function loadModels() {
+      try {
+        var r = await fetch("/api/models");
+        if (!r.ok) return;
+        var j = await r.json();
+        var name = "";
+        (j.models || []).some(function (m) {
+          if (m.id === j.default) { name = m.display_name || m.id; return true; }
+          return false;
+        });
+        $("modelInfo").textContent = name ? "model: " + name : "";
+      } catch (e) { /* model list is best-effort */ }
+    }
+
+    async function sendChat() {
+      if (sending) return;
+      var input = $("message");
+      var text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      addUserMsg(text, new Date().toISOString());
+      sending = true;
+      $("sendBtn").disabled = true;
+
+      var asst = null;
+      var reasoning = "";
+      try {
+        if (!convID) {
+          var title = text.length > 40 ? text.slice(0, 40) + "…" : text;
+          var cr = await fetch("/api/conversations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: title })
+          });
+          if (!cr.ok) { var je = {}; try { je = await cr.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + cr.status)); }
+          convID = (await cr.json()).id;
+          try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
+        }
+        var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text })
+        });
+        if (!resp.ok) { var je2 = {}; try { je2 = await resp.json(); } catch (e) {} throw new Error(je2.error || ("HTTP " + resp.status)); }
+
+        var reader = resp.body.getReader();
+        var dec = new TextDecoder();
+        var buf = "";
+        var gotDone = false;
+        while (true) {
+          var ch = await reader.read();
+          if (ch.done) break;
+          buf += dec.decode(ch.value, { stream: true });
+          var idx;
+          while ((idx = buf.indexOf("\n\n")) >= 0) {
+            var rawEvt = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            var evt = "message", data = "";
+            rawEvt.split("\n").forEach(function (line) {
+              if (line.indexOf("event: ") === 0) evt = line.slice(7).trim();
+              else if (line.indexOf("data: ") === 0) data += line.slice(6);
+            });
+            if (!data) continue;
+            var p; try { p = JSON.parse(data); } catch (e) { continue; }
+            if (evt === "message") {
+              if (p.reasoning) {
+                reasoning += p.reasoning;
+                if (!asst) asst = startAssistantMsg();
+                asst.details.style.display = "";
+                asst.pre.textContent = reasoning;
+                $("chatLog").scrollTop = $("chatLog").scrollHeight;
+              }
+              if (p.delta) {
+                if (!asst) asst = startAssistantMsg();
+                asst.bubble.textContent += p.delta;
+                $("chatLog").scrollTop = $("chatLog").scrollHeight;
+              }
+            } else if (evt === "done") {
+              gotDone = true;
+              if (!asst) asst = startAssistantMsg();
+              if (!asst.bubble.textContent) asst.bubble.textContent = p.reply || "(empty reply)";
+            } else if (evt === "error") {
+              throw new Error(p.error || "stream error");
+            }
+          }
+        }
+        if (!gotDone && !asst) addErrorMsg("⚠ The stream ended before the reply completed.");
+      } catch (err) {
+        addErrorMsg("⚠ " + err.message);
+      } finally {
+        sending = false;
+        $("sendBtn").disabled = false;
+        input.focus();
+      }
+    }
+
+    function showLogin() {
+      $("loginCard").style.display = "";
+      $("chatCard").style.display = "none";
+      $("logoutBtn").style.display = "none";
+      $("userChip").textContent = "signed out";
+    }
+
+    function showChat() {
+      $("loginCard").style.display = "none";
+      $("chatCard").style.display = "";
+      $("logoutBtn").style.display = "";
+      $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
+      loadModels();
+      try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
+      if (me && me.role === "admin") $("adminSetupLink").style.display = "";
+    }
+
+    // Boot: health line + session check (decides login vs chat).
+    fetch("/health").then(function (r) { return r.json(); })
+      .then(function (j) { $("health").textContent = "health " + (j.status || "ok") + " · " + fmtWhen(new Date(j.time || Date.now())); })
+      .catch(function () { $("health").textContent = "offline (no server)"; });
+
+    (async function boot() {
+      try {
+        var r = await fetch("/api/me");
+        if (r.ok) { me = await r.json(); showChat(); return; }
+      } catch (e) { /* fall through to login */ }
+      showLogin();
+    })();
+
+    $("loginForm").addEventListener("submit", async function (e) {
       e.preventDefault();
-      var msg = document.getElementById("message").value.trim();
-      if (!msg) return;
-      add("you", msg);
-      document.getElementById("message").value = "";
-      // Echo back locally for the preview (no model backend wired in the skeleton).
-      setTimeout(function () { add("bevin", "Heard you: \u201C" + msg + "\u201D \u2014 the agent will answer here once wired."); }, 250);
+      $("loginErr").textContent = "";
+      var r = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handle: $("handle").value.trim(), password: $("password").value })
+      });
+      if (!r.ok) { $("loginErr").textContent = "invalid credentials"; return; }
+      try {
+        var r2 = await fetch("/api/me");
+        me = r2.ok ? await r2.json() : { handle: $("handle").value.trim() };
+      } catch (err) { me = { handle: $("handle").value.trim() }; }
+      $("password").value = "";
+      showChat();
     });
+
+    $("logoutBtn").addEventListener("click", async function () {
+      try { await fetch("/logout", { method: "POST" }); } catch (e) {}
+      me = null;
+      convID = null;
+      try { localStorage.removeItem("bevin-conv"); } catch (e) {}
+      $("chatLog").innerHTML = "";
+      showLogin();
+    });
+
+    $("newChatBtn").addEventListener("click", function () {
+      if (sending) return;
+      convID = null;
+      try { localStorage.removeItem("bevin-conv"); } catch (e) {}
+      $("chatLog").innerHTML = "";
+      addNote("New conversation started.");
+    });
+
+    $("chat").addEventListener("submit", function (e) {
+      e.preventDefault();
+      sendChat();
+    });
+
+    // Hero buttons.
+    $("heroStart").addEventListener("click", function () { scrollChat(); setTimeout(function () { $("message").focus(); }, 350); });
+    $("heroSignIn").addEventListener("click", scrollChat);
+    $("heroMore").addEventListener("click", function () { $("brandGrid").scrollIntoView({ behavior: "smooth", block: "start" }); });
   </script>
 </body>
 </html>

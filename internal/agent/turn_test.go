@@ -272,6 +272,90 @@ func TestTurnNoUsageFallsBackToEstimate(t *testing.T) {
 	}
 }
 
+// TestBuildRequestWithTimestamp verifies the timestamp is prepended to each
+// message (so the model knows when it was sent) when the CreatedAt is set.
+func TestBuildRequestWithTimestamp(t *testing.T) {
+	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
+	msgs := []store.Message{
+		{Role: roleUser, Content: "hello", Seq: 0, CreatedAt: "2026-11-12T10:30:00.123456789Z"},
+		{Role: roleAssistant, Content: "hi", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
+	}
+	req, _ := buildRequest(conv, msgs)
+	if len(req.Messages) != 2 {
+		t.Fatalf("Messages = %d, want 2", len(req.Messages))
+	}
+	// The timestamp is prepended (RFC3339, UTC, without the nanoseconds).
+	if req.Messages[0].Text != "[2026-11-12T10:30:00Z] hello" {
+		t.Fatalf("Messages[0] = %q, want the timestamp prepended", req.Messages[0].Text)
+	}
+	if req.Messages[1].Text != "[2026-11-12T10:30:05Z] hi" {
+		t.Fatalf("Messages[1] = %q, want the timestamp prepended", req.Messages[1].Text)
+	}
+}
+
+// TestCompactPreservesLastTurns verifies a compaction preserves the last
+// keepLastTurns messages verbatim (only the older turns are folded into the
+// summary, so the chat resumes exactly where it left off).
+func TestCompactPreservesLastTurns(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	if cfg.Models[0].MaxContext != 1000 {
+		t.Fatalf("test precondition: m1 MaxContext = %d, want 1000", cfg.Models[0].MaxContext)
+	}
+	fp := &fakeProvider{}
+	a.providers["m1"] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	// Add enough messages to exceed the budget (each ~100 chars).
+	for i := 0; i < 45; i++ {
+		if _, err := us.AppendMessage(convID, roleUser, "hello "+strings.Repeat("x", 100), nil, nil); err != nil {
+			t.Fatalf("AppendMessage %d: %v", i, err)
+		}
+		if _, err := us.AppendMessage(convID, roleAssistant, "hi", &conv.ActiveModelID, nil); err != nil {
+			t.Fatalf("AppendMessage %d: %v", i, err)
+		}
+	}
+	// Force a compaction (the prompt is well over the budget).
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0); err != nil {
+		t.Fatalf("compactIfNeeded: %v", err)
+	}
+	// The request builder now sends the summary + the last keepLastTurns
+	// messages verbatim — not the full history (the older turns are folded into
+	// the summary). The store retains the full history (the summary only
+	// changes what the request builder sends).
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var summaries int
+	for _, m := range msgs {
+		if m.Role == roleSummary {
+			summaries++
+		}
+	}
+	if summaries == 0 {
+		t.Fatal("no summary produced — the compaction did not fire")
+	}
+	req, _ := buildRequest(conv, msgs)
+	if len(req.System) < 2 {
+		t.Fatalf("request System = %d parts, want >= 2 (frozen prompt + summary)", len(req.System))
+	}
+	if len(req.Messages) != keepLastTurns {
+		t.Fatalf("request sent %d messages, want %d (the last keepLastTurns verbatim)", len(req.Messages), keepLastTurns)
+	}
+}
+
 // TestTurnStream verifies the streaming turn: the emit callback receives the
 // deltas, the reply is aggregated + persisted, and the final chunk carries the
 // usage (the API-reported accounting the post-compact prefers).
