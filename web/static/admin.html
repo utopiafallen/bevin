@@ -307,6 +307,39 @@ function renderServer() {
     "<p class='kv'>data dir " + esc(STATUS.server.data_dir) + "<br>bind " + esc(STATUS.server.bind) + "</p>" +
     "<p class='muted'>The listen port is set via the CLI (-port) and is not stored in the config.</p>";
   m.append(c);
+
+  // Public base URI — the one server-level value bevin can't derive itself.
+  // Every link the system generates for the outside world (the OAuth
+  // redirect, password-reset / notification links as they land) comes from
+  // it, so it lives here, at the server level, not under OAuth.
+  const c2 = document.createElement("div");
+  c2.className = "card";
+  c2.innerHTML = "<h2>Public base URI</h2>";
+  const label = document.createElement("label");
+  label.textContent = "Base URI";
+  c2.append(label);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = STATUS.server.base_uri || "";
+  input.placeholder = "https://bevin.example.com";
+  c2.append(input);
+  c2.append(elP("The PUBLIC address of this instance behind your reverse proxy (https, with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Leave blank only for a local-only setup — it is required while external sign-in (OAuth) is enabled, because the redirect URI is derived from it."));
+  const btn = document.createElement("button");
+  btn.textContent = "Save";
+  btn.onclick = async () => {
+    const v = input.value.trim();
+    btn.disabled = true;
+    try {
+      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: { base_uri: v } }) });
+      await loadStatus();
+      renderServer();
+    } catch (e) {
+      alert("Save failed: " + e.message);
+      btn.disabled = false;
+    }
+  };
+  c2.append(btn);
+  m.append(c2);
 }
 
 function elP(txt) { const p = document.createElement("p"); p.className = "muted"; p.textContent = txt; return p; }

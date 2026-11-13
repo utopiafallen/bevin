@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ const (
 // ConfigVersion is the schema version of server.toml. Bump it when a release
 // changes the schema and add a matching step in migrate() so older configs are
 // upgraded in place on load; Load refuses a config newer than this build.
-const ConfigVersion = 4
+const ConfigVersion = 5
 
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
@@ -37,9 +38,18 @@ const DefaultMaxWorkspaceSize = int64(5 * 1024 * 1024 * 1024)
 
 // ServerConfig is the admin-tier configuration (server.toml).
 type ServerConfig struct {
-	Version          int        `toml:"version"`
-	DataDir          string     `toml:"data_dir"`
-	Bind             string     `toml:"bind"`
+	Version int    `toml:"version"`
+	DataDir string `toml:"data_dir"`
+	Bind    string `toml:"bind"`
+	// BaseURI is the server's PUBLIC base (scheme + host[:port] + optional
+	// subpath — it sits behind the reverse proxy's TLS, so https). This is
+	// the one address the system can't derive itself, so the admin sets it;
+	// every link the system generates for the outside world is derived from
+	// it (OAuth redirect via OAuthRedirectURI, and password-reset /
+	// notification / share links via PublicURL as they land). Optional:
+	// blank is fine for a local-only setup, but required when OAuth is
+	// enabled (Validate enforces it).
+	BaseURI          string     `toml:"base_uri" json:"base_uri"`
 	Logging          Logging    `toml:"logging"`
 	Auth             Auth       `toml:"auth"`
 	Models           []Model    `toml:"models"`
@@ -48,10 +58,27 @@ type ServerConfig struct {
 	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
 	Email            Email      `toml:"email" json:"email"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
-	// legacyOAuthRedirect carries the pre-v4 OAuth redirect_uri through
-	// migration (unexported: never persisted, never JSON'd). Load captures it
-	// from the raw file before migrate() turns it into BaseURI.
+	// Pre-v5 OAuth legacy values, captured by Load from the raw file before
+	// migrate() folds them into BaseURI (unexported: never persisted).
+	// v3 stored an admin-entered [auth.oauth] redirect_uri; v4 stored
+	// [auth.oauth] base_uri.
 	legacyOAuthRedirect string
+	legacyOAuthBase     string
+	// pendingBase carries the recovered base through the v3->v4->v5 chain.
+	pendingBase string
+}
+
+// PublicURL derives an absolute public link for a server-relative path
+// ("/password-reset", "/share/x") from the public base: trailing slashes on
+// the base are trimmed, the path is appended verbatim (callers pass paths
+// with a leading slash). Blank base -> blank (the caller decides what to do
+// — typically "no link can be generated").
+func (c *ServerConfig) PublicURL(path string) string {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURI), "/")
+	if base == "" {
+		return ""
+	}
+	return base + path
 }
 
 type Logging struct {
@@ -80,28 +107,19 @@ type OAuth struct {
 	TokenURL     string `toml:"token_url" json:"token_url"`
 	UserinfoURL  string `toml:"userinfo_url" json:"userinfo_url"`
 	Scopes       string `toml:"scopes" json:"scopes"` // default "openid profile email"
-	// BaseURI is the server's PUBLIC base (scheme + host[:port] + optional
-	// subpath — it sits behind the reverse proxy's TLS, so https). The
-	// redirect URI is DERIVED from it (see RedirectURI): bevin knows its own
-	// callback route, the admin only supplies the base.
-	BaseURI string `toml:"base_uri" json:"base_uri"`
 }
 
 // OAuthCallbackPath is the route the OAuth callback lands on.
 const OAuthCallbackPath = "/auth/oauth/callback"
 
-// RedirectURI derives the OAuth redirect URI from the public base:
-//
-//	https://bevin.example.com[/subpath]  ->  https://bevin.example.com[/subpath]/auth/oauth/callback
-//
-// The admin pastes this into the provider's app registration. Empty base ->
-// empty (the authorize request can't be built; validation requires a base).
-func (o OAuth) RedirectURI() string {
-	base := strings.TrimRight(strings.TrimSpace(o.BaseURI), "/")
-	if base == "" {
-		return ""
-	}
-	return base + OAuthCallbackPath
+// OAuthRedirectURI derives the OAuth redirect URI from the server's public
+// base: base + /auth/oauth/callback. The admin pastes this into the
+// provider's app registration. The base lives at the SERVER level (see
+// ServerConfig.BaseURI) — it is the public address of the whole instance,
+// and the OAuth redirect is just one derived link. Blank base -> blank
+// (an enabled provider with a blank base is rejected by Validate).
+func (c *ServerConfig) OAuthRedirectURI() string {
+	return c.PublicURL(OAuthCallbackPath)
 }
 
 // Model is a main text model in the admin catalog. A model is a provider
@@ -222,20 +240,23 @@ func Load(dir string) (*ServerConfig, error) {
 	if cfg.Version > ConfigVersion {
 		return nil, fmt.Errorf("server.toml version %d is newer than this bevin build (v%d) — upgrade bevin", cfg.Version, ConfigVersion)
 	}
-	// Pre-v4 configs stored an admin-entered OAuth redirect_uri; the v4 struct
-	// derives it from base_uri and no longer has the field, so the unmarshal
-	// above discarded it. Re-read just that value from the raw file for
+	// Pre-v5 OAuth values lived under [auth.oauth] in two shapes (v3: an
+	// admin-entered redirect_uri; v4: a base_uri); the v5 struct keeps the
+	// base at the server level and drops the fields, so the unmarshal above
+	// discarded them. Re-read just those keys from the raw file for
 	// migrate() to fold into BaseURI.
-	if cfg.Version < 4 {
+	if cfg.Version < 5 {
 		var legacy struct {
 			Auth struct {
 				OAuth struct {
 					RedirectURI string `toml:"redirect_uri"`
+					BaseURI     string `toml:"base_uri"`
 				} `toml:"oauth"`
 			} `toml:"auth"`
 		}
 		if err := toml.Unmarshal(b, &legacy); err == nil {
 			cfg.legacyOAuthRedirect = legacy.Auth.OAuth.RedirectURI
+			cfg.legacyOAuthBase = legacy.Auth.OAuth.BaseURI
 		}
 	}
 	if err := migrate(&cfg); err != nil {
@@ -279,14 +300,26 @@ func migrate(c *ServerConfig) error {
 			c.Version = 3
 		case 3:
 			// v3 -> v4: the OAuth redirect_uri (admin-entered) became a value
-			// DERIVED from the public base_uri — bevin knows its own callback
+			// derived from the public base — bevin knows its own callback
 			// route, so only the base is configured. Recover the base from the
-			// legacy redirect when it ends in the callback path; otherwise
-			// leave base_uri empty for the admin to re-enter (users panel).
+			// legacy redirect when it ends in the callback path; a
+			// non-decomposable legacy value leaves the base empty for the
+			// admin to re-enter. (The base still lives under [auth.oauth] in
+			// v4 — the server-level move is the next step.)
 			if legacy := strings.TrimSpace(c.legacyOAuthRedirect); strings.HasSuffix(legacy, OAuthCallbackPath) {
-				c.Auth.OAuth.BaseURI = strings.TrimSuffix(legacy, OAuthCallbackPath)
+				c.pendingBase = strings.TrimSuffix(legacy, OAuthCallbackPath)
 			}
 			c.Version = 4
+		case 4:
+			// v4 -> v5: the OAuth base_uri moved from [auth.oauth] to the
+			// server level (top-level base_uri) — it is the public address of
+			// the whole instance, and every system-generated link (OAuth
+			// redirect, password reset, ...) derives from it.
+			if legacy := strings.TrimSpace(c.legacyOAuthBase); legacy != "" {
+				c.pendingBase = legacy
+			}
+			c.BaseURI = c.pendingBase
+			c.Version = 5
 		default:
 			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
 		}
@@ -333,6 +366,19 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.MaxWorkspaceSize <= 0 {
 		c.MaxWorkspaceSize = DefaultMaxWorkspaceSize
+	}
+	// Public base URI: optional (a local-only setup generates no outside
+	// links) but must be a well-formed absolute http(s) URL when set, and is
+	// REQUIRED when OAuth is enabled (the redirect is derived from it).
+	c.BaseURI = strings.TrimSpace(c.BaseURI)
+	if c.BaseURI != "" {
+		bu, err := url.Parse(c.BaseURI)
+		if err != nil || (bu.Scheme != "http" && bu.Scheme != "https") || bu.Host == "" {
+			return fmt.Errorf("base_uri: must be an absolute http(s) URL, e.g. https://bevin.example.com (got %q)", c.BaseURI)
+		}
+	}
+	if c.Auth.OAuth.Enabled && c.BaseURI == "" {
+		return fmt.Errorf("base_uri: a public base URI is required when OAuth is enabled (the OAuth redirect is derived from it — set it in the wizard's server step or the admin's Server page)")
 	}
 	// Email defaults (applied when the notifier is configured).
 	if c.Email.Enabled {

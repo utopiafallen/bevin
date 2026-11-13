@@ -56,7 +56,7 @@ func (a *App) adminStatus(w http.ResponseWriter, _ *http.Request) {
 		"time":   time.Now().UTC().Format(time.RFC3339),
 		"pools":  pools,
 		"totals": map[string]any{"slots": totalSlots, "busy": busy, "queued": queued},
-		"server": map[string]any{"data_dir": a.dataDir, "bind": a.liveCfg().Bind},
+		"server": map[string]any{"data_dir": a.dataDir, "bind": a.liveCfg().Bind, "base_uri": a.liveCfg().BaseURI},
 	})
 }
 
@@ -167,9 +167,12 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"token_url":    cfg.Auth.OAuth.TokenURL,
 			"userinfo_url": cfg.Auth.OAuth.UserinfoURL,
 			"scopes":       cfg.Auth.OAuth.Scopes,
-			"base_uri":     cfg.Auth.OAuth.BaseURI,
 			// Derived, read-only: what the admin pastes into the provider.
-			"redirect_uri": cfg.Auth.OAuth.RedirectURI(),
+			"redirect_uri": cfg.OAuthRedirectURI(),
+		},
+		// Server-level settings the admin Server page edits.
+		"server": map[string]any{
+			"base_uri": cfg.BaseURI,
 		},
 	})
 }
@@ -185,12 +188,19 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 		Aux    *[]config.AuxModel `json:"aux"`
 		Email  *config.Email      `json:"email"`
 		OAuth  *config.OAuth      `json:"oauth"`
+		Server *struct {
+			BaseURI *string `json:"base_uri"`
+		} `json:"server"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil {
+	var serverBase *string
+	if p.Server != nil {
+		serverBase = p.Server.BaseURI // nil = area present but no key = no change
+	}
+	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && serverBase == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to save"})
 		return
 	}
@@ -204,7 +214,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 			p.OAuth.ClientSecret = cur.Auth.OAuth.ClientSecret // blank = keep the stored one
 		}
 	}
-	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth)
+	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

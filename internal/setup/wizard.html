@@ -94,15 +94,18 @@ let idx = 0;
 // define the same names pointing at their own /admin/api/* endpoints.
 const PROBE_URL = "/setup/probe-model";
 const EMAIL_TEST_URL = "/setup/test-email";
-let S = { admin: {handle:"",display_name:"",password:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", base_uri:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+let S = { admin: {handle:"",display_name:"",password:""}, server: {base_uri:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 // ---- per-step renderers ----
-function renderServer(){ return el("div",{},
+function renderServer(){ const d=el("div",{},
   el("h3",{}, "1. Server"),
   el("p",{}, "Review the server basics (set via CLI flags; not editable here)."),
   field("Data dir", el("span",{class:"kv"},SERVER.dataDir)),
-  field("Bind / port", el("span",{class:"kv"},SERVER.bind + " : " + SERVER.port + " (CLI)"))
-);}
+  field("Bind / port", el("span",{class:"kv"},SERVER.bind + " : " + SERVER.port + " (CLI)")),
+  field("Public base URI", inp("sv_baseuri", S.server.base_uri, "https://bevin.example.com"))
+);
+  d.append(el("p",{class:"small"},"The PUBLIC address of this server behind your reverse proxy (https, with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Bevin generates every outside link from it — the OAuth redirect, and password-reset / notification links as they land. Leave blank only for a local-only setup; it is required when you enable OAuth on step 3."));
+  return d;}
 function renderAdmin(){ const a=S.admin; return el("div",{},
   el("h3",{}, "2. Identity & admin"),
   el("p",{class:"small"},"The admin account is the server's own IdP (no external login). It is the only account that can create users."),
@@ -135,16 +138,15 @@ function renderOAuth(){
     field("Client secret", inp("oa_clientsecret", o.client_secret, "the OAuth app's client secret"))));
   d.append(field("Authorization URL", inp("oa_authurl", o.auth_url, "https://idp.example.com/application/o/authorize/")));
   d.append(field("Token URL", inp("oa_tokenurl", o.token_url, "https://idp.example.com/application/o/token/")));
-  d.append(field("User-info URL", inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/")));
   d.append(el("div",{class:"row"},
     field("Scopes", inp("oa_scopes", o.scopes, "openid profile email")),
-    field("Public base URI", inp("oa_baseuri", o.base_uri, "https://bevin.example.com"))));
+    field("User-info URL", inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/"))));
   const ruOut=inp("oa_redirectderived","",""); ruOut.readOnly=true;
-  const updateDerived=()=>{ ruOut.value=(String(o.base_uri||"").trim().replace(/\/+$/,""))+"/auth/oauth/callback"; };
-  q("#oa_baseuri").addEventListener("input",()=>{ updateDerived(); });
-  updateDerived();
+  const svBase=(S.server.base_uri||"").trim().replace(/\/+$/,"");
+  ruOut.value = svBase ? svBase+"/auth/oauth/callback" : "";
+  ruOut.placeholder = svBase ? "" : "set the public base URI on step 1 (Server)";
   d.append(field("Redirect URI — paste this into the OAuth app registration", ruOut));
-  d.append(el("p",{class:"small"},"Enter this server's PUBLIC address — behind your reverse proxy, so https (with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Bevin knows its own callback route and derives the redirect URI from the base (base + /auth/oauth/callback) — there is nothing else to set here. The provider's user identity is mapped to a bevin handle from its preferred_username (else the email's local part, else the subject)."));
+  d.append(el("p",{class:"small"},"The public base URI (step 1) is where bevin is reachable from the outside — it sits behind your reverse proxy, so https. Bevin knows its own callback route and derives the redirect URI from the base (base + /auth/oauth/callback) — there is nothing else to set here. The provider's user identity is mapped to a bevin handle from its preferred_username (else the email's local part, else the subject)."));
   return d;
 }
 function renderModels(){
@@ -296,12 +298,13 @@ async function api(method, path, body){ const url = path; const opt={method}; if
 async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, sidecars via id-based reads)
+  if(step==="server"){ S.server.base_uri=(q("#sv_baseuri").value||"").trim(); }
   if(step==="admin"){ S.admin.handle=q("#ad_handle").value||q("#ad_handle").placeholder; S.admin.display_name=q("#ad_name").value||q("#ad_name").placeholder; S.admin.password=q("#ad_pw").value; if(q("#ad_pw").value!==q("#ad_pw2").value){msg("Passwords do not match","err");return;} }
   // The OAuth step: gather the inputs + mirror the server's normalization
   // (normalizeOAuth) so the review step shows the effective values. The
   // fields only exist while the step is enabled — gathering is skipped when
   // it's off (the stored draft is kept; a disabled IdP is ignored at runtime).
-  if(step==="oauth" && S.oauth.enabled){ const o=S.oauth; o.name=q("#oa_name").value; o.client_id=q("#oa_clientid").value; o.client_secret=q("#oa_clientsecret").value; o.auth_url=q("#oa_authurl").value; o.token_url=q("#oa_tokenurl").value; o.userinfo_url=q("#oa_userinfourl").value; o.scopes=q("#oa_scopes").value; o.base_uri=q("#oa_baseuri").value; ["name","client_id","client_secret","auth_url","token_url","userinfo_url","scopes","base_uri"].forEach(k=>{ o[k]=String(o[k]||"").trim(); }); if(o.enabled){ if(!o.name) o.name="OAuth"; if(!o.scopes) o.scopes="openid profile email"; } }
+  if(step==="oauth" && S.oauth.enabled){ const o=S.oauth; o.name=q("#oa_name").value; o.client_id=q("#oa_clientid").value; o.client_secret=q("#oa_clientsecret").value; o.auth_url=q("#oa_authurl").value; o.token_url=q("#oa_tokenurl").value; o.userinfo_url=q("#oa_userinfourl").value; o.scopes=q("#oa_scopes").value; ["name","client_id","client_secret","auth_url","token_url","userinfo_url","scopes"].forEach(k=>{ o[k]=String(o[k]||"").trim(); }); if(o.enabled){ if(!o.name) o.name="OAuth"; if(!o.scopes) o.scopes="openid profile email"; } if(!S.server.base_uri){ msg("OAuth needs the public base URI (the redirect is derived from it) — set it on step 1 (Server).","err"); return; } }
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
@@ -320,14 +323,14 @@ async function doNext(){
   // _detecting) so only the saved config crosses the wire.
   const auxPayload = (S.aux||[]).map(m => { const c = JSON.parse(JSON.stringify(m)); for(const k of Object.keys(c)) if(k.startsWith("_")) delete c[k]; return c; });
   try{
-    await api("POST","/setup/advance",{step, admin:S.admin, oauth:S.oauth, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
+    await api("POST","/setup/advance",{step, admin:S.admin, server:S.server, oauth:S.oauth, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
     msg("");
     if(step==="review") return;
     idx=Math.min(idx+1, STEPS.length-1); render();
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:"",base_uri:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},server:{base_uri:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
   msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go

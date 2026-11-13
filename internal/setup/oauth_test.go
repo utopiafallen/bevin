@@ -23,7 +23,7 @@ func TestNormalizeOAuth(t *testing.T) {
 	full := config.OAuth{
 		Enabled: true, ClientID: "app-1", ClientSecret: "s3cret",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
-		UserinfoURL: "https://idp.example.com/o/user/", BaseURI: "https://bevin.example.com",
+		UserinfoURL: "https://idp.example.com/o/user/",
 	}
 	n, err := normalizeOAuth(full)
 	if err != nil {
@@ -46,7 +46,6 @@ func TestNormalizeOAuth(t *testing.T) {
 	missing(func(o *config.OAuth) { o.AuthURL = "" })
 	missing(func(o *config.OAuth) { o.TokenURL = "" })
 	missing(func(o *config.OAuth) { o.UserinfoURL = "" })
-	missing(func(o *config.OAuth) { o.BaseURI = "" })
 
 	// Non-http(s) / relative URLs are rejected.
 	bad := full
@@ -123,9 +122,8 @@ func TestCommitEditOAuth(t *testing.T) {
 		Enabled: true, Name: "authentik", ClientID: "app-1", ClientSecret: "s3cret",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
 		UserinfoURL: "https://idp.example.com/o/user/", Scopes: "openid profile email",
-		BaseURI: "https://bevin.example.com",
 	}
-	got, err := m.CommitEdit(nil, nil, nil, &oauth)
+	got, err := m.CommitEdit(nil, nil, nil, &oauth, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +144,7 @@ func TestCommitEditOAuth(t *testing.T) {
 	// Disabling is a normal save.
 	off := oauth
 	off.Enabled = false
-	got, err = m.CommitEdit(nil, nil, nil, &off)
+	got, err = m.CommitEdit(nil, nil, nil, &off, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +155,7 @@ func TestCommitEditOAuth(t *testing.T) {
 	// An invalid enabled oauth is rejected (and does not clobber the saved one).
 	bad := oauth
 	bad.TokenURL = "not a url"
-	if _, err := m.CommitEdit(nil, nil, nil, &bad); err == nil {
+	if _, err := m.CommitEdit(nil, nil, nil, &bad, nil); err == nil {
 		t.Fatal("expected an error for an invalid oauth URL")
 	}
 	after, _ := config.Load(m.dataDir)
@@ -173,7 +171,20 @@ func TestSetOAuthStep(t *testing.T) {
 	if err := m.SetOAuth(config.OAuth{}); err != nil {
 		t.Fatalf("disabled oauth step rejected: %v", err)
 	}
-	// Enabled with a gap is rejected.
+	// Enabled WITHOUT the server step's public base is rejected (the
+	// redirect is derived from it) — even a complete oauth config.
+	complete := config.OAuth{
+		Enabled: true, Name: "authentik", ClientID: "app-1",
+		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
+		UserinfoURL: "https://idp.example.com/o/user/",
+	}
+	if err := m.SetOAuth(complete); err == nil {
+		t.Fatal("expected an error for enabled oauth without the public base URI")
+	}
+	// With the base set, enabled with a gap is still rejected.
+	if err := m.SetServer(ServerAnswers{BaseURI: "https://bevin.example.com"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.SetOAuth(config.OAuth{Enabled: true, ClientID: "app"}); err == nil {
 		t.Fatal("expected an error for an incomplete enabled oauth")
 	}
@@ -181,7 +192,7 @@ func TestSetOAuthStep(t *testing.T) {
 	full := config.OAuth{
 		Enabled: true, Name: "authentik", ClientID: "app-1",
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
-		UserinfoURL: "https://idp.example.com/o/user/", BaseURI: "https://bevin.example.com",
+		UserinfoURL: "https://idp.example.com/o/user/",
 	}
 	if err := m.SetOAuth(full); err != nil {
 		t.Fatal(err)

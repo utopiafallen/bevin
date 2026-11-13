@@ -76,13 +76,13 @@ func oauthApp(t *testing.T, claims map[string]any) (*App, *store.ServerStore, st
 	prov := auth.NewInternalProvider(srv, time.Hour)
 	cfg := &config.ServerConfig{
 		DataDir: dir,
+		BaseURI: "https://bevin.example.com",
 		Auth: config.Auth{
 			SessionTTLSeconds: 3600,
 			OAuth: config.OAuth{
 				Enabled: true, Name: "TestIDP", ClientID: "app-1", ClientSecret: "cs-1",
 				AuthURL: provider.URL + "/authorize", TokenURL: provider.URL + "/token",
 				UserinfoURL: provider.URL + "/userinfo", Scopes: "openid profile email",
-				BaseURI: "https://bevin.example.com",
 			},
 		},
 	}
@@ -470,20 +470,37 @@ func TestAdminUsersAPI(t *testing.T) {
 func TestAdminConfigOAuth(t *testing.T) {
 	a, _ := configApp(t)
 
-	// Save the oauth area (secret set).
+	// The public base URI lives at the SERVER level (admin Server page) — the
+	// OAuth area no longer carries it. Set it first (an enabled OAuth needs
+	// it to derive the redirect).
 	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{
+		"server": map[string]any{"base_uri": "https://bevin.example.com"},
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("server save code = %d body=%s", w.Code, w.Body.String())
+	}
+	onDisk, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.BaseURI != "https://bevin.example.com" {
+		t.Fatalf("server save did not persist base_uri: %q", onDisk.BaseURI)
+	}
+
+	// Save the oauth area (secret set, no base — the base is server-level).
+	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{
 		"oauth": map[string]any{
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "cs-1",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("oauth save code = %d body=%s", w.Code, w.Body.String())
 	}
-	onDisk, err := config.Load(a.dataDir)
+	onDisk, err = config.Load(a.dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,11 +508,13 @@ func TestAdminConfigOAuth(t *testing.T) {
 		t.Fatalf("saved oauth = %+v", onDisk.Auth.OAuth)
 	}
 
-	// Read: masked (has_secret, never the secret itself).
+	// Read: masked (has_secret, never the secret itself) + the server area +
+	// the derived redirect (base + callback path, from the SERVER base).
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/config", nil))
 	var got struct {
-		OAuth map[string]any `json:"oauth"`
+		OAuth  map[string]any `json:"oauth"`
+		Server map[string]any `json:"server"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if got.OAuth["has_secret"] != true {
@@ -507,6 +526,23 @@ func TestAdminConfigOAuth(t *testing.T) {
 	if got.OAuth["client_id"] != "app-1" {
 		t.Fatalf("oauth read client_id = %v", got.OAuth["client_id"])
 	}
+	if got.OAuth["redirect_uri"] != "https://bevin.example.com/auth/oauth/callback" {
+		t.Fatalf("oauth read derived redirect = %v", got.OAuth["redirect_uri"])
+	}
+	if got.Server["base_uri"] != "https://bevin.example.com" {
+		t.Fatalf("server read base_uri = %v", got.Server["base_uri"])
+	}
+
+	// The status view carries the base (the admin Server page renders it).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/status", nil))
+	var st struct {
+		Server map[string]any `json:"server"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &st)
+	if st.Server["base_uri"] != "https://bevin.example.com" {
+		t.Fatalf("status base_uri = %v", st.Server["base_uri"])
+	}
 
 	// Save again with a BLANK secret: the stored one survives.
 	w = httptest.NewRecorder()
@@ -515,7 +551,6 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {
@@ -533,7 +568,6 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": true, "name": "TestIDP", "client_id": "app-1", "client_secret": "cs-2",
 			"auth_url": "not a url", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusBadRequest {
@@ -544,6 +578,20 @@ func TestAdminConfigOAuth(t *testing.T) {
 		t.Fatalf("a rejected save must not clobber the saved config: %+v", after.Auth.OAuth)
 	}
 
+	// Clearing the base while OAuth is ENABLED is rejected (the redirect
+	// would have nothing to derive from) and does not clobber the base.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{
+		"server": map[string]any{"base_uri": ""},
+	}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("clearing the base with oauth enabled code = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
+	after, _ = config.Load(a.dataDir)
+	if after.BaseURI != "https://bevin.example.com" {
+		t.Fatalf("a rejected base save must not clobber the saved one: %q", after.BaseURI)
+	}
+
 	// Disabling is a normal save.
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{
@@ -551,7 +599,6 @@ func TestAdminConfigOAuth(t *testing.T) {
 			"enabled": false, "name": "TestIDP", "client_id": "app-1", "client_secret": "",
 			"auth_url": "https://idp.example.com/o/authorize/", "token_url": "https://idp.example.com/o/token/",
 			"userinfo_url": "https://idp.example.com/o/user/", "scopes": "openid profile email",
-			"base_uri": "https://bevin.example.com",
 		},
 	}))
 	if w.Code != http.StatusOK {
@@ -560,5 +607,18 @@ func TestAdminConfigOAuth(t *testing.T) {
 	after, _ = config.Load(a.dataDir)
 	if after.Auth.OAuth.Enabled {
 		t.Fatal("oauth should be disabled after the save")
+	}
+
+	// With OAuth off, clearing the base is a normal save (local-only setup).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{
+		"server": map[string]any{"base_uri": ""},
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear base with oauth off code = %d body=%s", w.Code, w.Body.String())
+	}
+	after, _ = config.Load(a.dataDir)
+	if after.BaseURI != "" {
+		t.Fatalf("base should be cleared, got %q", after.BaseURI)
 	}
 }

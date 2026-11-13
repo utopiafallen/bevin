@@ -47,8 +47,8 @@ func TestWizardTemplateRenders(t *testing.T) {
 }
 
 type fakeSidecars struct {
-	probeInstalled bool
-	installed      map[string]bool // kind → installed (the probe reports healthy for these)
+	probeInstalled   bool
+	installed        map[string]bool // kind → installed (the probe reports healthy for these)
 	probes, installs int
 }
 
@@ -83,6 +83,7 @@ func newTestSetup(t *testing.T) (*Manager, *fakeSidecars, string) {
 }
 
 func validAnswers(m *Manager) {
+	_ = m.SetServer(ServerAnswers{BaseURI: "https://bevin.example.com"})
 	_ = m.SetAdmin(AdminAnswers{Handle: "admin", DisplayName: "Admin", Password: "adminpass1"})
 	_ = m.SetModels([]config.Model{{
 		ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "test",
@@ -296,7 +297,7 @@ func TestCommitEdit(t *testing.T) {
 		{ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 0, Enabled: true}, // slots 0 -> clamped to 1
 		{ID: "m2", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o-mini", DisplayName: "GPT-4o mini", MaxContext: 128000, Slots: 2, Enabled: true},
 	}
-	got, err := m.CommitEdit(&newModels, nil, nil, nil)
+	got, err := m.CommitEdit(&newModels, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +329,7 @@ func TestCommitEdit(t *testing.T) {
 	}
 	// A save with NO areas is not a valid save (the caller rejects it), but an
 	// all-nil CommitEdit is a no-op write of the current config.
-	same, err := m.CommitEdit(nil, nil, nil, nil)
+	same, err := m.CommitEdit(nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +338,7 @@ func TestCommitEdit(t *testing.T) {
 	}
 	// An invalid model catalog is rejected and does NOT clobber the saved one.
 	bad := []config.Model{{ID: "mX", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "x", Enabled: false}} // none enabled
-	if _, err := m.CommitEdit(&bad, nil, nil, nil); err == nil {
+	if _, err := m.CommitEdit(&bad, nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error for a model catalog with no enabled model")
 	}
 	after, err := config.Load(m.dataDir)
@@ -622,5 +623,31 @@ func TestSetupHandler(t *testing.T) {
 	}
 	if !foundSession {
 		t.Fatalf("finalize should set the admin session cookie, got Set-Cookie=%v", w.Header().Values("Set-Cookie"))
+	}
+}
+
+// TestSetServer — the server step stores the public base URI: optional,
+// trimmed, and must be an absolute http(s) URL when present.
+func TestSetServer(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	// Blank is accepted (local-only setup).
+	if err := m.SetServer(ServerAnswers{}); err != nil {
+		t.Fatalf("blank base rejected: %v", err)
+	}
+	// A valid base is trimmed + stored.
+	if err := m.SetServer(ServerAnswers{BaseURI: "  https://bevin.example.com/bevin  "}); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Answers().Server.BaseURI; got != "https://bevin.example.com/bevin" {
+		t.Fatalf("stored base = %q", got)
+	}
+	// Malformed values are rejected (and do not clobber the stored one).
+	for _, bad := range []string{"bevin.example.com", "/bevin", "ftp://x/", "not a url"} {
+		if err := m.SetServer(ServerAnswers{BaseURI: bad}); err == nil {
+			t.Errorf("SetServer(%q) accepted", bad)
+		}
+	}
+	if got := m.Answers().Server.BaseURI; got != "https://bevin.example.com/bevin" {
+		t.Fatalf("a rejected base clobbered the stored one: %q", got)
 	}
 }

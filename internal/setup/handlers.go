@@ -130,9 +130,9 @@ func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"setup":   h.mgr.IsSetup(),
-		"answers": h.mgr.Answers(),
-		"steps":   stepOrder,
+		"setup":    h.mgr.IsSetup(),
+		"answers":  h.mgr.Answers(),
+		"steps":    stepOrder,
 		"data_dir": h.mgr.dataDir,
 	})
 }
@@ -140,6 +140,7 @@ func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
 type advancePayload struct {
 	Step     string            `json:"step"`
 	Admin    AdminAnswers      `json:"admin"`
+	Server   ServerAnswers     `json:"server"`
 	OAuth    config.OAuth      `json:"oauth"`
 	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
@@ -163,7 +164,7 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch p.Step {
 	case "server":
-		// review-only; no state
+		err = h.mgr.SetServer(p.Server)
 	case "admin":
 		err = h.mgr.SetAdmin(p.Admin)
 	case "oauth":
@@ -360,7 +361,6 @@ func (h *Handler) testEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	handleTestEmail(w, r, h.mgr)
 }
-
 
 // sidecarsStart (setup mode) starts the sidecar provisioning run (idempotent)
 // + returns the current status. The wizard calls this when the admin lands on

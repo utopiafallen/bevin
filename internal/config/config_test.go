@@ -257,12 +257,17 @@ model_id = "v"
 	}
 }
 
-// TestOAuthBaseURIMigration — v3 stored the admin-entered OAuth redirect_uri;
-// v4 derives the redirect from the public base_uri. A v3 file is migrated on
-// load: the base is recovered from the legacy redirect when it ends in the
-// callback path, otherwise base_uri is left empty for the admin to re-enter.
-func TestOAuthBaseURIMigration(t *testing.T) {
-	dir := t.TempDir()
+// TestBaseURIMigration — the public base URI has moved through two schema
+// versions: v3 stored an admin-entered [auth.oauth] redirect_uri, v4 stored
+// [auth.oauth] base_uri, v5 keeps it at the server level (top-level
+// base_uri). A v3 file migrates v3->v4->v5 in one load: the base is
+// recovered from the legacy redirect when it ends in the callback path.
+// A v4 file migrates v4->v5: the base lifts out of [auth.oauth] as-is.
+func TestBaseURIMigration(t *testing.T) {
+	const base = "https://bevin.example.com"
+	const redirect = base + "/auth/oauth/callback"
+
+	// v3: the base is recovered from the legacy redirect_uri.
 	v3 := `version = 3
 
 [auth]
@@ -278,7 +283,7 @@ auth_url = "https://idp.example.com/o/authorize/"
 token_url = "https://idp.example.com/o/token/"
 userinfo_url = "https://idp.example.com/o/user/"
 scopes = "openid profile email"
-redirect_uri = "https://bevin.example.com/auth/oauth/callback"
+redirect_uri = "` + redirect + `"
 
 [[models]]
 id = "m1"
@@ -290,6 +295,7 @@ max_context = 200000
 slots = 2
 enabled = true
 `
+	dir := t.TempDir()
 	if err := os.WriteFile(Path(dir), []byte(v3), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -300,54 +306,115 @@ enabled = true
 	if got.Version != ConfigVersion {
 		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
 	}
-	if got.Auth.OAuth.BaseURI != "https://bevin.example.com" {
-		t.Fatalf("migrated base_uri = %q, want https://bevin.example.com", got.Auth.OAuth.BaseURI)
+	if got.BaseURI != base {
+		t.Fatalf("migrated base_uri = %q, want %s", got.BaseURI, base)
 	}
-	if got.Auth.OAuth.RedirectURI() != "https://bevin.example.com/auth/oauth/callback" {
-		t.Fatalf("derived redirect = %q", got.Auth.OAuth.RedirectURI())
+	if got.OAuthRedirectURI() != redirect {
+		t.Fatalf("derived redirect = %q, want %s", got.OAuthRedirectURI(), redirect)
 	}
-	// Saving the migrated config persists base_uri (and no redirect_uri key).
+	// Saving the migrated config keeps the base at the server level and
+	// drops both legacy keys.
 	if err := Save(dir, got); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(Path(dir))
-	if !strings.Contains(string(b), "base_uri = \"https://bevin.example.com\"") {
-		t.Fatalf("saved config missing base_uri:\n%s", b)
+	if !strings.Contains(string(b), "base_uri = \""+base+"\"") {
+		t.Fatalf("saved config missing top-level base_uri:\n%s", b)
 	}
 	if strings.Contains(string(b), "redirect_uri") {
-		t.Fatalf("saved config must not carry the legacy key:\n%s", b)
+		t.Fatalf("saved config must not carry the legacy redirect key:\n%s", b)
 	}
-	// A v3 redirect that doesn't end in the callback path is not
-	// decomposable — base_uri stays empty for the admin to re-enter.
-	v3b := strings.Replace(v3,
-		"redirect_uri = \"https://bevin.example.com/auth/oauth/callback\"",
-		"redirect_uri = \"https://somewhere.else/elsewhere\"", 1)
-	if err := os.WriteFile(Path(dir), []byte(v3b), 0o600); err != nil {
+	if strings.Count(string(b), "base_uri") != 1 {
+		t.Fatalf("saved config must carry exactly one base_uri (top-level):\n%s", b)
+	}
+
+	// v4: the base lifts out of [auth.oauth] as-is.
+	v4 := strings.Replace(v3, "version = 3", "version = 4", 1)
+	v4 = strings.Replace(v4, "redirect_uri = \""+redirect+"\"", "base_uri = \""+base+"\"", 1)
+	if err := os.WriteFile(Path(dir), []byte(v4), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err = Load(dir)
 	if err != nil {
-		t.Fatalf("load v3 config (odd redirect): %v", err)
+		t.Fatalf("load v4 config: %v", err)
 	}
-	if got.Auth.OAuth.BaseURI != "" {
-		t.Fatalf("unreconstructable base_uri = %q, want empty", got.Auth.OAuth.BaseURI)
+	if got.BaseURI != base || got.OAuthRedirectURI() != redirect {
+		t.Fatalf("v4 migration: base = %q, redirect = %q", got.BaseURI, got.OAuthRedirectURI())
+	}
+
+	// A v3 redirect that doesn't end in the callback path is not
+	// decomposable — with OAuth enabled the load now FAILS validation
+	// (enabled OAuth needs a base) instead of silently starting with no
+	// redirect; the admin fixes it by setting the base.
+	v3b := strings.Replace(v3, "redirect_uri = \""+redirect+"\"",
+		"redirect_uri = \"https://somewhere.else/elsewhere\"", 1)
+	if err := os.WriteFile(Path(dir), []byte(v3b), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Fatal("expected a validation error for an unreconstructable base with OAuth enabled")
 	}
 }
 
-// TestOAuthRedirectDerivation — the redirect URI is always the public base +
-// the callback path (trailing slashes normalized, subpaths preserved).
-func TestOAuthRedirectDerivation(t *testing.T) {
-	cases := []struct{ base, want string }{
-		{"https://bevin.example.com", "https://bevin.example.com/auth/oauth/callback"},
-		{"https://bevin.example.com/", "https://bevin.example.com/auth/oauth/callback"},
-		{"https://bevin.example.com:8443", "https://bevin.example.com:8443/auth/oauth/callback"},
-		{"https://host.example/bevin", "https://host.example/bevin/auth/oauth/callback"},
-		{"https://host.example/bevin///", "https://host.example/bevin/auth/oauth/callback"},
-		{"", ""},
+// TestPublicURLDerivation — every system-generated link is the public base +
+// a server-relative path (trailing slashes normalized, subpaths preserved);
+// a blank base derives nothing.
+func TestPublicURLDerivation(t *testing.T) {
+	cases := []struct{ base, path, want string }{
+		{"https://bevin.example.com", "/auth/oauth/callback", "https://bevin.example.com/auth/oauth/callback"},
+		{"https://bevin.example.com/", "/auth/oauth/callback", "https://bevin.example.com/auth/oauth/callback"},
+		{"https://bevin.example.com:8443", "/auth/oauth/callback", "https://bevin.example.com:8443/auth/oauth/callback"},
+		{"https://host.example/bevin", "/auth/oauth/callback", "https://host.example/bevin/auth/oauth/callback"},
+		{"https://host.example/bevin///", "/auth/oauth/callback", "https://host.example/bevin/auth/oauth/callback"},
+		{"https://bevin.example.com", "/password-reset?h=alice", "https://bevin.example.com/password-reset?h=alice"},
+		{"", "/auth/oauth/callback", ""},
 	}
 	for _, c := range cases {
-		if got := (OAuth{BaseURI: c.base}).RedirectURI(); got != c.want {
-			t.Errorf("RedirectURI(%q) = %q, want %q", c.base, got, c.want)
+		cfg := &ServerConfig{BaseURI: c.base}
+		if got := cfg.PublicURL(c.path); got != c.want {
+			t.Errorf("PublicURL(%q) with base %q = %q, want %q", c.path, c.base, got, c.want)
+		}
+	}
+	// The OAuth redirect is exactly PublicURL(the callback path).
+	cfg := &ServerConfig{BaseURI: "https://bevin.example.com"}
+	if got, want := cfg.OAuthRedirectURI(), "https://bevin.example.com/auth/oauth/callback"; got != want {
+		t.Errorf("OAuthRedirectURI = %q, want %q", got, want)
+	}
+}
+
+// TestBaseURIValidation — an optional base must be a well-formed absolute
+// http(s) URL when set, and is REQUIRED when OAuth is enabled.
+func TestBaseURIValidation(t *testing.T) {
+	mk := func(base string, oauthEnabled bool) *ServerConfig {
+		o := OAuth{}
+		if oauthEnabled {
+			o = OAuth{
+				Enabled: true, Name: "TestIDP", ClientID: "app-1",
+				AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
+				UserinfoURL: "https://idp.example.com/o/user/", Scopes: "openid profile email",
+			}
+		}
+		return &ServerConfig{
+			BaseURI: base,
+			Auth:    Auth{Mode: "internal", SessionSecret: "s", OAuth: o},
+			Models:  []Model{testModel()},
+		}
+	}
+	if err := mk("https://bevin.example.com", false).Validate(); err != nil {
+		t.Fatalf("valid base, oauth off: %v", err)
+	}
+	if err := mk("", false).Validate(); err != nil {
+		t.Fatalf("blank base, oauth off (local-only): %v", err)
+	}
+	if err := mk("https://bevin.example.com", true).Validate(); err != nil {
+		t.Fatalf("valid base, oauth on: %v", err)
+	}
+	if err := mk("", true).Validate(); err == nil {
+		t.Fatal("oauth enabled without a base must be rejected")
+	}
+	for _, bad := range []string{"bevin.example.com", "/bevin", "ftp://x/", "not a url"} {
+		if err := mk(bad, false).Validate(); err == nil {
+			t.Errorf("malformed base %q accepted", bad)
 		}
 	}
 }

@@ -31,12 +31,21 @@ type AdminAnswers struct {
 // Answers is the full set of wizard inputs (steps that are not review-only).
 type Answers struct {
 	Admin    AdminAnswers      `json:"admin"`
+	Server   ServerAnswers     `json:"server"`
 	OAuth    config.OAuth      `json:"oauth"`
 	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
 	Embedder config.Embedder   `json:"embedder"`
 	Sidecars config.Sidecars   `json:"sidecars"`
 	Email    config.Email      `json:"email"`
+}
+
+// ServerAnswers is the wizard's server step: the public base URI (the one
+// server-level value the admin must supply — bevin cannot know its own
+// public address behind the reverse proxy). Every system-generated link
+// (the OAuth redirect, password-reset emails, ...) derives from it.
+type ServerAnswers struct {
+	BaseURI string `json:"base_uri"`
 }
 
 // handleRe is a conservative handle pattern (lowercase alnum + - _ .).
@@ -220,7 +229,7 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 // derived embedder are preserved as-is and a model/email edit is a fast,
 // side-effect-free write. The caller hot-reloads the running agent with the
 // returned config (there is no in-memory wizard state involved).
-func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth) (*config.ServerConfig, error) {
+func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth, serverBase *string) (*config.ServerConfig, error) {
 	cfg, err := config.Load(m.dataDir)
 	if err != nil {
 		return nil, err
@@ -247,6 +256,9 @@ func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, ema
 			return nil, err
 		}
 		cfg.Auth.OAuth = o
+	}
+	if serverBase != nil {
+		cfg.BaseURI = strings.TrimSpace(*serverBase)
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -329,11 +341,39 @@ func (m *Manager) SetEmail(e config.Email) error {
 	return nil
 }
 
-// SetOAuth stores + validates the optional external-IdP (OAuth) step.
+// SetServer stores + validates the server step (the public base URI).
+func (m *Manager) SetServer(s ServerAnswers) error {
+	s.BaseURI = strings.TrimSpace(s.BaseURI)
+	// Optional (a local-only setup generates no outside links), but when
+	// present it must be an absolute http(s) URL — the same shape
+	// config.Validate enforces, checked early for step-level feedback.
+	if s.BaseURI != "" {
+		bu, err := url.Parse(s.BaseURI)
+		if err != nil || (bu.Scheme != "http" && bu.Scheme != "https") || bu.Host == "" {
+			return fmt.Errorf("server: base_uri must be an absolute http(s) URL, e.g. https://bevin.example.com (got %q)", s.BaseURI)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.Answers.Server = s
+	return nil
+}
+
+// SetOAuth stores + validates the optional external-IdP (OAuth) step. When
+// enabled it also requires the server step's public base URI (the redirect
+// is derived from it) — a gap there is a step error, not a silent config.
 func (m *Manager) SetOAuth(o config.OAuth) error {
 	o, err := normalizeOAuth(o)
 	if err != nil {
 		return err
+	}
+	if o.Enabled {
+		m.mu.Lock()
+		base := strings.TrimSpace(m.state.Answers.Server.BaseURI)
+		m.mu.Unlock()
+		if base == "" {
+			return errors.New("oauth: the public base URI is required when OAuth is enabled (the redirect is derived from it) — set it on the server step")
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,7 +393,6 @@ func normalizeOAuth(o config.OAuth) (config.OAuth, error) {
 	o.TokenURL = strings.TrimSpace(o.TokenURL)
 	o.UserinfoURL = strings.TrimSpace(o.UserinfoURL)
 	o.Scopes = strings.TrimSpace(o.Scopes)
-	o.BaseURI = strings.TrimSpace(o.BaseURI)
 	if !o.Enabled {
 		return o, nil
 	}
@@ -369,7 +408,6 @@ func normalizeOAuth(o config.OAuth) (config.OAuth, error) {
 		{"authorization (auth) URL", o.AuthURL},
 		{"token URL", o.TokenURL},
 		{"user-info URL", o.UserinfoURL},
-		{"public base URI", o.BaseURI},
 	} {
 		if u.val == "" {
 			return o, fmt.Errorf("oauth: %s is required when OAuth is enabled", u.name)
@@ -451,6 +489,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	cfg := &config.ServerConfig{
 		DataDir:          m.dataDir,
 		Bind:             m.bind,
+		BaseURI:          a.Server.BaseURI, // the server step's public base (optional)
 		Logging:          config.Logging{Level: "info"},
 		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds, OAuth: oauth},
 		Models:           a.Models,

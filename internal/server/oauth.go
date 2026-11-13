@@ -92,8 +92,8 @@ func (a *App) oauthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "external sign-in is not enabled", http.StatusNotFound)
 		return
 	}
-	if o.RedirectURI() == "" {
-		http.Error(w, "external sign-in is misconfigured — set the public base URI in the users panel", http.StatusMisdirectedRequest)
+	if a.liveCfg().OAuthRedirectURI() == "" {
+		http.Error(w, "external sign-in is misconfigured — set the public base URI on the Server page", http.StatusMisdirectedRequest)
 		return
 	}
 	state := a.issueOAuthState()
@@ -113,7 +113,7 @@ func (a *App) oauthLogin(w http.ResponseWriter, r *http.Request) {
 	q := u.Query()
 	q.Set("response_type", "code")
 	q.Set("client_id", o.ClientID)
-	q.Set("redirect_uri", o.RedirectURI())
+	q.Set("redirect_uri", a.liveCfg().OAuthRedirectURI())
 	if o.Scopes != "" {
 		q.Set("scope", o.Scopes)
 	}
@@ -158,7 +158,7 @@ func (a *App) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		clientSecret: o.ClientSecret,
 		tokenURL:     o.TokenURL,
 		userinfoURL:  o.UserinfoURL,
-		redirectURI:  o.RedirectURI(),
+		redirectURI:  a.liveCfg().OAuthRedirectURI(),
 	}
 	accessToken, err := a.oauthExchangeToken(r.Context(), view, code)
 	if err != nil {
