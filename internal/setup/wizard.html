@@ -227,6 +227,11 @@ function renderModelForm(){
   yesB.addEventListener("click",()=>{ if(locked)return; m.enabled=true; S.formError=null; render(); });
   noB.addEventListener("click",()=>{ if(locked)return; m.enabled=false; S.formError=null; render(); });
   en.append(yesB,noB);
+  // Execution slots — per-model concurrency (scheduling, not a user-visible
+  // knob; the admin dashboard visualizes each model's pool). The min-1 clamp
+  // also lives in the server's config.Validate.
+  const slotsInp = el("input", {id:"mf_slots", type:"number", min:"1", step:"1", value:String(m.slots||1), style:"max-width:6rem"});
+  slotsInp.addEventListener("input", ()=>{ m.slots = slotsInp.value; S.formError=null; });
   halfB.append(
     field("Model", sel),
     // Max context — the help text sits under the label (above the input)
@@ -237,7 +242,11 @@ function renderModelForm(){
     el("div",{class:"row"},
       field("Display name", el("div",{}, disp, dl)),
       field("Enable for users", en)),
-    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent.")
+    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
+    el("div",{},
+      el("label",{},"Execution slots"),
+      el("p",{class:"field-help"},"How many turns of this model may run at the same time (1 = strictly one at a time). Extra concurrent turns wait their turn in a queue."),
+      slotsInp)
   );
   if(m.auto_disabled){ halfB.append(el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.")); }
   halfB.append(
@@ -260,7 +269,7 @@ function renderModelList(){
   if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
   const t=el("table",{class:"model-table"});
   t.append(el("thead",{}, el("tr",{},
-    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
+    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
   const tb=el("tbody",{});
   S.models.forEach((m,i)=>{
     const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
@@ -272,6 +281,7 @@ function renderModelList(){
       el("td",{}, el("span",{class:"kv baseurl", title:m.base_url||""}, m.base_url||"—")),
       el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
       el("td",{}, m.max_context?m.max_context:"auto"),
+      el("td",{}, String(m.slots||1)),
       el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
       el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
       el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
@@ -624,6 +634,11 @@ function saveModel(){
   const mc=parseInt(toSave.max_context,10);
   if(!Number.isFinite(mc) || mc<=0){ S.formError="Max context must be a positive integer (tokens)."; render(); return; }
   toSave.max_context=mc;
+  // Execution slots: a whole number >= 1 (the server clamps to 1 anyway; the
+  // form rejects invalid input so the error shows near the field).
+  const sl=parseInt(toSave.slots,10);
+  if(!Number.isFinite(sl) || sl<1){ S.formError="Execution slots must be a whole number >= 1."; render(); return; }
+  toSave.slots=sl;
   if(!wasEditing){ S.models.push(toSave); } else { const idx=Math.min(S.editingIndex,S.models.length); S.models.splice(idx,0,toSave); }
   resetDraft(); render(); msg(wasEditing?"Model saved.":"Model added.","ok");
 }
@@ -743,6 +758,7 @@ async function doNext(){
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
 async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
+  msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go
   // to the admin dashboard (a real button, not a link into the user UI).
   const body = document.getElementById("body");
@@ -752,9 +768,11 @@ async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("PO
   body.append(el("p", {}, IS_EDIT
     ? (r.reloaded ? "Your changes are saved and the running agent picked them up — no restart needed." : "Your changes are saved to server.toml. The running agent could not pick them up in place (see the server log) — restart bevin to apply them.")
     : "bevin is running in normal mode. The admin account you just created signs in to the admin dashboard."));
-  const b = el("button", {class:"primary", style:"margin-top:1rem"}, IS_EDIT ? "Back to the admin dashboard" : "Go to the admin dashboard");
+  // The button lives in a .btns container — that's where the button styling
+  // (base + .primary) is scoped — so it matches the wizard's design language.
+  const b = el("button", {class:"primary"}, IS_EDIT ? "Back to the admin dashboard" : "Go to the admin dashboard");
   b.onclick = () => { location.href = "/admin"; };
-  body.append(b);
+  body.append(el("div", {class:"btns", style:"margin-top:1rem"}, b));
   document.getElementById("finalize").classList.add("hidden");
   document.getElementById("next").classList.add("hidden");
   document.getElementById("back").classList.add("hidden");
