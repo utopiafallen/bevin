@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -18,12 +19,12 @@ import (
 	"time"
 )
 
-// Release artifact locations — VERIFIED against the live GitHub / HuggingFace
-// release APIs (2026-11-09): Qdrant v1.20.0 (qdrant-x86_64-unknown-linux-gnu.
-// tar.gz), llama.cpp build b12230 (llama-b12230-bin-ubuntu-x64.tar.gz), and the
-// embeddinggemma-2 GGUF from unsloth/embeddinggemma-2-GGUF (Q8_0 text model +
-// mmproj, 512-dim, multimodal text/image/audio/video). If a project renames a
-// release artifact, update this small set and re-verify against the release API.
+// Release artifacts — Qdrant + llama.cpp are resolved at setup time by querying
+// the GitHub releases API for the pinned version's assets + matching by OS/arch
+// + format (robust to an asset rename; the download already needs the network,
+// so this one extra call is not a new failure mode). The versions are pinned
+// (qdrant v1.20.0, llama.cpp build b12230) so the download is reproducible. The
+// embedder (embeddinggemma-2 GGUF) comes from HuggingFace (not a GitHub release).
 const (
 	qdrantVersion = "1.20.0"
 	llamaBuild    = "b12230"
@@ -346,14 +347,18 @@ func installQdrant(ctx context.Context, dataDir string, preferredPort int) (stri
 	}
 	bin := findBinary(dir, "qdrant")
 	if bin == "" {
-		url := qdrantDownloadURL()
+		url, err := qdrantDownloadURL(ctx)
+		if err != nil {
+			return "", fmt.Errorf("qdrant release lookup: %w", err)
+		}
 		if url == "" {
 			return "", fmt.Errorf("no qdrant release known for %s (pass an endpoint in the wizard)", osArch())
 		}
-		if _, err := downloadResumable(ctx, url, filepath.Join(dir, "qdrant-artifact"), KindQdrant, "Qdrant"); err != nil {
+		artifact := filepath.Join(dir, "qdrant-artifact"+filepath.Ext(url))
+		if _, err := downloadResumable(ctx, url, artifact, KindQdrant, "Qdrant"); err != nil {
 			return "", err
 		}
-		if err := extractArtifact(filepath.Join(dir, "qdrant-artifact"), dir); err != nil {
+		if err := extractArtifact(artifact, dir); err != nil {
 			return "", err
 		}
 		bin = findBinary(dir, "qdrant")
@@ -411,11 +416,16 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 	// Binary: launch in place so its $ORIGIN rpath resolves the bundled .so libs.
 	bin := findBinary(dir, "llama-server")
 	if bin == "" {
-		if url := llamaDownloadURL(); url != "" {
-			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "llama-artifact"), KindLlamaServer, "llama-server"); err != nil {
+		url, err := llamaDownloadURL(ctx)
+		if err != nil {
+			return "", fmt.Errorf("llama-server release lookup: %w", err)
+		}
+		if url != "" {
+			artifact := filepath.Join(dir, "llama-artifact"+filepath.Ext(url))
+			if _, err := downloadResumable(ctx, url, artifact, KindLlamaServer, "llama-server"); err != nil {
 				return "", err
 			}
-			if err := extractArtifact(filepath.Join(dir, "llama-artifact"), dir); err != nil {
+			if err := extractArtifact(artifact, dir); err != nil {
 				return "", err
 			}
 			bin = findBinary(dir, "llama-server")
@@ -481,10 +491,11 @@ func installFFmpeg(ctx context.Context, dataDir string) (string, error) {
 	bin := findBinary(dir, "ffmpeg")
 	if bin == "" {
 		if url := ffmpegDownloadURL(); url != "" {
-			if _, err := downloadResumable(ctx, url, filepath.Join(dir, "ffmpeg-artifact"), KindFFmpeg, "ffmpeg"); err != nil {
+			artifact := filepath.Join(dir, "ffmpeg-artifact"+filepath.Ext(url))
+			if _, err := downloadResumable(ctx, url, artifact, KindFFmpeg, "ffmpeg"); err != nil {
 				return "", err
 			}
-			if err := extractArtifact(filepath.Join(dir, "ffmpeg-artifact"), dir); err != nil {
+			if err := extractArtifact(artifact, dir); err != nil {
 				return "", err
 			}
 			bin = findBinary(dir, "ffmpeg")
@@ -565,26 +576,82 @@ func waitForHealthy(ctx context.Context, endpoint, path string) error {
 	return fmt.Errorf("sidecar at %s did not become healthy in time", endpoint)
 }
 
-// ---- download URL builders (the one place to fix if a release renames) ----
+// ---- release artifact resolution (GitHub releases API, robust to a rename) ----
 
-func qdrantDownloadURL() string {
-	switch runtime.GOOS {
-	case "linux": // verified: qdrant-x86_64-unknown-linux-gnu.tar.gz
-		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-x86_64-unknown-linux-gnu.tar.gz", qdrantVersion)
-	case "windows": // asset verified via the release API (7z, gnu toolchain)
-		return fmt.Sprintf("https://github.com/qdrant/qdrant/releases/download/v%s/qdrant-x86_64-pc-windows-gnu.7z", qdrantVersion)
+// githubReleaseAsset queries the GitHub releases API for a release's assets and
+// returns the browser_download_url of the first asset matching `match`. It makes
+// the sidecar download robust to an asset rename (we match by OS/arch + format,
+// not a hardcoded name). The download already needs the network, so this one
+// extra call is not a new failure mode.
+func githubReleaseAsset(ctx context.Context, repo, tag string, match func(string) bool) (string, error) {
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, tag)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", err
 	}
-	return ""
+	req.Header.Set("Accept", "application/vnd.github+json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github releases API %s: status %d", apiURL, resp.StatusCode)
+	}
+	var rel struct {
+		Assets []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", fmt.Errorf("decode github releases API %s: %w", apiURL, err)
+	}
+	for _, a := range rel.Assets {
+		if match(a.Name) {
+			return a.BrowserDownloadURL, nil
+		}
+	}
+	return "", fmt.Errorf("no release asset matching for %s %s", repo, tag)
 }
 
-func llamaDownloadURL() string {
+// qdrantDownloadURL resolves the Qdrant release artifact for this OS/arch by
+// querying the GitHub releases API + matching the asset (x86_64 + OS + format).
+func qdrantDownloadURL(ctx context.Context) (string, error) {
+	var match func(string) bool
 	switch runtime.GOOS {
-	case "linux": // verified: llama-b12230-bin-ubuntu-x64.tar.gz
-		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-ubuntu-x64.tar.gz", llamaBuild, llamaBuild)
-	case "windows": // asset verified via the release API
-		return fmt.Sprintf("https://github.com/ggml-org/llama.cpp/releases/download/%s/llama-%s-bin-win-cpu-x64.zip", llamaBuild, llamaBuild)
+	case "linux":
+		match = func(n string) bool {
+			return strings.Contains(n, "x86_64") && strings.Contains(n, "linux") && strings.HasSuffix(n, ".tar.gz")
+		}
+	case "windows":
+		match = func(n string) bool {
+			return strings.Contains(n, "x86_64") && strings.Contains(n, "windows") && strings.HasSuffix(n, ".zip")
+		}
+	default:
+		return "", nil
 	}
-	return ""
+	return githubReleaseAsset(ctx, "qdrant/qdrant", "v"+qdrantVersion, match)
+}
+
+// llamaDownloadURL resolves the llama.cpp release artifact for this OS/arch by
+// querying the GitHub releases API + matching the asset (x64 + OS + format).
+func llamaDownloadURL(ctx context.Context) (string, error) {
+	var match func(string) bool
+	switch runtime.GOOS {
+	case "linux":
+		match = func(n string) bool {
+			return strings.Contains(n, "ubuntu-x64") && strings.HasSuffix(n, ".tar.gz")
+		}
+	case "windows":
+		match = func(n string) bool {
+			return strings.Contains(n, "win-cpu-x64") && strings.HasSuffix(n, ".zip")
+		}
+	default:
+		return "", nil
+	}
+	return githubReleaseAsset(ctx, "ggml-org/llama.cpp", llamaBuild, match)
 }
 
 func ffmpegDownloadURL() string {
