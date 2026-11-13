@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/setup"
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 // requireAdmin wraps a handler so only an authenticated ADMIN may reach it.
@@ -133,10 +135,10 @@ func (a *App) adminEmailTest(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminConfig is the current server config, the areas the admin config pages
-// edit: models + aux (full config) + email (flat fields, matching the form
-// component's shape; the password is never returned — only whether one is
-// set). Read from disk: disk is the commit of record, so the page always sees
-// the current values (no staleness after a save).
+// edit: models + aux (full config) + email + oauth (both masked: a stored
+// password/secret is never returned — only whether one is set). Read from
+// disk: disk is the commit of record, so the page always sees the current
+// values (no staleness after a save).
 func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.Load(a.dataDir)
 	if err != nil {
@@ -156,25 +158,37 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"from_name":    cfg.Email.FromName,
 			"use_starttls": cfg.Email.UseStartTLS,
 		},
+		"oauth": map[string]any{
+			"enabled":       cfg.Auth.OAuth.Enabled,
+			"name":          cfg.Auth.OAuth.Name,
+			"client_id":     cfg.Auth.OAuth.ClientID,
+			"has_secret":    cfg.Auth.OAuth.ClientSecret != "",
+			"auth_url":      cfg.Auth.OAuth.AuthURL,
+			"token_url":     cfg.Auth.OAuth.TokenURL,
+			"userinfo_url":  cfg.Auth.OAuth.UserinfoURL,
+			"scopes":        cfg.Auth.OAuth.Scopes,
+			"redirect_uri":  cfg.Auth.OAuth.RedirectURI,
+		},
 	})
 }
 
 // adminConfigSave saves a config-area edit from the admin config pages (a
-// subset of {models, aux, email}; a missing key is unchanged) + hot-reloads
-// the running agent so the change applies without a restart. A blank email
-// password keeps the stored one (the UI is never given the stored password to
-// echo back).
+// subset of {models, aux, email, oauth}; a missing key is unchanged) +
+// hot-reloads the running agent so the change applies without a restart. A
+// blank email password / OAuth client secret keeps the stored one (the UI is
+// never given the stored secret to echo back).
 func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		Models *[]config.Model    `json:"models"`
 		Aux    *[]config.AuxModel `json:"aux"`
 		Email  *config.Email      `json:"email"`
+		OAuth  *config.OAuth      `json:"oauth"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if p.Models == nil && p.Aux == nil && p.Email == nil {
+	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to save"})
 		return
 	}
@@ -183,7 +197,12 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 			p.Email.Password = cur.Email.Password // blank = keep the stored one
 		}
 	}
-	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email)
+	if p.OAuth != nil && p.OAuth.ClientSecret == "" {
+		if cur, err := config.Load(a.dataDir); err == nil {
+			p.OAuth.ClientSecret = cur.Auth.OAuth.ClientSecret // blank = keep the stored one
+		}
+	}
+	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -230,4 +249,101 @@ func (a *App) adminEmailPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin-email.html", http.StatusFound)
+}
+
+func (a *App) adminUsersPage(w http.ResponseWriter, r *http.Request) {
+	if role, ok := a.adminGate(r); !ok || role != "admin" {
+		http.Error(w, "admin required", http.StatusForbidden)
+		return
+	}
+	http.Redirect(w, r, "/admin-users.html", http.StatusFound)
+}
+
+// adminUsersList is the full user registry — every account the system knows
+// about, from BOTH IdPs: the server's own (internal handles) and the external
+// one (OAuth, labeled by origin + provider subject).
+func (a *App) adminUsersList(w http.ResponseWriter, r *http.Request) {
+	users, err := a.srv.ListUsers()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+// adminUsersAdd creates an INTERNAL account (the server's own IdP) — separate
+// from any external IdP. Only the admin can create users; the new account
+// always gets the "user" role (there is one admin).
+func (a *App) adminUsersAdd(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Handle      string `json:"handle"`
+		DisplayName string `json:"display_name"`
+		Password    string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	p.Handle = strings.TrimSpace(p.Handle)
+	p.DisplayName = strings.TrimSpace(p.DisplayName)
+	if !setup.ValidHandle(p.Handle) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "handle must be 2-32 chars, lowercase letters/digits, starting with a letter or digit"})
+		return
+	}
+	if p.DisplayName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a display name is required"})
+		return
+	}
+	if len(p.Password) < 8 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "the password must be at least 8 characters"})
+		return
+	}
+	if _, err := a.srv.GetUser(p.Handle); err == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "a user with that handle already exists"})
+		return
+	} else if err != nil && !errors.Is(err, store.ErrUserNotFound) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	u, err := a.prov.CreateUserProvisioned(r.Context(), p.Handle, p.DisplayName, "user", p.Password)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("bevin: admin: created internal user %s (%s)", p.Handle, clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": u})
+}
+
+// adminUsersStatus enables/disables any account (from either IdP). A
+// disabled account can no longer sign in (internal or OAuth) and its live
+// sessions stop working on the next request. The admin cannot change their
+// own status (locking the last admin out is not a recovery path).
+func (a *App) adminUsersStatus(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Handle string `json:"handle"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if p.Status != "active" && p.Status != "disabled" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be active or disabled"})
+		return
+	}
+	selfUser, ok := a.sessionUser(r)
+	if !ok || selfUser.Role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin required"})
+		return
+	}
+	if strings.TrimSpace(p.Handle) == selfUser.Handle {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "you cannot change your own status"})
+		return
+	}
+	if err := a.srv.SetUserStatus(strings.TrimSpace(p.Handle), p.Status); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("bevin: admin: set user %s → %s (%s)", p.Handle, p.Status, clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

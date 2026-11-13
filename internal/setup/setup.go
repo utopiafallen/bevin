@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -29,8 +30,9 @@ type AdminAnswers struct {
 
 // Answers is the full set of wizard inputs (steps that are not review-only).
 type Answers struct {
-	Admin    AdminAnswers     `json:"admin"`
-	Models   []config.Model   `json:"models"`
+	Admin    AdminAnswers      `json:"admin"`
+	OAuth    config.OAuth      `json:"oauth"`
+	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
 	Embedder config.Embedder   `json:"embedder"`
 	Sidecars config.Sidecars   `json:"sidecars"`
@@ -39,6 +41,10 @@ type Answers struct {
 
 // handleRe is a conservative handle pattern (lowercase alnum + - _ .).
 var handleRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,31}$`)
+
+// ValidHandle reports whether s is a valid bevin handle (the same pattern the
+// admin step enforces).
+func ValidHandle(s string) bool { return handleRe.MatchString(s) }
 
 // SetupState is the in-memory wizard state. It is discarded on cancel; nothing
 // is persisted until Finalize.
@@ -214,7 +220,7 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 // derived embedder are preserved as-is and a model/email edit is a fast,
 // side-effect-free write. The caller hot-reloads the running agent with the
 // returned config (there is no in-memory wizard state involved).
-func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email) (*config.ServerConfig, error) {
+func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth) (*config.ServerConfig, error) {
 	cfg, err := config.Load(m.dataDir)
 	if err != nil {
 		return nil, err
@@ -234,6 +240,13 @@ func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, ema
 			return nil, err
 		}
 		cfg.Email = e
+	}
+	if oauth != nil {
+		o, err := normalizeOAuth(*oauth)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Auth.OAuth = o
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -316,6 +329,87 @@ func (m *Manager) SetEmail(e config.Email) error {
 	return nil
 }
 
+// SetOAuth stores + validates the optional external-IdP (OAuth) step.
+func (m *Manager) SetOAuth(o config.OAuth) error {
+	o, err := normalizeOAuth(o)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.Answers.OAuth = o
+	return nil
+}
+
+// normalizeOAuth trims the fields and applies defaults (scopes). When
+// enabled, the endpoint URLs are required + must be absolute http(s) URLs.
+// It is the source of truth for validation (the wizard mirrors the
+// normalization in the client so the review step shows effective values).
+func normalizeOAuth(o config.OAuth) (config.OAuth, error) {
+	o.Name = strings.TrimSpace(o.Name)
+	o.ClientID = strings.TrimSpace(o.ClientID)
+	o.ClientSecret = strings.TrimSpace(o.ClientSecret)
+	o.AuthURL = strings.TrimSpace(o.AuthURL)
+	o.TokenURL = strings.TrimSpace(o.TokenURL)
+	o.UserinfoURL = strings.TrimSpace(o.UserinfoURL)
+	o.Scopes = strings.TrimSpace(o.Scopes)
+	o.RedirectURI = strings.TrimSpace(o.RedirectURI)
+	if !o.Enabled {
+		return o, nil
+	}
+	if o.Name == "" {
+		o.Name = "OAuth"
+	}
+	if o.ClientID == "" {
+		return o, errors.New("oauth: a client ID is required when OAuth is enabled")
+	}
+	for _, u := range []struct {
+		name, val string
+	}{
+		{"authorization (auth) URL", o.AuthURL},
+		{"token URL", o.TokenURL},
+		{"user-info URL", o.UserinfoURL},
+		{"redirect URI", o.RedirectURI},
+	} {
+		if u.val == "" {
+			return o, fmt.Errorf("oauth: %s is required when OAuth is enabled", u.name)
+		}
+		pu, err := url.Parse(u.val)
+		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+			return o, fmt.Errorf("oauth: %s must be an absolute http(s) URL", u.name)
+		}
+	}
+	if o.Scopes == "" {
+		o.Scopes = "openid profile email"
+	}
+	return o, nil
+}
+
+// SanitizeHandle maps arbitrary provider text (a preferred_username, an email
+// local part, a subject) onto a valid bevin handle: lowercase, restricted to
+// [a-z0-9._-], leading non-alphanumeric dropped, max 32 chars. It returns ""
+// when nothing valid remains.
+func SanitizeHandle(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	out = strings.TrimLeft(out, "._-")
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	if len(out) < 2 {
+		return ""
+	}
+	return out
+}
+
 // Finalize performs the deferred commit: validate everything, seed the admin
 // (idempotent), ensure the sidecars (idempotent, forward-only), then write
 // server.toml (0600) as the commit of record. It is safe to call again (a
@@ -334,6 +428,10 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	}
 	if err := validateModels(a.Models); err != nil {
 		return nil, err
+	}
+	oauth, err := normalizeOAuth(a.OAuth)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: %w", err)
 	}
 
 	secret, err := config.GenerateSessionSecret()
@@ -354,7 +452,7 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 		DataDir:          m.dataDir,
 		Bind:             m.bind,
 		Logging:          config.Logging{Level: "info"},
-		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds},
+		Auth:             config.Auth{Mode: "internal", SessionSecret: secret, SessionTTLSeconds: config.DefaultSessionTTLSeconds, OAuth: oauth},
 		Models:           a.Models,
 		Aux:              a.Aux,
 		Email:            a.Email,

@@ -70,3 +70,8 @@ func newToken() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// NewToken mints a fresh session token. Exported so the external-IdP
+// (OAuth) login path in internal/server can create a session for a
+// provider-authenticated user without a password.
+func NewToken() (string, error) { return newToken() }

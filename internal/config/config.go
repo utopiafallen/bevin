@@ -55,18 +55,28 @@ type Logging struct {
 }
 
 type Auth struct {
-	Mode              string `toml:"mode"` // internal | oauth (future)
+	Mode              string `toml:"mode"` // "internal" — the server is always its own IdP; OAuth is an additive second IdP (see OAuth.Enabled)
 	SessionSecret     string `toml:"session_secret"`
 	SessionTTLSeconds int    `toml:"session_ttl_seconds"`
 	OAuth             OAuth  `toml:"oauth"`
 }
 
-// OAuth is the (future) external IdP tier, e.g. authentik. Unused while
-// Auth.Mode == "internal".
+// OAuth is the external-IdP tier (authorization-code flow), e.g. authentik or
+// any OIDC provider. The server ALWAYS keeps its own IdP (internal accounts)
+// in parallel; when Enabled, users enabled in the provider are auto-provisioned
+// on first login (no explicit admin add needed). Claims are read from a
+// user-info endpoint (OIDC-style); the mapping is sub → identity,
+// preferred_username / email local part / sub → handle, name → display name.
 type OAuth struct {
-	ProviderURL  string `toml:"provider_url"`
-	ClientID     string `toml:"client_id"`
-	ClientSecret string `toml:"client_secret"`
+	Enabled      bool   `toml:"enabled" json:"enabled"`
+	Name         string `toml:"name" json:"name"` // shown on the sign-in button
+	ClientID     string `toml:"client_id" json:"client_id"`
+	ClientSecret string `toml:"client_secret" json:"client_secret"`
+	AuthURL      string `toml:"auth_url" json:"auth_url"`
+	TokenURL     string `toml:"token_url" json:"token_url"`
+	UserinfoURL  string `toml:"userinfo_url" json:"userinfo_url"`
+	Scopes       string `toml:"scopes" json:"scopes"` // default "openid profile email"
+	RedirectURI  string `toml:"redirect_uri" json:"redirect_uri"` // public URL of /auth/oauth/callback
 }
 
 // Model is a main text model in the admin catalog. A model is a provider

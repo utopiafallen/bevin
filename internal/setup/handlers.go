@@ -27,8 +27,10 @@ var wizardTmpl = template.Must(template.New("wizard.html").Funcs(template.FuncMa
 	},
 }).ParseFS(wizardFS, "wizard.html"))
 
-// Step order for the wizard (matches the plan's §10).
-var stepOrder = []string{"server", "admin", "models", "aux", "sidecars", "email", "review"}
+// Step order for the wizard (matches the plan's §10). The OAuth step is
+// optional — an external IdP alongside the server's own (the admin is always
+// the self-IdP account; OAuth users are auto-provisioned on first login).
+var stepOrder = []string{"server", "admin", "oauth", "models", "aux", "sidecars", "email", "review"}
 
 // Handler serves the setup wizard API. Every /setup route is gated on the
 // one-time setup token. After finalize, the in-process transition callback
@@ -138,6 +140,7 @@ func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
 type advancePayload struct {
 	Step     string            `json:"step"`
 	Admin    AdminAnswers      `json:"admin"`
+	OAuth    config.OAuth      `json:"oauth"`
 	Models   []config.Model    `json:"models"`
 	Aux      []config.AuxModel `json:"aux"`
 	Sidecars config.Sidecars   `json:"sidecars"`
@@ -163,6 +166,8 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 		// review-only; no state
 	case "admin":
 		err = h.mgr.SetAdmin(p.Admin)
+	case "oauth":
+		err = h.mgr.SetOAuth(p.OAuth)
 	case "models":
 		err = h.mgr.SetModels(p.Models)
 	case "aux":

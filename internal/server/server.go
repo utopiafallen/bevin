@@ -67,6 +67,9 @@ type App struct {
 	// cfgMu guards cfg + mail: a config save (the admin config pages) swaps
 	// both in under the lock so readers never see a torn state.
 	cfgMu sync.RWMutex
+	// oauthMu guards oauthStates: the single-use OAuth flow states.
+	oauthMu     sync.Mutex
+	oauthStates map[string]time.Time
 	// supCancel stops the sidecar supervisor (started by NewNormal).
 	supCancel context.CancelFunc
 }
@@ -124,6 +127,12 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.requireAuth(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
+	// External-IdP (OAuth) login: public routes (they run BEFORE a bevin
+	// session exists) — the status probe for the login page + the
+	// authorization-code flow (login redirect + provider callback).
+	mux.HandleFunc("GET /api/oauth/status", a.apiOAuthStatus)
+	mux.HandleFunc("GET /auth/oauth/login", a.oauthLogin)
+	mux.HandleFunc("GET /auth/oauth/callback", a.oauthCallback)
 	// Admin dashboard (admin role only): the page entry + the live-state APIs
 	// it polls (slot pools + queue, sidecar health, email config + test send).
 	mux.HandleFunc("GET /admin", a.adminPage)
@@ -137,9 +146,15 @@ func (a *App) routes() {
 	// (read / save + the model Detect probe).
 	mux.HandleFunc("GET /admin/models", a.adminModelsPage)
 	mux.HandleFunc("GET /admin/email", a.adminEmailPage)
+	mux.HandleFunc("GET /admin/users", a.adminUsersPage)
 	mux.HandleFunc("GET /admin/api/config", a.requireAdmin(a.adminConfig))
 	mux.HandleFunc("POST /admin/api/config", a.requireAdmin(a.adminConfigSave))
 	mux.HandleFunc("POST /admin/api/probe-model", a.requireAdmin(a.adminProbeModel))
+	// Users panel: the full registry (both IdPs) + admin user management
+	// (add an internal account; enable/disable any account).
+	mux.HandleFunc("GET /admin/api/users", a.requireAdmin(a.adminUsersList))
+	mux.HandleFunc("POST /admin/api/users", a.requireAdmin(a.adminUsersAdd))
+	mux.HandleFunc("POST /admin/api/users/status", a.requireAdmin(a.adminUsersStatus))
 	if sub, err := fs.Sub(web.FS, "static"); err == nil {
 		mux.Handle("GET /", http.FileServerFS(sub))
 	}
@@ -178,15 +193,25 @@ func (a *App) applyConfig(cfg *config.ServerConfig) (reloaded bool) {
 	return true
 }
 
-// adminGate authenticates the request and returns the user's role (empty on
-// failure).
-func (a *App) adminGate(r *http.Request) (string, bool) {
+// sessionUser resolves the request's session to the user's account row
+// (empty on failure).
+func (a *App) sessionUser(r *http.Request) (*store.User, bool) {
 	tok, err := auth.SessionToken(r)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	u, err := a.prov.UserFromToken(r.Context(), tok)
 	if err != nil {
+		return nil, false
+	}
+	return u, true
+}
+
+// adminGate authenticates the request and returns the user's role (empty on
+// failure).
+func (a *App) adminGate(r *http.Request) (string, bool) {
+	u, ok := a.sessionUser(r)
+	if !ok {
 		return "", false
 	}
 	return u.Role, true

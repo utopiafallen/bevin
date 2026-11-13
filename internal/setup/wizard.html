@@ -94,7 +94,7 @@ let idx = 0;
 // define the same names pointing at their own /admin/api/* endpoints.
 const PROBE_URL = "/setup/probe-model";
 const EMAIL_TEST_URL = "/setup/test-email";
-let S = { admin: {handle:"",display_name:"",password:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+let S = { admin: {handle:"",display_name:"",password:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:"", redirect_uri:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 // ---- per-step renderers ----
 function renderServer(){ return el("div",{},
@@ -112,16 +112,46 @@ function renderAdmin(){ const a=S.admin; return el("div",{},
     pwfield("Password", "ad_pw", a.password, "min 8 chars"),
     pwfield("Confirm", "ad_pw2", a.password, ""))
 );}
+function renderOAuth(){
+  const o = S.oauth;
+  const d = el("div",{});
+  d.append(el("h3",{}, "3. External sign-in (OAuth) — optional"));
+  d.append(el("p",{class:"small"},"Add an external identity provider (authentik, Keycloak, Google — anything with an authorization-code + user-info flow) ALONGSIDE bevin's own login: the admin account always signs in with its password, and any user you enable in the provider signs in through it — bevin creates their account automatically on first login. Leave it off to skip; you can add it later in the admin dashboard's Users panel."));
+  // Enable toggle (Yes/No) — same pattern as the email step.
+  const en = el("div",{class:"yesno"});
+  const yesB = el("button",{type:"button", class:o.enabled?"sel":""}, "Yes");
+  const noB = el("button",{type:"button", class:!o.enabled?"sel":""}, "No");
+  yesB.addEventListener("click",()=>{ o.enabled=true; render(); });
+  noB.addEventListener("click",()=>{ o.enabled=false; render(); });
+  en.append(yesB,noB);
+  d.append(field("Enable external sign-in (OAuth)", en));
+  if(!o.enabled){
+    d.append(el("p",{class:"small"},"OAuth is off — bevin accepts its own logins only. The rest of this step is skipped."));
+    return d;
+  }
+  d.append(field("Provider name", inp("oa_name", o.name, "shown on the sign-in button, e.g. authentik")));
+  d.append(el("div",{class:"row"},
+    field("Client ID", inp("oa_clientid", o.client_id, "the OAuth app's client id")),
+    field("Client secret", inp("oa_clientsecret", o.client_secret, "the OAuth app's client secret"))));
+  d.append(field("Authorization URL", inp("oa_authurl", o.auth_url, "https://idp.example.com/application/o/authorize/")));
+  d.append(field("Token URL", inp("oa_tokenurl", o.token_url, "https://idp.example.com/application/o/token/")));
+  d.append(field("User-info URL", inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/")));
+  d.append(el("div",{class:"row"},
+    field("Scopes", inp("oa_scopes", o.scopes, "openid profile email")),
+    field("Redirect URI", inp("oa_redirecturi", o.redirect_uri, "https://bevin.example.com/auth/oauth/callback"))));
+  d.append(el("p",{class:"small"},"The redirect URI is this server's PUBLIC address + /auth/oauth/callback — the exact URL you register on the OAuth app (behind your reverse proxy, so https). The provider's user identity is mapped to a bevin handle from its preferred_username (else the email's local part, else the subject)."));
+  return d;
+}
 function renderModels(){
   const d=el("div",{},
-    el("h3",{}, "3. Main models"),
+    el("h3",{}, "4. Main models"),
     el("p",{class:"small"},"Configure the chat models users can switch between. Fill the form, press Detect to identify the provider and list its models, then Add it. The list order below is the order users see when choosing a model."));
   d.append(renderModelForm());
   d.append(renderModelList());
   return d;
 }
 function renderAux(){
-  const d = el("div", {}, el("h3",{}, "4. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip. Add one, enter its base URL, and press Detect: the provider and the model's modalities are detected where the provider exposes them (llama does; most others don't), otherwise set them manually. A single model may perceive one or more modalities."));
+  const d = el("div", {}, el("h3",{}, "5. Aux perception models (optional)"), el("p",{class:"small"},"Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip. Add one, enter its base URL, and press Detect: the provider and the model's modalities are detected where the provider exposes them (llama does; most others don't), otherwise set them manually. A single model may perceive one or more modalities."));
   d.append(renderAuxSection());
   return d;
 }
@@ -132,7 +162,7 @@ function renderAux(){
 let _sidecarTimer = null;
 function renderSidecars(){
   const d = el("div",{});
-  d.append(el("h3",{}, "5. Sidecars"));
+  d.append(el("h3",{}, "6. Sidecars"));
   d.append(el("p",{class:"small"},"bevin provisions these local services for you — it downloads + launches each one, all bound to loopback. The llama-server is the embedder; its endpoint is configured for you automatically, so there is no separate embedder step. Stepping back / canceling never uninstalls."));
   d.append(el("div",{class:"sidecar-list", id:"sidecar_list"}));
   d.append(el("div",{class:"sidecar-banner", id:"sidecar_banner"}));
@@ -222,12 +252,12 @@ async function pollSidecars(){
 function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
 function renderEmail(){
   const d = el("div",{});
-  d.append(el("h3",{}, "6. Email notifications (optional)"));
+  d.append(el("h3",{}, "7. Email notifications (optional)"));
   d.append(el("p",{class:"small"},"bevin can email users and the admin (a task finished, something needs attention, \u2026). Leave it off to skip — you can add it later in Settings. When on, bevin sends through your SMTP server."));
   d.append(renderEmailForm());
   return d;
 }
-function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
+function renderReview(){ const d=el("div",{},el("h3",{}, "8. Review & finish"));
   // The review shows the SAVED answers only — strip the per-draft working
   // state (_models / _detecting / _lastBase: probe results + UI flags) and the
   // transient sidecar progress, so nothing ephemeral looks like config.
@@ -240,7 +270,7 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "7. Review & finish"));
   d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
   return d;
 }
-const RENDER = { server:renderServer, admin:renderAdmin, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
+const RENDER = { server:renderServer, admin:renderAdmin, oauth:renderOAuth, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
 
 // ---- nav ----
 function sync(id, v){ /* handled by per-field listeners */ }
@@ -262,6 +292,11 @@ async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, sidecars via id-based reads)
   if(step==="admin"){ S.admin.handle=q("#ad_handle").value||q("#ad_handle").placeholder; S.admin.display_name=q("#ad_name").value||q("#ad_name").placeholder; S.admin.password=q("#ad_pw").value; if(q("#ad_pw").value!==q("#ad_pw2").value){msg("Passwords do not match","err");return;} }
+  // The OAuth step: gather the inputs + mirror the server's normalization
+  // (normalizeOAuth) so the review step shows the effective values. The
+  // fields only exist while the step is enabled — gathering is skipped when
+  // it's off (the stored draft is kept; a disabled IdP is ignored at runtime).
+  if(step==="oauth" && S.oauth.enabled){ const o=S.oauth; o.name=q("#oa_name").value; o.client_id=q("#oa_clientid").value; o.client_secret=q("#oa_clientsecret").value; o.auth_url=q("#oa_authurl").value; o.token_url=q("#oa_tokenurl").value; o.userinfo_url=q("#oa_userinfourl").value; o.scopes=q("#oa_scopes").value; o.redirect_uri=q("#oa_redirecturi").value; ["name","client_id","client_secret","auth_url","token_url","userinfo_url","scopes","redirect_uri"].forEach(k=>{ o[k]=String(o[k]||"").trim(); }); if(o.enabled){ if(!o.name) o.name="OAuth"; if(!o.scopes) o.scopes="openid profile email"; } }
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
@@ -275,19 +310,19 @@ async function doNext(){
     if (!S.email.from_name) S.email.from_name = "bevin";
     if (!S.email.from_address && S.email.username) S.email.from_address = S.email.username;
   }
-  const emailPayload = Object.assign({}, S.email);
+  const emailPayload = Object.assign({}, S.email, { smtp_port: parseInt(S.email.smtp_port, 10) || (S.email.enabled ? 587 : 0) });
   // Aux models: strip the per-draft working state (_models / _lastBase /
   // _detecting) so only the saved config crosses the wire.
   const auxPayload = (S.aux||[]).map(m => { const c = JSON.parse(JSON.stringify(m)); for(const k of Object.keys(c)) if(k.startsWith("_")) delete c[k]; return c; });
   try{
-    await api("POST","/setup/advance",{step, admin:S.admin, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
+    await api("POST","/setup/advance",{step, admin:S.admin, oauth:S.oauth, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
     msg("");
     if(step==="review") return;
     idx=Math.min(idx+1, STEPS.length-1); render();
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:"",redirect_uri:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
   msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -413,8 +414,14 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 	if err := os.MkdirAll(models, 0o755); err != nil {
 		return "", err
 	}
-	// Binary: launch in place so its $ORIGIN rpath resolves the bundled .so libs.
+	// Binary: the release tarball's .so libraries are versioned-only (no
+	// unversioned soname links, no rpath in the build), so the loader needs
+	// both the links (linkSonames) and the dir on LD_LIBRARY_PATH
+	// (launchDaemon) — otherwise the binary dies at exec.
 	bin := findBinary(dir, "llama-server")
+	if bin != "" {
+		linkSonames(dir)
+	}
 	if bin == "" {
 		url, err := llamaDownloadURL(ctx)
 		if err != nil {
@@ -429,6 +436,7 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 				return "", err
 			}
 			bin = findBinary(dir, "llama-server")
+			linkSonames(dir)
 		}
 	}
 	if bin == "" {
@@ -509,6 +517,70 @@ func installFFmpeg(ctx context.Context, dataDir string) (string, error) {
 
 // ---- process launch (daemon) + health wait ----
 
+// linkSonames creates the unversioned soname symlinks the ELF loader needs
+// (libllama-common.so.0 -> libllama-common.so.0.9.0) for trees of versioned
+// shared libraries. The llama.cpp release tarball ships ONLY the full-version
+// .so files while its binaries link against the unversioned sonames (and the
+// release builds have no rpath), so without these links the binary dies at
+// exec with "error while loading shared libraries". Idempotent + no-op for
+// non-Linux and for directories without the pattern.
+func linkSonames(dir string) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		entries, rerr := os.ReadDir(p)
+		if rerr != nil {
+			return nil
+		}
+		for _, e := range entries {
+			n := e.Name()
+			if e.IsDir() || !strings.HasPrefix(n, "lib") || !strings.Contains(n, ".so.") {
+				continue
+			}
+			// Soname = the name up to and including the MAJOR version after
+			// ".so" (libllama.so.0.9.0 -> libllama.so.0). A single-component
+			// version (libfoo.so.1) is already its own soname: skip.
+			idx := strings.LastIndex(n, ".so")
+			if idx < 4 { // "libX.so..." — skip malformed names
+				continue
+			}
+			rest := n[idx+3:]
+			if !strings.HasPrefix(rest, ".") {
+				continue
+			}
+			parts := strings.Split(rest[1:], ".")
+			if len(parts) < 2 || !isDigits(parts[0]) {
+				continue
+			}
+			base := n[:idx+3+len(parts[0])+1]
+			if base == n {
+				continue
+			}
+			if _, lerr := os.Lstat(filepath.Join(p, base)); lerr == nil {
+				continue // unversioned name already present — don't clobber
+			}
+			_ = os.Symlink(e.Name(), filepath.Join(p, base))
+		}
+		return nil
+	})
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // pickFreePort returns a free loopback TCP port, preferring `start` (when free)
 // and scanning upward otherwise. It opens a real listener to test availability.
 // The window between closing the listener and the sidecar's own bind is tiny; if
@@ -537,6 +609,15 @@ func launchDaemon(ctx context.Context, bin string, dataDir, name string, args ..
 		return err
 	}
 	c := exec.Command(bin, args...)
+	if runtime.GOOS == "linux" {
+		// Release tarballs ship their .so libraries next to the binary
+		// (versioned names; the unversioned soname links are added by
+		// linkSonames) and the builds carry no rpath, so the loader needs
+		// the binary's own directory.
+		if lp := filepath.Dir(bin); lp != "" && lp != "." {
+			c.Env = append(os.Environ(), "LD_LIBRARY_PATH="+lp+string(os.PathListSeparator)+os.Getenv("LD_LIBRARY_PATH"))
+		}
+	}
 	c.Stdout = logFile
 	c.Stderr = logFile
 	if err := c.Start(); err != nil {

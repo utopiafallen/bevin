@@ -36,7 +36,7 @@
       <div style="display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end;">
         <span class="chip"><span class="dot"></span> <span id="userChip">signed out</span></span>
         <button class="btn btn-ghost" id="logoutBtn" type="button" style="display:none; padding:.25rem .7rem;">Sign out</button>
-        <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/setup" style="display:none;" title="Edit models &amp; config (admin)">Models</a>
+        <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/models" style="display:none;" title="Models &amp; config editors (admin)">Models</a>
       </div>
     </header>
 
@@ -87,6 +87,14 @@
           <button class="btn btn-primary" type="submit">Sign in</button>
           <span id="loginErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
         </form>
+        <div id="oauthLogin" style="display:none; margin-top:.9rem;">
+          <div style="display:flex; align-items:center; gap:.6rem; margin-bottom:.55rem;">
+            <span style="flex:1; border-top:1px solid var(--border);"></span>
+            <span class="muted" style="font-size:.8rem;">or</span>
+            <span style="flex:1; border-top:1px solid var(--border);"></span>
+          </div>
+          <a class="btn" id="oauthBtn" href="/auth/oauth/login" style="text-align:center; text-decoration:none;">Sign in with external provider</a>
+        </div>
       </div>
 
       <div id="chatCard" style="display:none;">
@@ -284,6 +292,7 @@
       $("chatCard").style.display = "none";
       $("logoutBtn").style.display = "none";
       $("userChip").textContent = "signed out";
+      showOauthLogin();
     }
 
     function showChat() {
@@ -300,6 +309,17 @@
     fetch("/health").then(function (r) { return r.json(); })
       .then(function (j) { $("health").textContent = "health " + (j.status || "ok") + " · " + fmtWhen(new Date(j.time || Date.now())); })
       .catch(function () { $("health").textContent = "offline (no server)"; });
+
+    // External-IdP (OAuth) sign-in: probe whether it is enabled; the button
+    // appears below the password form on the login card (the server is always
+    // its own IdP — the password form stays).
+    var oauthEnabled = false;
+    function showOauthLogin() { $("oauthLogin").style.display = oauthEnabled ? "" : "none"; }
+    fetch("/api/oauth/status").then(function (r) { return r.json(); }).then(function (j) {
+      oauthEnabled = !!j.enabled;
+      if (oauthEnabled) $("oauthBtn").textContent = "Sign in with " + (j.name || "the external provider");
+      showOauthLogin();
+    }).catch(function () { /* no provider — password only */ });
 
     (async function boot() {
       try {

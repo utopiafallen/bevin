@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS users (
 	role         TEXT NOT NULL DEFAULT 'user',
 	status       TEXT NOT NULL DEFAULT 'active',
 	email        TEXT NOT NULL DEFAULT '',
+	idp          TEXT NOT NULL DEFAULT '',
+	idp_subject  TEXT NOT NULL DEFAULT '',
 	created_at   TEXT NOT NULL
 );
 -- internal auth: password hash per user (argon2id)
@@ -99,6 +101,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handle ON sessions(handle);
 			return err
 		}
 	}
+	// v3: add the IdP origin + external subject columns (OAuth users). A
+	// user's stable identity for an external IdP is the provider's subject
+	// claim; idp labels the origin ("" = the server's own IdP, "oauth").
+	if v < 3 {
+		var hasCol int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'idp'`).Scan(&hasCol)
+		if hasCol == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN idp TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN idp_subject TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 3, nowUTC()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -109,6 +129,8 @@ type User struct {
 	Role        string `json:"role"` // admin | user
 	Status      string `json:"status"`
 	Email       string `json:"email"`
+	IDP         string `json:"idp"` // "" (the server's own IdP) | "oauth"
+	IDPSubject  string `json:"idp_subject"` // stable external subject (provider "sub")
 	CreatedAt   string `json:"created_at"`
 }
 
@@ -132,8 +154,8 @@ func (s *ServerStore) CreateUser(handle, displayName, role string) (*User, error
 func (s *ServerStore) GetUser(handle string) (*User, error) {
 	u := &User{}
 	err := s.db.QueryRow(
-		`SELECT handle, display_name, role, status, email, created_at FROM users WHERE handle = ?`,
-		handle).Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.CreatedAt)
+		`SELECT handle, display_name, role, status, email, idp, idp_subject, created_at FROM users WHERE handle = ?`,
+		handle).Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.IDP, &u.IDPSubject, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -145,7 +167,7 @@ func (s *ServerStore) GetUser(handle string) (*User, error) {
 
 // ListUsers returns all accounts.
 func (s *ServerStore) ListUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT handle, display_name, role, status, email, created_at FROM users ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT handle, display_name, role, status, email, idp, idp_subject, created_at FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -153,12 +175,48 @@ func (s *ServerStore) ListUsers() ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.IDP, &u.IDPSubject, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// CreateOAuthUser provisions an account for a user authenticated by an
+// external IdP (auto-provision on first login). subject is the provider's
+// stable subject claim; the handle must already be collision-checked by the
+// caller. The account is active with no credential row — it can only sign in
+// through the external IdP.
+func (s *ServerStore) CreateOAuthUser(handle, displayName, subject string) (*User, error) {
+	now := nowUTC()
+	res, err := s.db.Exec(
+		`INSERT INTO users (handle, display_name, role, status, idp, idp_subject, created_at) VALUES (?,?,?,'active','oauth',?,?)`,
+		handle, displayName, "user", subject, now)
+	if err != nil {
+		return nil, err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return nil, fmt.Errorf("user %q not created", handle)
+	}
+	return &User{Handle: handle, DisplayName: displayName, Role: "user", Status: "active", IDP: "oauth", IDPSubject: subject, CreatedAt: now}, nil
+}
+
+// FindOAuthUserBySubject returns the account provisioned from a given
+// external-IdP subject ("" subject has no match).
+func (s *ServerStore) FindOAuthUserBySubject(subject string) (*User, error) {
+	u := &User{}
+	err := s.db.QueryRow(
+		`SELECT handle, display_name, role, status, email, idp, idp_subject, created_at FROM users WHERE idp_subject = ?`,
+		subject).Scan(&u.Handle, &u.DisplayName, &u.Role, &u.Status, &u.Email, &u.IDP, &u.IDPSubject, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 // SetUserEmail sets (or clears) a user's email address ("" clears it).

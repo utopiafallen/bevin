@@ -16,6 +16,7 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"admin.html",
 		"admin-models.html",
 		"admin-email.html",
+		"admin-users.html",
 	}
 	for _, p := range want {
 		f, err := FS.Open("static/" + p)
