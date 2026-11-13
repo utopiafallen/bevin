@@ -132,6 +132,9 @@ code, .mono { font-family: var(--font-mono); font-size: 0.9em; background: var(-
 .btn-primary:hover { background: var(--brand-hover); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
 .btn-ghost:hover { background: var(--surface-2); color: var(--text); }
+/* The external-provider sign-in button spans the login form, like the
+   primary "Sign in" button above it. */
+#oauthLogin .btn { width: 100%; }
 
 /* ---- forms ---- */
 label { font-weight: 700; font-size: 0.9rem; display: block; margin-bottom: 0.3rem; }
@@ -152,7 +155,6 @@ input:focus, textarea:focus, select:focus {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-lg); padding: 1.2rem 1.3rem; box-shadow: var(--shadow-sm);
 }
-.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 
 /* ---- chat bubbles ---- */
 .msg { display: flex; flex-direction: column; margin: 0.5rem 0; max-width: 82%; }
@@ -209,13 +211,6 @@ input:focus, textarea:focus, select:focus {
   padding: 0.2rem 0.7rem; font-size: 0.8rem; font-weight: 700;
 }
 .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--ok); display: inline-block; }
-
-/* ---- swatches (brand preview) ---- */
-.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 0.7rem; }
-.swatch { border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--surface); }
-.swatch .fill { height: 56px; }
-.swatch .meta { padding: 0.4rem 0.55rem; font-size: 0.72rem; font-weight: 700; }
-.swatch .meta code { font-weight: 500; background: none; padding: 0; }
 
 /* ---- theme toggle ---- */
 .theme-toggle {
