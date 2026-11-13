@@ -475,6 +475,14 @@ func TestSendMessageStream(t *testing.T) {
 	if err := srv.CreateSession("tok-test", "admin", time.Hour, "test"); err != nil {
 		t.Fatal(err)
 	}
+	// The chat API is the user interaction surface — the admin is not a
+	// regular user (it would 403), so this test chats as a regular user.
+	if _, err := srv.CreateUser("bob", "Bob", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-bob", "bob", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
 	prov := auth.NewInternalProvider(srv, time.Hour)
 
 	// A fake OAI backend that streams + reports usage.
@@ -497,9 +505,10 @@ func TestSendMessageStream(t *testing.T) {
 	a := &App{cfg: cfg, prov: prov, ag: ag, srv: srv, ttl: time.Hour, dataDir: dir}
 	a.routes()
 
-	// Create a conversation.
+	// Create a conversation (as the regular user — the admin is gated out of
+	// the chat API).
 	w := httptest.NewRecorder()
-	a.ServeHTTP(w, newRequest(http.MethodPost, "/api/conversations", map[string]string{"title": "t"}))
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob", map[string]string{"title": "t"}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("createConversation code = %d body=%s", w.Code, w.Body.String())
 	}
@@ -509,7 +518,7 @@ func TestSendMessageStream(t *testing.T) {
 
 	// Stream a message.
 	w = httptest.NewRecorder()
-	a.ServeHTTP(w, newRequest(http.MethodPost, "/api/conversations/"+convID+"/messages/stream", map[string]string{"message": "hi"}))
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations/"+convID+"/messages/stream", "tok-bob", map[string]string{"message": "hi"}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("stream code = %d body=%s", w.Code, w.Body.String())
 	}

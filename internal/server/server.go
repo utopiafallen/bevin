@@ -122,9 +122,13 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/me", a.requireAuth(a.me))
 	mux.HandleFunc("GET /api/models", a.requireAuth(a.models))
-	mux.HandleFunc("POST /api/conversations", a.requireAuth(a.createConversation))
-	mux.HandleFunc("POST /api/conversations/{id}/messages", a.requireAuth(a.sendMessage))
-	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.requireAuth(a.sendMessageStream))
+	// The chat API is the user interaction surface: the admin is not a
+	// regular user, so it rejects admin sessions (GET / sends them to the
+	// dashboard instead; this also stops a stale user tab from chatting as
+	// the admin).
+	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
+	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
+	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
 	// External-IdP (OAuth) login: public routes (they run BEFORE a bevin
@@ -156,9 +160,27 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /admin/api/users", a.requireAdmin(a.adminUsersAdd))
 	mux.HandleFunc("POST /admin/api/users/status", a.requireAdmin(a.adminUsersStatus))
 	if sub, err := fs.Sub(web.FS, "static"); err == nil {
-		mux.Handle("GET /", http.FileServerFS(sub))
+		mux.Handle("GET /", a.rootHandler(sub))
 	}
 	a.mux = mux
+}
+
+// rootHandler serves the web root. The index document is the user chat UI —
+// the admin is not a regular user (their entry is the dashboard), so an
+// authenticated admin requesting the index is redirected to /admin. Asset
+// requests pass through untouched (the dashboard pages load their shared
+// assets under the same admin session).
+func (a *App) rootHandler(sub fs.FS) http.Handler {
+	fileServer := http.FileServerFS(sub)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			if u, ok := a.sessionUser(r); ok && u.Role == "admin" {
+				http.Redirect(w, r, "/admin", http.StatusSeeOther)
+				return
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // liveCfg / liveMail read the app's live config + SMTP sender under the lock
@@ -258,6 +280,29 @@ func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		u, err := a.prov.UserFromToken(r.Context(), tok)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+			return
+		}
+		next(w, r.WithContext(auth.ContextWithUser(r.Context(), u)))
+	}
+}
+
+// chatGate is requireAuth + a non-admin check: the chat endpoints are the
+// user interaction surface and the admin does not participate as a regular
+// user (GET / redirects them to the dashboard).
+func (a *App) chatGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, err := auth.SessionToken(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+			return
+		}
+		u, err := a.prov.UserFromToken(r.Context(), tok)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+			return
+		}
+		if u.Role == "admin" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin does not participate as a regular user — use the dashboard"})
 			return
 		}
 		next(w, r.WithContext(auth.ContextWithUser(r.Context(), u)))

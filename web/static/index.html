@@ -343,6 +343,10 @@
         me = r2.ok ? await r2.json() : { handle: $("handle").value.trim() };
       } catch (err) { me = { handle: $("handle").value.trim() }; }
       $("password").value = "";
+      // The admin is not a regular user: the login goes straight to the
+      // dashboard (GET / does the same redirect for an existing admin
+      // session).
+      if (me.role === "admin") { location.href = "/admin"; return; }
       showChat();
     });
 
