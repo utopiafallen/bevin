@@ -143,6 +143,7 @@
     </p>
   </div>
 
+  <script src="/markdown.js"></script>
   <script>
     var root = document.documentElement;
     var toggle = document.getElementById("themeToggle");
@@ -181,11 +182,13 @@
     }
 
     // Creates the assistant message element (head + optional reasoning +
-    // bubble). Returns the handles so the stream can fill them incrementally.
+    // bubble). The bubble is a markdown container: settled blocks (provably
+    // final, rendered once) + a live tail (re-rendered per frame). Returns
+    // the handles so the stream can fill them incrementally.
     function startAssistantMsg() {
       var m = document.createElement("div");
       m.className = "msg msg-assistant";
-      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><span class="bubble"></span>';
+      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><div class="bubble md-bubble"><div class="md-tail"></div></div>';
       var d = new Date();
       var when = m.querySelector(".when");
       when.textContent = fmtWhen(d);
@@ -195,8 +198,39 @@
         m: m,
         details: m.querySelector("details.reasoning"),
         pre: m.querySelector("details.reasoning pre"),
-        bubble: m.querySelector(".bubble")
+        bubble: m.querySelector(".bubble"),
+        tail: m.querySelector(".md-tail"),
+        buf: "",
+        cut: 0,
+        raf: 0
       };
+    }
+
+    // Streaming-markdown paint (the anti-flicker contract): blocks that are
+    // provably complete are settled into the bubble ONCE and never touched
+    // again; only the trailing incomplete block (the tail) is re-rendered.
+    // Deltas are coalesced to one paint per animation frame.
+    function paint(a) {
+      a.raf = 0;
+      var log = $("chatLog");
+      var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+      var full = a.buf;
+      var cut = BevinMD.stableCut(full, a.cut);
+      if (cut > a.cut) {
+        BevinMD.render(full.slice(a.cut, cut), a.bubble, a.tail, true);
+        a.cut = cut;
+      }
+      while (a.tail.firstChild) a.tail.removeChild(a.tail.firstChild);
+      BevinMD.render(full.slice(a.cut), a.tail, null);
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    }
+    function schedulePaint(a) {
+      if (a.raf) return;
+      a.raf = requestAnimationFrame(function () { paint(a); });
+    }
+    function pinScroll(el) {
+      var atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      return atBottom;
     }
 
     function addErrorMsg(text) {
@@ -288,18 +322,21 @@
                 reasoning += p.reasoning;
                 if (!asst) asst = startAssistantMsg();
                 asst.details.style.display = "";
+                var atBottom = pinScroll($("chatLog"));
                 asst.pre.textContent = reasoning;
-                $("chatLog").scrollTop = $("chatLog").scrollHeight;
+                if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
               }
               if (p.delta) {
                 if (!asst) asst = startAssistantMsg();
-                asst.bubble.textContent += p.delta;
-                $("chatLog").scrollTop = $("chatLog").scrollHeight;
+                asst.buf += p.delta;
+                schedulePaint(asst);
               }
             } else if (evt === "done") {
               gotDone = true;
               if (!asst) asst = startAssistantMsg();
-              if (!asst.bubble.textContent) asst.bubble.textContent = p.reply || "(empty reply)";
+              if (!asst.buf) asst.buf = p.reply || "(empty reply)";
+              if (asst.raf) asst.raf = 0;
+              if (asst.cut < asst.buf.length) paint(asst);
             } else if (evt === "error") {
               throw new Error(p.error || "stream error");
             }
@@ -407,8 +444,8 @@
         // message re-fetch endpoint yet — the server sends it back).
         if (j.welcome) {
           var asst = startAssistantMsg();
-          asst.bubble.textContent = j.welcome;
-          $("chatLog").scrollTop = $("chatLog").scrollHeight;
+          asst.buf = j.welcome;
+          paint(asst);
         }
         scrollChat();
         setTimeout(function () { $("message").focus(); }, 350);

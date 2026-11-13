@@ -10,6 +10,7 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"brand.css",
 		"config-forms.css",
 		"config-forms.js",
+		"markdown.js",
 		"logo-mark.svg",
 		"favicon.svg",
 		"fonts/nunito-variable.woff2",

@@ -175,6 +175,32 @@ input:focus, textarea:focus, select:focus {
 .msg details.reasoning pre { white-space: pre-wrap; font-family: inherit; margin: 0.3rem 0 0; }
 #chatLog { max-height: 26rem; overflow-y: auto; padding-right: 0.25rem; }
 
+/* ---- markdown inside assistant bubbles (web/static/markdown.js) ---- */
+.msg-assistant .md-bubble { white-space: normal; }
+.md-bubble p { margin: 0 0 0.5em; }
+.md-bubble p:last-child, .md-tail p:last-child { margin-bottom: 0; }
+.md-bubble h1, .md-bubble h2, .md-bubble h3, .md-bubble h4,
+.md-bubble h5, .md-bubble h6 { margin: 0.7em 0 0.3em; line-height: 1.25; font-weight: 800; }
+.md-bubble h1 { font-size: 1.18rem; }
+.md-bubble h2 { font-size: 1.1rem; }
+.md-bubble h3 { font-size: 1.02rem; }
+.md-bubble h4, .md-bubble h5, .md-bubble h6 { font-size: 1rem; }
+.md-bubble ul, .md-bubble ol { margin: 0.25em 0 0.5em; padding-left: 1.4em; }
+.md-bubble li { margin: 0.15em 0; }
+.md-bubble li ul, .md-bubble li ol { margin: 0.15em 0; }
+.md-bubble pre {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.55em 0.7em; overflow-x: auto; margin: 0.35em 0 0.5em;
+  font-size: 0.85em; white-space: pre;
+}
+.md-bubble pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
+.md-bubble a { color: var(--brand-strong); text-decoration: underline; text-underline-offset: 2px; }
+.md-bubble blockquote {
+  border-left: 3px solid var(--brand-soft); margin: 0.35em 0 0.5em;
+  padding: 0.15em 0 0.15em 0.75em; color: var(--text-muted);
+}
+.md-bubble hr { border: none; border-top: 1px solid var(--border); margin: 0.7em 0; }
+
 /* ---- chips / badges ---- */
 .chip {
   display: inline-flex; align-items: center; gap: 0.35rem;
