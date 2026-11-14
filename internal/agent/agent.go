@@ -17,11 +17,10 @@ import (
 	"sync"
 
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/prompt"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
 )
-
-const baseSystemPrompt = `You are Bevin, a personal assistant. Be direct and concise.`
 
 // Agent runs conversation turns for users, using the enabled models from the
 // config. Per-user SQLite stores are opened lazily and cached.
@@ -269,7 +268,7 @@ func (a *Agent) newUserConversation(us *store.UserStore, handle, title string) (
 	// Freeze the system prompt at conversation start. It is the content of
 	// the system message the request builder sends; a profile/input change
 	// later appends a new system message rather than mutating this.
-	if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
+	if err := us.SetFrozenSystemPrompt(c.ID, prompt.Base); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -328,7 +327,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	if err != nil {
 		return "", err
 	}
-	if err := us.SetFrozenSystemPrompt(c.ID, baseSystemPrompt); err != nil {
+	if err := us.SetFrozenSystemPrompt(c.ID, prompt.Base); err != nil {
 		return "", err
 	}
 	if welcome != "" {

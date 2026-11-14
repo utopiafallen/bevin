@@ -22,10 +22,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/utopiafallen/bevin/internal/prompt"
+
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 3
 
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
@@ -132,6 +134,23 @@ func cosine(a, b []float32) float64 {
 func (s *UserStore) migrate() error {
 	if _, err := s.db.Exec(userSchema); err != nil {
 		return err
+	}
+	var v int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v < currentSchemaVersion {
+		// Prompt re-freeze step (idempotent; exact match only): conversations
+		// still carrying one of the previous base texts (prompt.Legacy) get
+		// the current prompt.Base. Fresh conversations already carry it; a
+		// conversation with a custom prompt is never touched.
+		for _, legacy := range prompt.Legacy {
+			if _, err := s.db.Exec(
+				`UPDATE conversations SET frozen_system_prompt = ? WHERE frozen_system_prompt = ?`,
+				prompt.Base, legacy); err != nil {
+				return err
+			}
+		}
 	}
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`,

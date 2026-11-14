@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/utopiafallen/bevin/internal/prompt"
 )
 
 func openTestStore(t *testing.T) *UserStore {
@@ -368,6 +372,76 @@ func TestProfile(t *testing.T) {
 	}
 	if txt != "name: Ada Lovelace" {
 		t.Fatalf("profile text = %q", txt)
+	}
+}
+
+func TestUserStoreMigrationV2RefreezesLegacyPrompt(t *testing.T) {
+	// A v1 user DB: the conversations table exists, one conversation still
+	// carries the exact pre-upgrade prompt, one carries a custom (never
+	// legacy) prompt. Opening the store must re-freeze ONLY the legacy one
+	// onto the current prompt.Base.
+	dir := t.TempDir()
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "bevin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := `
+CREATE TABLE IF NOT EXISTS schema_version (
+	version    INTEGER PRIMARY KEY,
+	applied_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversations (
+	id                    TEXT PRIMARY KEY,
+	title                 TEXT NOT NULL DEFAULT '',
+	created_at            TEXT NOT NULL,
+	last_activity_at      TEXT NOT NULL,
+	state                 TEXT NOT NULL DEFAULT 'active',
+	frozen_system_prompt  TEXT NOT NULL DEFAULT '',
+	prompt_input_versions TEXT NOT NULL DEFAULT '',
+	owner_task_id         TEXT,
+	active_model_id       TEXT NOT NULL
+);
+INSERT INTO schema_version (version, applied_at) VALUES (1, 'x');
+INSERT INTO conversations (id, title, created_at, last_activity_at, active_model_id, frozen_system_prompt)
+VALUES
+	('legacy', 'legacy', 'x', 'x', 'm1', 'You are Bevin, a personal assistant. Be direct and concise.'),
+	('custom', 'custom', 'x', 'x', 'm1', 'a custom frozen prompt');
+`
+	if _, err := raw.Exec(v1); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenUser(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	legacy, err := s.GetConversation("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.FrozenSystemPrompt != prompt.Base {
+		t.Fatalf("legacy conv prompt = %q, want prompt.Base", legacy.FrozenSystemPrompt)
+	}
+	custom, err := s.GetConversation("custom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if custom.FrozenSystemPrompt != "a custom frozen prompt" {
+		t.Fatalf("custom conv prompt = %q (must be untouched)", custom.FrozenSystemPrompt)
+	}
+	// The version row was recorded.
+	var v int
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v < currentSchemaVersion {
+		t.Fatalf("schema version = %d, want >= %d", v, currentSchemaVersion)
 	}
 }
 
