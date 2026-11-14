@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
 )
@@ -17,6 +18,7 @@ import (
 type fakeProvider struct {
 	mu       sync.Mutex
 	calls    []provider.ChatRequest
+	models   []string // the model argument of every Chat/Stream call (wire-level check)
 	replies  []string
 	replyIdx int
 	usage    *provider.Usage
@@ -24,10 +26,11 @@ type fakeProvider struct {
 
 func (f *fakeProvider) Name() string { return "fake" }
 
-func (f *fakeProvider) Chat(_ context.Context, _ string, req provider.ChatRequest) (*provider.Result, error) {
+func (f *fakeProvider) Chat(_ context.Context, model string, req provider.ChatRequest) (*provider.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, req)
+	f.models = append(f.models, model)
 	reply := "ok"
 	if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
@@ -40,9 +43,10 @@ func (f *fakeProvider) Chat(_ context.Context, _ string, req provider.ChatReques
 	return res, nil
 }
 
-func (f *fakeProvider) Stream(_ context.Context, _ string, req provider.ChatRequest, emit func(provider.Chunk) error) (*provider.Result, error) {
+func (f *fakeProvider) Stream(_ context.Context, model string, req provider.ChatRequest, emit func(provider.Chunk) error) (*provider.Result, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
+	f.models = append(f.models, model)
 	reply := "ok"
 	if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
@@ -82,6 +86,99 @@ func (f *fakeProvider) lastCall() provider.ChatRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls[len(f.calls)-1]
+}
+
+func (f *fakeProvider) lastModel() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.models[len(f.models)-1]
+}
+
+func (f *fakeProvider) allModels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.models...)
+}
+
+// TestTurnUsesProviderModelName — the conversation stores the INTERNAL model
+// id (a slug derived from the upstream name), but every wire request must
+// carry the VERBATIM upstream model name. A model whose upstream name
+// contains / . : _ or uppercase (e.g. a llama.cpp GGUF ref like
+// "unsloth/Qwen3.8-27B-GGUF:UD-IQ3_S") slugifies to a different string —
+// sending the slug made the provider answer "model not found" on the first
+// real chat. The summarization (compaction) call is checked too: it is a
+// provider call and must carry the upstream name as well.
+func TestTurnUsesProviderModelName(t *testing.T) {
+	raw := "unsloth/Qwen3.8-27B-GGUF:UD-IQ3_S"
+	slug := config.ModelIDSlug(raw)
+	if slug == raw {
+		t.Fatalf("test precondition: slug %q must differ from %q", slug, raw)
+	}
+	dir := t.TempDir()
+	cfg := &config.ServerConfig{
+		Version: config.ConfigVersion,
+		Auth:    config.Auth{Mode: "internal", SessionSecret: "test-secret"},
+		Models: []config.Model{{
+			ID: slug, Provider: "openai", BaseURL: "http://u", ModelID: raw,
+			DisplayName: "Q", MaxContext: 1000, Slots: 1, Enabled: true,
+		}},
+	}
+	a, err := New(cfg, dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	// Reports 900 total tokens (over the 800 budget) so the post-turn
+	// compaction fires once the conversation has > keepLastTurns turns —
+	// exercising the summarization provider call too.
+	fp := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
+	a.providers[slug] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	// The conversation's active model is the INTERNAL id (the slug).
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if conv.ActiveModelID != slug {
+		t.Fatalf("active model = %q, want the internal slug %q", conv.ActiveModelID, slug)
+	}
+	// Four turns: enough for > keepLastTurns messages so a summarization
+	// call happens (fires from the 3rd turn's post-compact onward).
+	for i := 0; i < 4; i++ {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+	// Every wire call — the turns AND the summarization — carried the
+	// verbatim upstream name, never the slug.
+	got := fp.allModels()
+	if len(got) < 5 {
+		t.Fatalf("%d provider calls, want >= 5 (4 turns + >= 1 summarization)", len(got))
+	}
+	for i, m := range got {
+		if m != raw {
+			t.Fatalf("provider call %d used model %q, want the upstream name %q (the internal id is only for bookkeeping)", i, m, raw)
+		}
+	}
+	// The store kept the INTERNAL id on the messages (bookkeeping is by id,
+	// wire is by name).
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.ModelID != nil && *m.ModelID != slug {
+			t.Fatalf("stored message model id = %q, want the internal id %q", *m.ModelID, slug)
+		}
+	}
 }
 
 func (f *fakeProvider) callCount() int {

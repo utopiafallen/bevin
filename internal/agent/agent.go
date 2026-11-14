@@ -75,6 +75,25 @@ func (a *Agent) DefaultModelID() string {
 	return a.defaultModel
 }
 
+// modelAPIName maps an internal model ID to the provider-side model name the
+// wire request must carry. The internal ID is a derived slug (see
+// config.ModelIDSlug) — safe to store and reference, but NOT the name the
+// upstream API knows: a model whose upstream name contains / . : _ or
+// uppercase (e.g. "unsloth/Qwen3.8-27B-GGUF:UD-IQ3_S") slugifies to something
+// the provider rejects with "model not found". Every provider call goes
+// through this mapping; an unknown ID maps to itself so the provider error
+// still names the unknown model.
+func (a *Agent) modelAPIName(internalID string) string {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	for _, m := range a.cfg.Models {
+		if m.ID == internalID {
+			return m.ModelID
+		}
+	}
+	return internalID
+}
+
 // providerFor returns the provider for a model ID (admin-enabled; auto-disabled
 // models keep their provider so in-flight conversations can still attempt +
 // re-enable them).
@@ -379,12 +398,15 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		}
 		req, _ = buildRequest(conv, hist)
 	}
-	// Call the model (non-streaming or streaming).
+	// Call the model (non-streaming or streaming). The wire request carries
+	// the provider-side model name, not the internal ID (they differ whenever
+	// the upstream name slugs to something else).
+	apiName := a.modelAPIName(conv.ActiveModelID)
 	var res *provider.Result
 	if emit == nil {
-		res, err = p.Chat(ctx, conv.ActiveModelID, req)
+		res, err = p.Chat(ctx, apiName, req)
 	} else {
-		res, err = p.Stream(ctx, conv.ActiveModelID, req, emit)
+		res, err = p.Stream(ctx, apiName, req, emit)
 	}
 	if err != nil {
 		if isModelUnavailable(err) {

@@ -66,10 +66,13 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		// verbatim (the chat resumes exactly where it left off). Leave it.
 		return nil
 	}
-	// Summarize the older turns; the last keepLastTurns stay as raw turns so the
-	// chat resumes exactly where it left off.
+	// Summarize the older turns; the last keepLastTurns stay as raw turns so
+	// the chat resumes exactly where it left off. The summarization call is a
+	// provider call too — the wire request carries the provider-side model
+	// name (the internal ID would be rejected for slug-mangled upstream
+	// names).
 	toSummarize := turns[:len(turns)-keepLastTurns]
-	summary, err := a.summarize(ctx, p, conv.ActiveModelID, prevSummary, toSummarize)
+	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, toSummarize)
 	if err != nil {
 		return err
 	}
