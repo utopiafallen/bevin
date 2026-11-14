@@ -55,19 +55,47 @@ func summarizeBudget(maxContext int) int {
 // where it left off.
 const keepLastTurns = 5
 
+// timestampMarker returns the bracket-ready UTC timestamp for a message
+// (RFC3339; the raw CreatedAt when it doesn't parse). Empty when the message
+// has no timestamp (tests).
+func timestampMarker(m store.Message) string {
+	if m.CreatedAt == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
+	if err != nil {
+		return m.CreatedAt
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // withTimestamp prepends the message's UTC timestamp (RFC3339) to its content,
 // so the model knows when each message was sent. The stored content is
 // untouched — the timestamp is only added to what the request sends. A message
 // with no CreatedAt (tests) is returned as-is.
 func withTimestamp(m store.Message) string {
-	if m.CreatedAt == "" {
+	marker := timestampMarker(m)
+	if marker == "" {
 		return m.Content
 	}
-	t, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
-	if err != nil {
-		return "[" + m.CreatedAt + "] " + m.Content
+	return "[" + marker + "] " + m.Content
+}
+
+// modelFacing renders one stored message the way the model receives it: the
+// UTC timestamp marker + the reply; for an assistant message that carries a
+// stored reasoning trace, the trace is included in a [thinking] block between
+// the marker and the reply (when includeReasoning is set — see
+// reasoningInTranscript). Stored content is untouched.
+func modelFacing(m store.Message, includeReasoning bool) string {
+	if m.Role != roleAssistant || m.Reasoning == "" || !includeReasoning {
+		return withTimestamp(m)
 	}
-	return "[" + t.UTC().Format(time.RFC3339) + "] " + m.Content
+	marker := timestampMarker(m)
+	block := "[thinking]\n" + m.Reasoning + "\n[/thinking]\n" + m.Content
+	if marker == "" {
+		return block
+	}
+	return "[" + marker + "] " + block
 }
 
 // leadingTranscriptTimestamp matches the transcript marker that withTimestamp
@@ -84,6 +112,14 @@ var leadingTranscriptTimestamp = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2}T\d{2}:
 func stripLeadingTranscriptTimestamp(s string) string {
 	return leadingTranscriptTimestamp.ReplaceAllString(s, "")
 }
+
+// reasoningInTranscript reports whether an assistant's stored reasoning
+// (thinking trace) is sent back to the model in the transcript for this
+// model. Default: YES — the model sees its own earlier reasoning for
+// continuity. This is the override point for the ModelProfile revision
+// (tier 3, per-model harness behavior): a profile that should not receive
+// prior reasoning implements it here.
+func reasoningInTranscript(modelID string) bool { return true }
 
 // summaryFraming wraps a context summary so the model treats it as a record of
 // the conversation (for continuity), not a new instruction to follow.
@@ -150,10 +186,15 @@ func buildRequest(conv *store.Conversation, msgs []store.Message) (provider.Chat
 		tokens += estimateTokens(fr)
 	}
 	reqMsgs := make([]provider.Message, 0, len(turns))
+	// Whether this model receives earlier assistant reasoning traces in the
+	// transcript (default yes — see reasoningInTranscript; the ModelProfile
+	// revision owns per-model overrides).
+	includeReasoning := reasoningInTranscript(conv.ActiveModelID)
 	for _, m := range turns {
-		// Prepend the message's UTC timestamp so the model knows when each
-		// message was sent (the stored content is untouched).
-		text := withTimestamp(m)
+		// Prepend the message's UTC timestamp (and the assistant's stored
+		// reasoning, when sent back) so the model knows when each message
+		// was sent + how it had reasoned (the stored content is untouched).
+		text := modelFacing(m, includeReasoning)
 		reqMsgs = append(reqMsgs, provider.Message{Role: provider.Role(m.Role), Text: text})
 		tokens += estimateTokens(text)
 	}

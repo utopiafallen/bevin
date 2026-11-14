@@ -390,6 +390,103 @@ func TestBuildRequestWithTimestamp(t *testing.T) {
 	}
 }
 
+// TestBuildRequestWithReasoning verifies the model-facing transcript sends an
+// assistant's stored reasoning back in a [thinking] block between the
+// timestamp and the reply (default on — reasoningInTranscript), user messages
+// are unaffected, and the includeReasoning=false path omits the block (the
+// ModelProfile override).
+func TestBuildRequestWithReasoning(t *testing.T) {
+	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
+	msgs := []store.Message{
+		{Role: roleUser, Content: "solve it", Seq: 0, CreatedAt: "2026-11-12T10:30:00Z"},
+		{Role: roleAssistant, Content: "the answer is 42", Reasoning: "step one: read the problem\nstep two: compute", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
+	}
+	req, _ := buildRequest(conv, msgs)
+	if len(req.Messages) != 2 {
+		t.Fatalf("Messages = %d, want 2", len(req.Messages))
+	}
+	if req.Messages[0].Text != "[2026-11-12T10:30:00Z] solve it" {
+		t.Fatalf("Messages[0] = %q, want the user turn untouched", req.Messages[0].Text)
+	}
+	want := "[2026-11-12T10:30:05Z] [thinking]\nstep one: read the problem\nstep two: compute\n[/thinking]\nthe answer is 42"
+	if req.Messages[1].Text != want {
+		t.Fatalf("Messages[1] = %q, want %q", req.Messages[1].Text, want)
+	}
+}
+
+// TestModelFacingNoReasoningWhenDisabled verifies the override path: with
+// includeReasoning=false (a future ModelProfile policy) the [thinking] block
+// is omitted even when the message carries a stored trace.
+func TestModelFacingNoReasoningWhenDisabled(t *testing.T) {
+	m := store.Message{Role: roleAssistant, Content: "hi", Reasoning: "internal thought", CreatedAt: "2026-11-12T10:30:05Z"}
+	got := modelFacing(m, false)
+	want := "[2026-11-12T10:30:05Z] hi"
+	if got != want {
+		t.Fatalf("modelFacing = %q, want %q (reasoning omitted)", got, want)
+	}
+	// An assistant message without a trace is identical either way.
+	m2 := store.Message{Role: roleAssistant, Content: "hi", CreatedAt: "2026-11-12T10:30:05Z"}
+	if modelFacing(m2, true) != modelFacing(m2, false) {
+		t.Fatal("no-trace message must render identically regardless of the flag")
+	}
+}
+
+// TestTurnSendsBackPreviousReasoning verifies the full turn path (not just
+// buildRequest): after an assistant reply with a stored reasoning trace, the
+// NEXT request to the model carries that trace in a [thinking] block (the
+// "send all reasoning back" default), so the model keeps continuity with its
+// own earlier thinking.
+func TestTurnSendsBackPreviousReasoning(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	fp := &fakeProvider{}
+	a.providers["m1"] = fp
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	// Simulate an earlier turn whose reasoning was persisted.
+	model := "m1"
+	if _, err := us.AppendMessage(convID, roleUser, "the first question", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := us.AppendMessage(convID, roleAssistant, "the first answer", "the first turn's stored reasoning trace", &model, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A new user message: the next request must include the prior reasoning.
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "the next question"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	last := fp.lastCall()
+	found := false
+	for _, m := range last.Messages {
+		if strings.Contains(m.Text, "[thinking]\nthe first turn's stored reasoning trace\n[/thinking]") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("next request does not send the prior reasoning back:\n%+v", last.Messages)
+	}
+	// The persisted reasoning is intact (the send-back does not mutate the store).
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawReasoning bool
+	for _, m := range msgs {
+		if m.Reasoning == "the first turn's stored reasoning trace" {
+			sawReasoning = true
+		}
+	}
+	if !sawReasoning {
+		t.Fatal("stored reasoning trace lost from the conversation")
+	}
+}
+
 // TestCompactPreservesLastTurns verifies a compaction preserves the last
 // keepLastTurns messages verbatim (only the older turns are folded into the
 // summary, so the chat resumes exactly where it left off).
@@ -416,10 +513,10 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	}
 	// Add enough messages to exceed the budget (each ~100 chars).
 	for i := 0; i < 45; i++ {
-		if _, err := us.AppendMessage(convID, roleUser, "hello "+strings.Repeat("x", 100), nil, nil); err != nil {
+		if _, err := us.AppendMessage(convID, roleUser, "hello "+strings.Repeat("x", 100), "", nil, nil); err != nil {
 			t.Fatalf("AppendMessage %d: %v", i, err)
 		}
-		if _, err := us.AppendMessage(convID, roleAssistant, "hi", &conv.ActiveModelID, nil); err != nil {
+		if _, err := us.AppendMessage(convID, roleAssistant, "hi", "", &conv.ActiveModelID, nil); err != nil {
 			t.Fatalf("AppendMessage %d: %v", i, err)
 		}
 	}

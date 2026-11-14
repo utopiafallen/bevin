@@ -309,7 +309,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	}
 	if conv, err := us.FindConversationByTitle(onboardingTitle); err == nil {
 		if has, err := us.HasMessages(conv.ID); err == nil && !has {
-			if _, err := us.AppendMessage(conv.ID, "assistant", welcome, nil, nil); err != nil {
+			if _, err := us.AppendMessage(conv.ID, "assistant", welcome, "", nil, nil); err != nil {
 				return "", err
 			}
 		}
@@ -331,7 +331,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 		return "", err
 	}
 	if welcome != "" {
-		if _, err := us.AppendMessage(c.ID, "assistant", welcome, nil, nil); err != nil {
+		if _, err := us.AppendMessage(c.ID, "assistant", welcome, "", nil, nil); err != nil {
 			return "", err
 		}
 	}
@@ -352,10 +352,13 @@ func (a *Agent) ModelAvailable(modelID string) bool {
 // ConversationMessage is one displayable message from a conversation. The
 // store also keeps bevin-internal rows (summary context artifacts, and tool
 // rows once tools exist); those are never rendered as chat, so
-// ConversationMessages filters to user + assistant only.
+// ConversationMessages filters to user + assistant only. Reasoning is the
+// assistant's stored thinking trace (empty for user messages and turns before
+// reasoning persistence).
 type ConversationMessage struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
+	Reasoning string `json:"reasoning,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -379,7 +382,7 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 		if m.Role != roleUser && m.Role != roleAssistant {
 			continue
 		}
-		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt})
+		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, CreatedAt: m.CreatedAt})
 	}
 	return out, nil
 }
@@ -411,7 +414,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
 	// Persist the user message first, so history is always durable/consistent.
-	if _, err := us.AppendMessage(convID, roleUser, userText, nil, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleUser, userText, "", nil, nil); err != nil {
 		return conv.ID, "", err
 	}
 	hist, err := us.ListMessages(convID)
@@ -462,7 +465,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// the streaming "done" event / returned from Turn).
 	res.Text = stripLeadingTranscriptTimestamp(res.Text)
 	modelID := conv.ActiveModelID
-	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, &modelID, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, &modelID, nil); err != nil {
 		return conv.ID, "", err
 	}
 	// Post-compact: if the prompt (now including the reply) exceeds the

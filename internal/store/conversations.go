@@ -148,17 +148,18 @@ type Message struct {
 	ConversationID string    `json:"conversation_id"`
 	Role           string    `json:"role"`
 	Content        string    `json:"content"`
+	Reasoning      string    `json:"reasoning,omitempty"`
 	Seq            int       `json:"seq"`
 	CreatedAt      string    `json:"created_at"`
 	ModelID        *string   `json:"model_id,omitempty"`
 	Embedding      []float32 `json:"-"`
 }
 
-const msgCols = `id, conversation_id, role, content, seq, created_at, model_id, embedding`
+const msgCols = `id, conversation_id, role, content, reasoning, seq, created_at, model_id, embedding`
 
 func scanMsg(rs interface{ Scan(...any) error }, m *Message) error {
 	var emb []byte
-	if err := rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Seq, &m.CreatedAt, &m.ModelID, &emb); err != nil {
+	if err := rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Reasoning, &m.Seq, &m.CreatedAt, &m.ModelID, &emb); err != nil {
 		return err
 	}
 	if len(emb) > 0 {
@@ -168,8 +169,9 @@ func scanMsg(rs interface{ Scan(...any) error }, m *Message) error {
 }
 
 // AppendMessage adds a message to a conversation with the next seq (atomic).
-// modelID and emb may be nil.
-func (s *UserStore) AppendMessage(convID, role, content string, modelID *string, emb []float32) (*Message, error) {
+// reasoning (the model's thinking trace for an assistant turn), modelID and
+// emb may be empty/nil.
+func (s *UserStore) AppendMessage(convID, role, content, reasoning string, modelID *string, emb []float32) (*Message, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("append: begin: %w", err)
@@ -184,8 +186,8 @@ func (s *UserStore) AppendMessage(convID, role, content string, modelID *string,
 	if emb != nil {
 		embCol = embedBlob(emb)
 	}
-	res, err := tx.Exec(`INSERT INTO messages (conversation_id, role, content, seq, created_at, model_id, embedding) VALUES (?,?,?,?,?,?,?)`,
-		convID, role, content, next, now, modelID, embCol)
+	res, err := tx.Exec(`INSERT INTO messages (conversation_id, role, content, reasoning, seq, created_at, model_id, embedding) VALUES (?,?,?,?,?,?,?,?)`,
+		convID, role, content, reasoning, next, now, modelID, embCol)
 	if err != nil {
 		return nil, fmt.Errorf("append: insert: %w", err)
 	}
@@ -199,7 +201,7 @@ func (s *UserStore) AppendMessage(convID, role, content string, modelID *string,
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("append: commit: %w", err)
 	}
-	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Seq: next, CreatedAt: now, ModelID: modelID, Embedding: emb}, nil
+	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Reasoning: reasoning, Seq: next, CreatedAt: now, ModelID: modelID, Embedding: emb}, nil
 }
 
 func (s *UserStore) GetMessage(id int64) (*Message, error) {
@@ -238,7 +240,7 @@ func (s *UserStore) SearchMessages(query string, limit int) ([]Message, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-		SELECT id, conversation_id, role, content, seq, created_at, model_id, embedding
+		SELECT id, conversation_id, role, content, reasoning, seq, created_at, model_id, embedding
 		FROM messages
 		WHERE EXISTS (SELECT 1 FROM messages_fts WHERE messages_fts.rowid = messages.id AND messages_fts MATCH ?)
 		ORDER BY id

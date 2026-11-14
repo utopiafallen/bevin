@@ -27,7 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
@@ -152,10 +152,47 @@ func (s *UserStore) migrate() error {
 			}
 		}
 	}
+	if v < 5 {
+		// v5: persist the assistant's reasoning (thinking trace) per message.
+		// Guarded on the column: a fresh DB already created the column (the
+		// DDL above carries it), so the ALTER runs only for pre-v5 files.
+		if !s.messageColumnExists("reasoning") {
+			if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("v5 alter messages: %w", err)
+			}
+		}
+	}
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		currentSchemaVersion, nowUTC())
 	return err
+}
+
+// messageColumnExists reports whether the messages table has the named column
+// (used to guard the v5 ALTER: a fresh DB already created the column).
+func (s *UserStore) messageColumnExists(name string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			colName string
+			ctype   string
+			notnull int
+			dflt    any
+			pk      int
+		)
+		if err := rows.Scan(&cid, &colName, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }
 
 // userSchema is the full per-user schema (P1–P13, with FTS5).
@@ -187,6 +224,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
 	role            TEXT NOT NULL,
 	content         TEXT NOT NULL DEFAULT '',
+	reasoning       TEXT NOT NULL DEFAULT '',
 	seq             INTEGER NOT NULL,
 	created_at      TEXT NOT NULL,
 	model_id        TEXT,

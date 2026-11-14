@@ -17,13 +17,16 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // summary that folds in the previous summary (if any) + the raw turns since
 // it. The result is the content of the next role=summary message (chained: each
 // new summary folds in the previous, so the latest alone carries the history).
-func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary string, turns []store.Message) (string, error) {
+// includeReasoning mirrors the chat request builder: the summarizer sees the
+// turns in the same model-facing format (timestamps + stored reasoning when
+// sent back to the model).
+func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary string, includeReasoning bool, turns []store.Message) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+1)
 	if prevSummary != "" {
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
 	}
 	for _, m := range turns {
-		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Text: withTimestamp(m)})
+		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Text: modelFacing(m, includeReasoning)})
 	}
 	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
 		System:   []provider.ContentPart{{Text: summarizationSystemPrompt}},
@@ -72,7 +75,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	// name (the internal ID would be rejected for slug-mangled upstream
 	// names).
 	toSummarize := turns[:len(turns)-keepLastTurns]
-	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, toSummarize)
+	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, reasoningInTranscript(conv.ActiveModelID), toSummarize)
 	if err != nil {
 		return err
 	}
@@ -80,7 +83,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		return nil
 	}
 	modelID := conv.ActiveModelID
-	_, err = us.AppendMessage(conv.ID, roleSummary, summary, &modelID, nil)
+	_, err = us.AppendMessage(conv.ID, roleSummary, summary, "", &modelID, nil)
 	return err
 }
 
