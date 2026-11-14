@@ -321,7 +321,14 @@
               if (p.reply && p.reply !== asst.buf) {
                 asst.buf = p.reply;
                 asst.cut = 0;
-                asst.bubble.innerHTML = "";
+                // Remove the settled blocks but KEEP the tail element: the
+                // re-render below writes into asst.tail, and clearing the
+                // whole innerHTML would detach it (the reply would render
+                // into a node no longer in the DOM — the bubble went empty
+                // exactly when the sanitizer shortened the reply).
+                while (asst.bubble.firstChild && asst.bubble.firstChild !== asst.tail) {
+                  asst.bubble.removeChild(asst.bubble.firstChild);
+                }
                 if (asst.raf) asst.raf = 0;
                 paint(asst);
               } else {
@@ -372,10 +379,10 @@
     // Restore the conversation's persisted history. Every message is saved
     // to the per-user database by the agent; this re-renders them in order
     // with their stored timestamps so a page reload doesn't lose the chat.
-    // Skipped when the log already has bubbles (onboarding renders its own
-    // welcome — no double render). Reasoning panels are not persisted, so
-    // restored assistant messages have no thinking details. A failed
-    // re-fetch never blocks the chat itself.
+    // Assistant messages that carry a persisted reasoning trace get their
+    // collapsed thinking block back too. Skipped when the log already has
+    // bubbles (onboarding renders its own welcome — no double render). A
+    // failed re-fetch never blocks the chat itself.
     async function loadHistory() {
       if (!convID) return;
       try {
@@ -388,8 +395,26 @@
             addUserMsg(m.content, m.created_at);
           } else if (m.role === "assistant") {
             var a = startAssistantMsg();
+            // Show the stored time, not "now" (this is history, not a live reply).
+            var dts = new Date(m.created_at);
+            if (!isNaN(dts)) {
+              a.m.querySelector(".when").textContent = fmtWhen(dts);
+              a.m.querySelector(".when").title = dts.toUTCString();
+            }
             a.buf = m.content;
             paint(a);
+            if (m.reasoning) {
+              // Restore the persisted thinking block: the full trace inside
+              // the collapsed details; the summary previews its first line.
+              a.details.style.display = "";
+              a.pre.textContent = m.reasoning;
+              var ln = "";
+              m.reasoning.split("\n").forEach(function (l) {
+                if (!ln && l.trim()) ln = l.trim();
+              });
+              if (ln.length > 90) ln = ln.slice(0, 90) + "…";
+              if (ln) a.details.querySelector("summary").textContent = "thinking — " + ln;
+            }
           }
         });
         scrollChat();
