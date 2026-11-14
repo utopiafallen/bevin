@@ -92,8 +92,12 @@
       <div id="chatCard" style="display:none;">
         <div style="display:flex; gap:.5rem; margin:.4rem 0 .2rem; flex-wrap:wrap; align-items:center;">
           <button class="btn btn-ghost" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
+          <button class="btn btn-ghost" id="historyBtn" type="button" title="Your past conversations">History</button>
           <button class="btn btn-ghost" id="searchBtn" type="button" title="Search your conversations (semantic)">Search</button>
-          <span id="modelInfo" class="chip chip-ghost" title="This conversation's model (set server-side)"></span>
+          <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message" style="max-width:11.5rem; padding:.3rem .5rem;"></select>
+        </div>
+        <div id="historyPanel" style="display:none; margin:.2rem 0 .5rem; padding:.55rem .7rem; border:1px solid var(--border); border-radius:8px;">
+          <div id="historyList" style="max-height:16rem; overflow-y:auto;"></div>
         </div>
         <div id="searchPanel" style="display:none; margin:.2rem 0 .5rem; padding:.55rem .7rem; border:1px solid var(--border); border-radius:8px;">
           <form id="searchForm" style="display:flex; gap:.5rem; align-items:center;">
@@ -229,19 +233,109 @@
       $("chatLog").appendChild(p);
     }
 
+    // The available models (for the select) + the server default. The
+    // conversation's ACTIVE model comes from the conversation itself
+    // (loadConvMeta) — the default only matters before the conversation
+    // exists.
+    var models = [];
+    var defaultModelID = "";
     async function loadModels() {
       try {
         var r = await fetch("/api/models");
         if (!r.ok) return;
         var j = await r.json();
-        var name = "";
-        (j.models || []).some(function (m) {
-          if (m.id === j.default) { name = m.display_name || m.id; return true; }
-          return false;
-        });
-        $("modelInfo").textContent = name ? "model: " + name : "";
+        models = j.models || [];
+        defaultModelID = j.default || "";
       } catch (e) { /* model list is best-effort */ }
     }
+
+    function modelName(id) {
+      var n = "";
+      (models || []).some(function (m) {
+        if (m.id === id) { n = m.display_name || m.id; return true; }
+        return false;
+      });
+      return n;
+    }
+
+    // Fills the model select: every available model, pre-selected to the
+    // conversation's active model (a model that fell out of the list —
+    // auto-disabled, removed — shows its stored id so nothing is hidden).
+    // Disabled until the conversation exists: a brand-new conversation
+    // takes its model at creation (the user's default), so there is
+    // nothing to switch yet.
+    function buildModelSelect(activeID) {
+      var sel = $("modelSelect");
+      sel.innerHTML = "";
+      models.forEach(function (m) {
+        var o = document.createElement("option");
+        o.value = m.id;
+        o.textContent = m.display_name || m.id;
+        sel.appendChild(o);
+      });
+      if (activeID && !sel.querySelector('option[value="' + activeID + '"]')) {
+        var o = document.createElement("option");
+        o.value = activeID;
+        o.textContent = activeID;
+        sel.appendChild(o);
+      }
+      sel.value = activeID || defaultModelID || (models.length ? models[0].id : "");
+      currentModelID = activeID || null; // the conversation's own model (null = not created yet)
+      sel.disabled = !convID || !models.length;
+    }
+
+    // Reads the open conversation's row (title, active model) and points
+    // the model select at it. A 404 means the conversation no longer
+    // exists (deleted elsewhere) — clear the local reference and start
+    // fresh rather than posting into a dead conversation.
+    async function loadConvMeta() {
+      if (!convID) { buildModelSelect(null); return; }
+      try {
+        var r = await fetch("/api/conversations/" + convID);
+        if (r.status === 404) {
+          convID = null;
+          try { localStorage.removeItem("bevin-conv"); } catch (e) {}
+          buildModelSelect(null);
+          return;
+        }
+        if (!r.ok) return;
+        var j = await r.json();
+        buildModelSelect((j.conversation && j.conversation.active_model_id) || null);
+      } catch (e) { /* best-effort — the chat itself still works */ }
+    }
+
+    // Model switch: PATCH the conversation's active model. Takes effect
+    // from the NEXT message (an in-flight turn keeps its model). On
+    // failure the select snaps back to the stored value.
+    var currentModelID = null; // the active model shown in the select
+    $("modelSelect").addEventListener("change", async function () {
+      var sel = this;
+      if (!convID) return;
+      var before = currentModelID; // what to revert to on failure
+      var next = sel.value;
+      sel.disabled = true;
+      try {
+        var r = await fetch("/api/conversations/" + convID, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model_id: next })
+        });
+        if (!r.ok) {
+          var je = {}; try { je = await r.json(); } catch (e) {}
+          sel.value = before; // revert
+          addErrorMsg("⚠ Could not switch model: " + (je.error || ("HTTP " + r.status)));
+          return;
+        }
+        var j = await r.json();
+        currentModelID = (j.conversation && j.conversation.active_model_id) || next;
+        buildModelSelect(currentModelID);
+      } catch (err) {
+        sel.value = before;
+        addErrorMsg("⚠ Could not switch model: " + err.message);
+      } finally {
+        loadConvMeta(); // re-sync from the server (the source of truth)
+      }
+    });
 
     async function sendChat() {
       if (sending) return;
@@ -270,6 +364,8 @@
           if (!cr.ok) { var je = {}; try { je = await cr.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + cr.status)); }
           convID = (await cr.json()).id;
           try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
+          loadConvMeta(); // the conversation exists now: the switcher unlocks
+          if ($("historyPanel").style.display !== "none") refreshHistory();
         }
         var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
           method: "POST",
@@ -378,8 +474,10 @@
       $("chatCard").style.display = "";
       $("logoutBtn").style.display = "";
       $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
-      loadModels();
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
+      // The select shows the conversation's OWN model (the server default
+      // only before it exists) — the model list must land first.
+      loadModels().then(loadConvMeta);
       if (me && me.role === "admin") $("adminSetupLink").style.display = "";
       loadHistory();
     }
@@ -576,6 +674,7 @@
       convID = null;
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
+      buildModelSelect(null); // the (future) conversation takes the default model
       addNote("New conversation started.");
     });
 
@@ -591,6 +690,103 @@
       return next;
     }
     $("searchBtn").addEventListener("click", function () { toggleSearchPanel(); });
+
+    // Conversation history: the per-user list (GET /api/conversations),
+    // most recently active first. A row opens that conversation (the same
+    // path as a search hit); its × deletes it (message rows + indexed
+    // vectors, server-side). The store's timestamps are UTC
+    // "YYYY-MM-DD HH:MM:SS" — parseUtc normalizes them for the local
+    // display.
+    function parseUtc(s) {
+      if (!s) return null;
+      var d = new Date(String(s).replace(" ", "T") + "Z");
+      return isNaN(d) ? null : d;
+    }
+
+    function toggleHistoryPanel(show) {
+      var p = $("historyPanel");
+      var next = (show === undefined) ? (p.style.display === "none") : show;
+      p.style.display = next ? "" : "none";
+      if (next) refreshHistory(); // always re-fetch: the list changes with every turn
+      return next;
+    }
+    $("historyBtn").addEventListener("click", function () { toggleHistoryPanel(); });
+
+    async function refreshHistory() {
+      var box = $("historyList");
+      try {
+        var r = await fetch("/api/conversations");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        var d = await r.json();
+        var convs = d.conversations || [];
+        box.innerHTML = "";
+        if (!convs.length) {
+          box.innerHTML = '<p class="muted" style="font-size:.85rem; margin:0;">no conversations yet.</p>';
+          return;
+        }
+        convs.forEach(function (c) {
+          var row = document.createElement("div");
+          row.style.cssText = "display:flex; align-items:center; gap:.5rem; padding:.4rem .5rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.35rem; cursor:pointer;" +
+            (c.id === convID ? " background:var(--hover, rgba(127,127,127,.08));" : "");
+          row.onmouseenter = function () { row.style.background = "var(--hover, rgba(127,127,127,.08));"; };
+          row.onmouseleave = function () {
+            row.style.background = c.id === convID ? "var(--hover, rgba(127,127,127,.08))" : "";
+          };
+          var title = document.createElement("div");
+          title.style.cssText = "flex:1; font-size:.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
+          title.textContent = c.title || "(untitled)";
+          var when = document.createElement("div");
+          when.style.cssText = "font-size:.72rem; color:var(--muted, #666); white-space:nowrap;";
+          var dts = parseUtc(c.last_activity_at) || parseUtc(c.created_at);
+          when.textContent = dts ? fmtWhen(dts) : "";
+          if (dts) when.title = dts.toUTCString();
+          var del = document.createElement("button");
+          del.type = "button";
+          del.className = "btn btn-ghost";
+          del.style.cssText = "padding:0 .45rem; line-height:1.5; font-size:.85rem;";
+          del.textContent = "×";
+          del.title = "Delete this conversation";
+          del.addEventListener("click", function (e) {
+            e.stopPropagation();
+            if (sending) return;
+            if (!confirm("Delete this conversation? Its messages cannot be recovered.")) return;
+            fetch("/api/conversations/" + c.id, { method: "DELETE" }).then(function (rr) {
+              if (rr.ok) {
+                if (c.id === convID) { // it was the open one: start fresh
+                  convID = null;
+                  try { localStorage.removeItem("bevin-conv"); } catch (e2) {}
+                  $("chatLog").innerHTML = "";
+                  addNote("Conversation deleted.");
+                  loadConvMeta();
+                }
+                refreshHistory();
+                return;
+              }
+              return rr.json().then(function (je) {
+                throw new Error((je && je.error) || ("HTTP " + rr.status));
+              }).catch(function (e) {
+                if (e instanceof SyntaxError) throw new Error("HTTP " + rr.status); // non-JSON error body
+                throw e;
+              });
+            }).catch(function (err) { alert("Could not delete: " + err.message); });
+          });
+          row.addEventListener("click", function () {
+            if (c.id !== convID) openConversation(c.id);
+            toggleHistoryPanel(false);
+          });
+          row.appendChild(title);
+          row.appendChild(when);
+          row.appendChild(del);
+          box.appendChild(row);
+        });
+      } catch (err) {
+        box.innerHTML = "";
+        var p = document.createElement("p");
+        p.style.cssText = "font-size:.85rem; color:var(--danger, #c0392b); margin:0;";
+        p.textContent = "⚠ " + err.message;
+        box.appendChild(p);
+      }
+    }
 
     async function runSearch() {
       var q = $("searchInput").value.trim();
@@ -646,7 +842,7 @@
       $("chatLog").innerHTML = "";
       toggleSearchPanel(false);
       loadHistory();
-      loadModels();
+      loadModels().then(loadConvMeta);
       scrollChat();
       $("message").focus();
     }
