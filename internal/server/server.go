@@ -7,6 +7,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -127,6 +128,7 @@ func (a *App) routes() {
 	// dashboard instead; this also stops a stale user tab from chatting as
 	// the admin).
 	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
+	mux.HandleFunc("GET /api/conversations/{id}/messages", a.chatGate(a.getMessages))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
@@ -347,6 +349,22 @@ func (a *App) createConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+}
+
+// getMessages returns the conversation's displayable history (user +
+// assistant messages, oldest first) so a reloaded page can restore it.
+func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	msgs, err := a.ag.ConversationMessages(u.Handle, r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
 
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {

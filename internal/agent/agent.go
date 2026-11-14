@@ -349,6 +349,41 @@ func (a *Agent) ModelAvailable(modelID string) bool {
 	return false
 }
 
+// ConversationMessage is one displayable message from a conversation. The
+// store also keeps bevin-internal rows (summary context artifacts, and tool
+// rows once tools exist); those are never rendered as chat, so
+// ConversationMessages filters to user + assistant only.
+type ConversationMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ConversationMessages returns the displayable messages of the user's
+// conversation in seq order. store.ErrNotFound when the conversation is not
+// in the user's store.
+func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessage, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := us.GetConversation(convID); err != nil {
+		return nil, err
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ConversationMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role != roleUser && m.Role != roleAssistant {
+			continue
+		}
+		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt})
+	}
+	return out, nil
+}
+
 // runTurn is the shared logic for Turn (non-streaming, emit=nil) and
 // TurnStream (streaming, emit!=nil). It persists the user message, builds the
 // request (frozen system prompt + latest context summary + raw turns since
@@ -421,6 +456,11 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if a.isAutoDisabled(conv.ActiveModelID) {
 		a.SetModelAutoDisabled(conv.ActiveModelID, false)
 	}
+	// Deterministic backstop for the no-echo rule: if the model echoed a
+	// transcript timestamp marker into the start of its reply, strip it
+	// before the reply is persisted (and before it is sent to the client on
+	// the streaming "done" event / returned from Turn).
+	res.Text = stripLeadingTranscriptTimestamp(res.Text)
 	modelID := conv.ActiveModelID
 	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, &modelID, nil); err != nil {
 		return conv.ID, "", err

@@ -293,6 +293,16 @@
               if (p.reasoning) {
                 reasoning += p.reasoning;
                 asst.details.style.display = "";
+                // The collapsed block previews the current line of the
+                // streaming reasoning, so it shows what the model is doing
+                // instead of a static label.
+                var lines = reasoning.split("\n");
+                var ln = "";
+                for (var li = lines.length - 1; li >= 0; li--) {
+                  if (lines[li].trim()) { ln = lines[li].trim(); break; }
+                }
+                if (ln.length > 90) ln = ln.slice(0, 90) + "…";
+                if (ln) asst.details.querySelector("summary").textContent = "thinking — " + ln;
                 var atBottom = pinScroll($("chatLog"));
                 asst.pre.textContent = reasoning;
                 if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
@@ -303,9 +313,22 @@
               }
             } else if (evt === "done") {
               gotDone = true;
-              if (!asst.buf) asst.buf = p.reply || "(empty reply)";
-              if (asst.raf) asst.raf = 0;
-              if (asst.cut < asst.buf.length) paint(asst);
+              // The "done" reply is the authoritative final text — the
+              // server sanitizes it (an echoed transcript timestamp marker
+              // is stripped). If it differs from what streamed, re-render
+              // the bubble from scratch so the view matches what was
+              // persisted.
+              if (p.reply && p.reply !== asst.buf) {
+                asst.buf = p.reply;
+                asst.cut = 0;
+                asst.bubble.innerHTML = "";
+                if (asst.raf) asst.raf = 0;
+                paint(asst);
+              } else {
+                if (!asst.buf) asst.buf = p.reply || "(empty reply)";
+                if (asst.raf) asst.raf = 0;
+                if (asst.cut < asst.buf.length) paint(asst);
+              }
             } else if (evt === "error") {
               throw new Error(p.error || "stream error");
             }
@@ -343,6 +366,34 @@
       loadModels();
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       if (me && me.role === "admin") $("adminSetupLink").style.display = "";
+      loadHistory();
+    }
+
+    // Restore the conversation's persisted history. Every message is saved
+    // to the per-user database by the agent; this re-renders them in order
+    // with their stored timestamps so a page reload doesn't lose the chat.
+    // Skipped when the log already has bubbles (onboarding renders its own
+    // welcome — no double render). Reasoning panels are not persisted, so
+    // restored assistant messages have no thinking details. A failed
+    // re-fetch never blocks the chat itself.
+    async function loadHistory() {
+      if (!convID) return;
+      try {
+        var r = await fetch("/api/conversations/" + convID + "/messages");
+        if (!r.ok) return;
+        var d = await r.json();
+        if (chatLog.children.length > 0) return; // chat started meanwhile
+        (d.messages || []).forEach(function (m) {
+          if (m.role === "user") {
+            addUserMsg(m.content, m.created_at);
+          } else if (m.role === "assistant") {
+            var a = startAssistantMsg();
+            a.buf = m.content;
+            paint(a);
+          }
+        });
+        scrollChat();
+      } catch (e) { /* history is a convenience — never block the chat */ }
     }
 
     // First-time onboarding ("Meet Bevin"): a regular user who has not

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"time"
 
 	"github.com/utopiafallen/bevin/internal/provider"
@@ -67,6 +68,21 @@ func withTimestamp(m store.Message) string {
 		return "[" + m.CreatedAt + "] " + m.Content
 	}
 	return "[" + t.UTC().Format(time.RFC3339) + "] " + m.Content
+}
+
+// leadingTranscriptTimestamp matches the transcript marker that withTimestamp
+// prepends to every message. Models occasionally echo that marker into the
+// start of their own reply — the system prompt forbids it, but during a long
+// reasoning phase the rule can be lost, so the reply is also sanitized
+// deterministically at the persistence boundary.
+var leadingTranscriptTimestamp = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\][ 	]?`)
+
+// stripLeadingTranscriptTimestamp removes a transcript timestamp marker from
+// the start of a reply if the model echoed one. Only the leading marker in
+// the exact transcript format (UTC, seconds, Z) is removed; a timestamp
+// anywhere else in the text, or in any other format, is left alone.
+func stripLeadingTranscriptTimestamp(s string) string {
+	return leadingTranscriptTimestamp.ReplaceAllString(s, "")
 }
 
 // summaryFraming wraps a context summary so the model treats it as a record of

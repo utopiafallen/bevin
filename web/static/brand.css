@@ -175,7 +175,7 @@ input:focus, textarea:focus, select:focus {
 .msg-assistant .bubble { border-bottom-left-radius: 6px; }
 .msg .error-text { color: var(--danger, #c0392b); }
 .msg details.reasoning { margin: 0 0.2rem 0.3rem; font-size: 0.8rem; color: var(--text-muted); max-width: 100%; }
-.msg details.reasoning summary { cursor: pointer; font-size: 0.72rem; font-weight: 700; }
+.msg details.reasoning summary { cursor: pointer; font-size: 0.72rem; font-weight: 700; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg details.reasoning pre { white-space: pre-wrap; font-family: inherit; margin: 0.3rem 0 0; }
 /* Thinking placeholder: shown in the assistant bubble while the model is
    producing the reply (until the first token is painted). Removed on the
