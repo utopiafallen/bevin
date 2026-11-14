@@ -152,7 +152,9 @@
     function startAssistantMsg() {
       var m = document.createElement("div");
       m.className = "msg msg-assistant";
-      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><div class="bubble md-bubble"><div class="md-tail"></div></div>';
+      // The bubble starts with an animated "Thinking…" placeholder (removed
+      // on the first paint, when real content lands).
+      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><div class="bubble md-bubble"><span class="thinking">Thinking<span class="tdot">.</span><span class="tdot">.</span><span class="tdot">.</span></span><div class="md-tail"></div></div>';
       var d = new Date();
       var when = m.querySelector(".when");
       when.textContent = fmtWhen(d);
@@ -176,6 +178,8 @@
     // Deltas are coalesced to one paint per animation frame.
     function paint(a) {
       a.raf = 0;
+      var thinking = a.bubble.querySelector(".thinking");
+      if (thinking) thinking.remove(); // first real content landed
       var log = $("chatLog");
       var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
       var full = a.buf;
@@ -241,7 +245,11 @@
       sending = true;
       $("sendBtn").disabled = true;
 
-      var asst = null;
+      // The assistant bubble (with its animated Thinking… placeholder) is
+      // created IMMEDIATELY — feedback while the request is in flight and
+      // while the model thinks, not on the first token. If the turn fails
+      // before any content lands, the placeholder bubble is discarded.
+      var asst = startAssistantMsg();
       var reasoning = "";
       try {
         if (!convID) {
@@ -284,20 +292,17 @@
             if (evt === "message") {
               if (p.reasoning) {
                 reasoning += p.reasoning;
-                if (!asst) asst = startAssistantMsg();
                 asst.details.style.display = "";
                 var atBottom = pinScroll($("chatLog"));
                 asst.pre.textContent = reasoning;
                 if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
               }
               if (p.delta) {
-                if (!asst) asst = startAssistantMsg();
                 asst.buf += p.delta;
                 schedulePaint(asst);
               }
             } else if (evt === "done") {
               gotDone = true;
-              if (!asst) asst = startAssistantMsg();
               if (!asst.buf) asst.buf = p.reply || "(empty reply)";
               if (asst.raf) asst.raf = 0;
               if (asst.cut < asst.buf.length) paint(asst);
@@ -306,8 +311,12 @@
             }
           }
         }
-        if (!gotDone && !asst) addErrorMsg("⚠ The stream ended before the reply completed.");
+        if (!gotDone && !asst.buf && !reasoning) {
+          asst.m.remove();
+          addErrorMsg("⚠ The stream ended before the reply completed.");
+        }
       } catch (err) {
+        if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
         addErrorMsg("⚠ " + err.message);
       } finally {
         sending = false;
