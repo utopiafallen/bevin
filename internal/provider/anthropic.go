@@ -74,11 +74,13 @@ type antRequest struct {
 }
 
 type antOutBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking,omitempty"`  // type=thinking: the model's trace
+	Signature string          `json:"signature,omitempty"` // type=thinking: per-turn signature (replay needs it; see decodeAntResponse)
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
 }
 
 type antUsage struct {
@@ -95,6 +97,7 @@ type antResponse struct {
 type antDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
+	Thinking    string `json:"thinking"` // type=thinking_delta
 	PartialJSON string `json:"partial_json"`
 	StopReason  string `json:"stop_reason"`
 }
@@ -224,12 +227,23 @@ func buildAntRequest(req ChatRequest, model string, stream bool) (antRequest, er
 	return areq, nil
 }
 
+// decodeAntResponse parses an Anthropic response into a Result. Thinking
+// blocks (extended thinking) are accumulated into Result.Reasoning — their
+// text is the model's trace, persisted + shown in the UI like any other
+// reasoning. Replay is deliberately NOT wired on the Anthropic encoder
+// (encodeAntContent ignores Message.Reasoning): the API requires each
+// thinking block back VERBATIM with its per-turn signature (which we do not
+// persist), and a thinking block without a valid signature is rejected — so
+// until signature capture lands, Anthropic turns simply don't replay the
+// trace rather than send an invalid one.
 func decodeAntResponse(ar antResponse) *Result {
 	res := &Result{StopReason: ar.StopReason}
 	for _, b := range ar.Content {
 		switch b.Type {
 		case "text":
 			res.Text += b.Text
+		case "thinking":
+			res.Reasoning += b.Thinking
 		case "tool_use":
 			args := string(b.Input)
 			if strings.TrimSpace(args) == "" {
@@ -321,6 +335,9 @@ func (a *Anthropic) Stream(ctx context.Context, model string, req ChatRequest, e
 			case "text_delta":
 				res.Text += ev.Delta.Text
 				c.TextDelta = ev.Delta.Text
+			case "thinking_delta":
+				res.Reasoning += ev.Delta.Thinking
+				c.ReasoningDelta = ev.Delta.Thinking
 			case "input_json_delta":
 				if ot, ok := openTools[ev.Index]; ok {
 					ot.jsonBuf += ev.Delta.PartialJSON
@@ -344,7 +361,7 @@ func (a *Anthropic) Stream(ctx context.Context, model string, req ChatRequest, e
 				res.Usage = &Usage{PromptTokens: inputTokens, CompletionTokens: ev.Usage.OutputTokens, TotalTokens: inputTokens + ev.Usage.OutputTokens}
 			}
 		}
-		if c.TextDelta != "" || c.StopReason != "" {
+		if c.TextDelta != "" || c.ReasoningDelta != "" || c.StopReason != "" {
 			if emit != nil {
 				if err := emit(c); err != nil {
 					return &res, err

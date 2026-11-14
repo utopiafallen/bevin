@@ -89,6 +89,44 @@ func TestOpenAIChatRequestFormat(t *testing.T) {
 	}
 }
 
+// TestOpenAIReasoningContentWire verifies the reasoning replay on the OAI
+// wire: an assistant message carrying a Reasoning trace serializes with the
+// trace in the API's native field (reasoning_content, alongside content),
+// and a message WITHOUT a trace (the model didn't think / thinking disabled)
+// omits the field entirely.
+func TestOpenAIReasoningContentWire(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body = mustDecodeBody(t, r)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(srv.URL, "k")
+	_, err := p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, Text: "the answer is 42", Reasoning: "step one\nstep two"},
+			{Role: RoleUser, Text: "and now what"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	m0 := msgs[0].(map[string]any)
+	if m0["role"] != "assistant" || m0["content"] != "the answer is 42" {
+		t.Fatalf("assistant msg = %v (content must stay the plain reply)", m0)
+	}
+	if m0["reasoning_content"] != "step one\nstep two" {
+		t.Fatalf("reasoning_content = %v, want the stored trace in the API's native field", m0["reasoning_content"])
+	}
+	// A traceless message omits the field (not an empty string).
+	m1 := msgs[1].(map[string]any)
+	if _, present := m1["reasoning_content"]; present {
+		t.Fatalf("traceless message must omit reasoning_content, got %v", m1)
+	}
+}
+
 func TestOpenAIVideoUnsupported(t *testing.T) {
 	p := NewOpenAI("http://127.0.0.1:0", "k")
 	_, err := p.Chat(context.Background(), "m", ChatRequest{
@@ -335,6 +373,52 @@ func TestAnthropicImageBlock(t *testing.T) {
 	src := img["source"].(map[string]any)
 	if src["type"] != "base64" || src["media_type"] != "image/jpeg" {
 		t.Fatalf("source = %v", src)
+	}
+}
+
+// TestAnthropicThinkingCapture verifies the Anthropic decoder accumulates
+// extended-thinking blocks into Result.Reasoning (persisted + shown in the
+// UI like any reasoning) — and that the encoder side deliberately does NOT
+// send a thinking block back (replay needs the per-turn signature we don't
+// persist yet — see decodeAntResponse).
+func TestAnthropicThinkingCapture(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body = mustDecodeBody(t, r)
+		_, _ = w.Write([]byte(`{"content":[{"type":"thinking","thinking":"hmm, let me work it out","signature":"sig-abc"},{"type":"text","text":"the answer is 42"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv.Close()
+
+	p := NewAnthropic(srv.URL, "k")
+	res, err := p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{{Role: RoleUser, Text: "solve it"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "the answer is 42" {
+		t.Fatalf("text = %q", res.Text)
+	}
+	if res.Reasoning != "hmm, let me work it out" {
+		t.Fatalf("reasoning = %q, want the thinking block text", res.Reasoning)
+	}
+	// Replay: send the captured trace back — the encoder must NOT emit a
+	// thinking block (no signature to send with it).
+	_, err = p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, Text: "the answer is 42", Reasoning: "hmm, let me work it out"},
+			{Role: RoleUser, Text: "why?"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	ab := msgs[0].(map[string]any)["content"].([]any)
+	for _, b := range ab {
+		if b.(map[string]any)["type"] == "thinking" {
+			t.Fatalf("anthropic encoder sent a thinking block (it must not — replay needs the signature): %v", b)
+		}
 	}
 }
 

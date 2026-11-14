@@ -480,8 +480,9 @@ func TestMessageReasoningRoundTrip(t *testing.T) {
 func TestUserStoreMigrationV5AddsReasoningColumn(t *testing.T) {
 	// A pre-v5 user DB: the messages table was created WITHOUT the reasoning
 	// column (the v5 ALTER must add it), one conversation carries the exact
-	// v4-era base prompt (the re-freeze must move it to the current Base),
-	// and one message row must still be readable after the migration.
+	// v5-era base prompt (the re-freeze must move it to the current Base —
+	// today's v6, which dropped the [thinking] framing), and one message row
+	// must still be readable after the migration.
 	dir := t.TempDir()
 	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "bevin.db"))
 	if err != nil {

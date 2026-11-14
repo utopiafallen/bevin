@@ -81,21 +81,21 @@ func withTimestamp(m store.Message) string {
 	return "[" + marker + "] " + m.Content
 }
 
-// modelFacing renders one stored message the way the model receives it: the
-// UTC timestamp marker + the reply; for an assistant message that carries a
-// stored reasoning trace, the trace is included in a [thinking] block between
-// the marker and the reply (when includeReasoning is set — see
-// reasoningInTranscript). Stored content is untouched.
-func modelFacing(m store.Message, includeReasoning bool) string {
-	if m.Role != roleAssistant || m.Reasoning == "" || !includeReasoning {
-		return withTimestamp(m)
+// assistantFacing renders one stored message as the neutral provider message
+// the model receives: the UTC timestamp marker + the reply in the text, and —
+// for an assistant message that carries a stored reasoning trace (when
+// includeReasoning is set, see reasoningInTranscript) — the trace in the
+// message's Reasoning field, which the provider encodes in the API's native
+// field (OAI wire: reasoning_content; the Anthropic encoder deliberately
+// ignores it — see provider.decodeAntResponse). Stored content is untouched.
+// A trace is empty when the model didn't think (or thinking was disabled), in
+// which case the field is simply absent.
+func assistantFacing(m store.Message, includeReasoning bool) provider.Message {
+	pm := provider.Message{Role: provider.Role(m.Role), Text: withTimestamp(m)}
+	if m.Role == roleAssistant && includeReasoning && m.Reasoning != "" {
+		pm.Reasoning = m.Reasoning
 	}
-	marker := timestampMarker(m)
-	block := "[thinking]\n" + m.Reasoning + "\n[/thinking]\n" + m.Content
-	if marker == "" {
-		return block
-	}
-	return "[" + marker + "] " + block
+	return pm
 }
 
 // leadingTranscriptTimestamp matches the transcript marker that withTimestamp
@@ -114,11 +114,12 @@ func stripLeadingTranscriptTimestamp(s string) string {
 }
 
 // reasoningInTranscript reports whether an assistant's stored reasoning
-// (thinking trace) is sent back to the model in the transcript for this
-// model. Default: YES — the model sees its own earlier reasoning for
-// continuity. This is the override point for the ModelProfile revision
-// (tier 3, per-model harness behavior): a profile that should not receive
-// prior reasoning implements it here.
+// (thinking trace) is sent back to the model for this model — in the API's
+// native reasoning field for the turn (OAI wire: reasoning_content). Default:
+// YES — the model sees its own earlier reasoning for continuity. This is the
+// override point for the ModelProfile revision (tier 3, per-model harness
+// behavior): a profile that should not receive prior reasoning implements it
+// here.
 func reasoningInTranscript(modelID string) bool { return true }
 
 // summaryFraming wraps a context summary so the model treats it as a record of
@@ -186,17 +187,16 @@ func buildRequest(conv *store.Conversation, msgs []store.Message) (provider.Chat
 		tokens += estimateTokens(fr)
 	}
 	reqMsgs := make([]provider.Message, 0, len(turns))
-	// Whether this model receives earlier assistant reasoning traces in the
-	// transcript (default yes — see reasoningInTranscript; the ModelProfile
-	// revision owns per-model overrides).
+	// Whether this model receives earlier assistant reasoning traces (default
+	// yes — see reasoningInTranscript; the ModelProfile revision owns
+	// per-model overrides).
 	includeReasoning := reasoningInTranscript(conv.ActiveModelID)
 	for _, m := range turns {
-		// Prepend the message's UTC timestamp (and the assistant's stored
-		// reasoning, when sent back) so the model knows when each message
-		// was sent + how it had reasoned (the stored content is untouched).
-		text := modelFacing(m, includeReasoning)
-		reqMsgs = append(reqMsgs, provider.Message{Role: provider.Role(m.Role), Text: text})
-		tokens += estimateTokens(text)
+		// Prepend the message's UTC timestamp (and replay the assistant's
+		// stored reasoning, when sent back) — the stored content is untouched.
+		pm := assistantFacing(m, includeReasoning)
+		reqMsgs = append(reqMsgs, pm)
+		tokens += estimateTokens(pm.Text + pm.Reasoning)
 	}
 	return provider.ChatRequest{System: sysParts, Messages: reqMsgs}, tokens
 }

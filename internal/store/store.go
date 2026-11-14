@@ -27,7 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
@@ -145,6 +145,12 @@ func (s *UserStore) migrate() error {
 		// the current prompt.Base. Fresh conversations already carry it; a
 		// conversation with a custom prompt is never touched.
 		for _, legacy := range prompt.Legacy {
+			if legacy == prompt.Base {
+				// This previous base text IS the current one (e.g. v6
+				// reverted to the v4 text) — nothing to re-freeze; skipping
+				// avoids a same-value UPDATE on every store open.
+				continue
+			}
 			if _, err := s.db.Exec(
 				`UPDATE conversations SET frozen_system_prompt = ? WHERE frozen_system_prompt = ?`,
 				prompt.Base, legacy); err != nil {

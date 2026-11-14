@@ -390,11 +390,12 @@ func TestBuildRequestWithTimestamp(t *testing.T) {
 	}
 }
 
-// TestBuildRequestWithReasoning verifies the model-facing transcript sends an
-// assistant's stored reasoning back in a [thinking] block between the
-// timestamp and the reply (default on — reasoningInTranscript), user messages
-// are unaffected, and the includeReasoning=false path omits the block (the
-// ModelProfile override).
+// TestBuildRequestWithReasoning verifies the request builder replays an
+// assistant's stored reasoning in the neutral message's Reasoning field (the
+// provider encodes it in the API's native field — OAI wire:
+// reasoning_content), while the message TEXT stays the plain timestamp +
+// reply (default on — reasoningInTranscript), and user messages are
+// unaffected.
 func TestBuildRequestWithReasoning(t *testing.T) {
 	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
 	msgs := []store.Message{
@@ -408,34 +409,47 @@ func TestBuildRequestWithReasoning(t *testing.T) {
 	if req.Messages[0].Text != "[2026-11-12T10:30:00Z] solve it" {
 		t.Fatalf("Messages[0] = %q, want the user turn untouched", req.Messages[0].Text)
 	}
-	want := "[2026-11-12T10:30:05Z] [thinking]\nstep one: read the problem\nstep two: compute\n[/thinking]\nthe answer is 42"
-	if req.Messages[1].Text != want {
-		t.Fatalf("Messages[1] = %q, want %q", req.Messages[1].Text, want)
+	if req.Messages[0].Reasoning != "" {
+		t.Fatalf("Messages[0].Reasoning = %q, want empty (user turn)", req.Messages[0].Reasoning)
+	}
+	// The reply text is plain (timestamp + content) — the reasoning is NOT
+	// framed into the text.
+	if req.Messages[1].Text != "[2026-11-12T10:30:05Z] the answer is 42" {
+		t.Fatalf("Messages[1] = %q, want the timestamp + reply only (no reasoning in the text)", req.Messages[1].Text)
+	}
+	if req.Messages[1].Reasoning != "step one: read the problem\nstep two: compute" {
+		t.Fatalf("Messages[1].Reasoning = %q, want the stored trace (the API's native field)", req.Messages[1].Reasoning)
 	}
 }
 
-// TestModelFacingNoReasoningWhenDisabled verifies the override path: with
-// includeReasoning=false (a future ModelProfile policy) the [thinking] block
-// is omitted even when the message carries a stored trace.
-func TestModelFacingNoReasoningWhenDisabled(t *testing.T) {
+// TestAssistantFacingNoReasoningWhenDisabled verifies the override path: with
+// includeReasoning=false (a future ModelProfile policy) the Reasoning field is
+// left empty even when the message carries a stored trace, and a no-trace
+// message is identical either way.
+func TestAssistantFacingNoReasoningWhenDisabled(t *testing.T) {
 	m := store.Message{Role: roleAssistant, Content: "hi", Reasoning: "internal thought", CreatedAt: "2026-11-12T10:30:05Z"}
-	got := modelFacing(m, false)
-	want := "[2026-11-12T10:30:05Z] hi"
-	if got != want {
-		t.Fatalf("modelFacing = %q, want %q (reasoning omitted)", got, want)
+	got := assistantFacing(m, false)
+	if got.Reasoning != "" {
+		t.Fatalf("Reasoning = %q, want empty (override disabled)", got.Reasoning)
 	}
-	// An assistant message without a trace is identical either way.
+	if got.Text != "[2026-11-12T10:30:05Z] hi" {
+		t.Fatalf("Text = %q, want the plain timestamped reply", got.Text)
+	}
+	// An assistant message without a trace is identical either way (the model
+	// didn't think, or thinking was disabled — the field is simply absent).
 	m2 := store.Message{Role: roleAssistant, Content: "hi", CreatedAt: "2026-11-12T10:30:05Z"}
-	if modelFacing(m2, true) != modelFacing(m2, false) {
-		t.Fatal("no-trace message must render identically regardless of the flag")
+	if assistantFacing(m2, true).Reasoning != "" || assistantFacing(m2, false).Reasoning != "" {
+		t.Fatal("no-trace message must carry no reasoning regardless of the flag")
 	}
 }
 
 // TestTurnSendsBackPreviousReasoning verifies the full turn path (not just
 // buildRequest): after an assistant reply with a stored reasoning trace, the
-// NEXT request to the model carries that trace in a [thinking] block (the
-// "send all reasoning back" default), so the model keeps continuity with its
-// own earlier thinking.
+// NEXT request to the model carries that trace in the message's Reasoning
+// field (the "send all reasoning back" default — the provider encodes it in
+// the API's native field), the message text stays the plain timestamped
+// reply (no [thinking] framing), so the model keeps continuity with its own
+// earlier thinking in the channel it produced it in.
 func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -464,8 +478,13 @@ func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 	last := fp.lastCall()
 	found := false
 	for _, m := range last.Messages {
-		if strings.Contains(m.Text, "[thinking]\nthe first turn's stored reasoning trace\n[/thinking]") {
+		if m.Reasoning == "the first turn's stored reasoning trace" {
 			found = true
+			// The text of the same message must NOT carry the trace (no
+			// [thinking] framing — it goes in the API's native field only).
+			if strings.Contains(m.Text, "the first turn's stored reasoning trace") || strings.Contains(m.Text, "[thinking]") {
+				t.Fatalf("message text = %q must not contain the reasoning (it belongs in the API's reasoning field)", m.Text)
+			}
 		}
 	}
 	if !found {

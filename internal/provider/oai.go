@@ -42,10 +42,11 @@ type oaiToolCall struct {
 }
 
 type oaiMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
-	ToolCalls  []oaiToolCall   `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"` // assistant: the model's own thinking trace from this turn (replayed for continuity; absent when the model didn't think)
+	ToolCalls        []oaiToolCall   `json:"tool_calls,omitempty"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
 }
 
 type oaiTool struct {
@@ -62,12 +63,12 @@ type oaiStreamOptions struct {
 }
 
 type oaiChatRequest struct {
-	Model         string           `json:"model"`
-	Messages      []oaiMessage     `json:"messages"`
-	Tools         []oaiTool        `json:"tools,omitempty"`
-	Temperature   *float64         `json:"temperature,omitempty"`
-	MaxTokens     *int             `json:"max_tokens,omitempty"`
-	Stream        bool             `json:"stream,omitempty"`
+	Model         string            `json:"model"`
+	Messages      []oaiMessage      `json:"messages"`
+	Tools         []oaiTool         `json:"tools,omitempty"`
+	Temperature   *float64          `json:"temperature,omitempty"`
+	MaxTokens     *int              `json:"max_tokens,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
 	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
@@ -140,6 +141,9 @@ func mimeExt(m *Media) string {
 // video content parts (llama.cpp supports them; OpenAI does not).
 func encodeOAIMessage(m Message, videoOK bool) (oaiMessage, error) {
 	om := oaiMessage{Role: string(m.Role)}
+	if m.Reasoning != "" {
+		om.ReasoningContent = m.Reasoning
+	}
 	if len(m.ToolCalls) > 0 {
 		om.ToolCalls = encodeOAIToolCalls(m.ToolCalls)
 	}

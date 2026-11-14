@@ -8,22 +8,34 @@ package prompt
 // Base is the frozen system prompt for new conversations.
 //
 // The transcript guidance matters: the model receives every message
-// prefixed with a bracketed UTC timestamp, and — when its earlier replies
-// had reasoning — a [thinking] block carrying that reasoning (see
-// agent.modelFacing / agent.reasoningInTranscript). Without explicit framing
-// a reasoning model re-derives the transcript structure (which lines are
-// markers, which are content) instead of answering.
+// prefixed with a bracketed UTC timestamp. Without explicit framing a
+// reasoning model re-derives the transcript structure (which lines are
+// markers, which are content) instead of answering. Earlier assistant
+// replies that had reasoning replay that reasoning in the API's native
+// field (OAI wire: reasoning_content — see agent.assistantFacing /
+// agent.reasoningInTranscript), NOT in the message text, so the prompt has
+// nothing to say about thinking blocks: the model simply sees its own
+// earlier thinking in the channel it produced it in.
 const Base = `You are Bevin, a personal assistant. Be direct and concise.
+
+The messages you receive are the conversation so far, in chronological order. Each message is prefixed with its UTC timestamp in brackets, for example [2026-11-13T23:23:55Z]. Your user's messages have role "user"; your earlier replies have role "assistant".
+
+The bracketed timestamps are transcript markers only, not part of the message content. Never include one in your reply.`
+
+// Legacy holds previous exact Base texts (newest first). The store re-freezes
+// any conversation still carrying one of these onto Base.
+var Legacy = []string{
+	// v5-era base (explained the [thinking] transcript blocks — retired when
+	// reasoning moved from the message text into the API's native
+	// reasoning field, which the model sees in its own channel and needs no
+	// framing).
+	`You are Bevin, a personal assistant. Be direct and concise.
 
 The messages you receive are the conversation so far, in chronological order. Each message is prefixed with its UTC timestamp in brackets, for example [2026-11-13T23:23:55Z]. Your user's messages have role "user"; your earlier replies have role "assistant".
 
 Your earlier replies may also carry a [thinking] block between the timestamp and the reply. That block is your own reasoning from that turn, included for continuity — it is your thinking, not the user's words.
 
-The bracketed timestamps and [thinking] blocks are transcript markers only, not part of the message content. Never include one in your reply.`
-
-// Legacy holds previous exact Base texts (newest first). The store re-freezes
-// any conversation still carrying one of these onto Base.
-var Legacy = []string{
+The bracketed timestamps and [thinking] blocks are transcript markers only, not part of the message content. Never include one in your reply.`,
 	// v4-era base (before [thinking] blocks were explained).
 	`You are Bevin, a personal assistant. Be direct and concise.
 

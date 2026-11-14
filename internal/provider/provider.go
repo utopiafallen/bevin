@@ -64,6 +64,7 @@ type Message struct {
 	Role       Role
 	Text       string        // plain text; for RoleTool this is the tool result
 	Parts      []ContentPart // structured text/media; used when non-empty
+	Reasoning  string        // RoleAssistant: the model's thinking trace for this turn, replayed in the API's native field (OAI wire: reasoning_content) when non-empty; empty when the model didn't think (or thinking is disabled)
 	ToolCalls  []ToolCall    // RoleAssistant: tool calls the model requested
 	ToolCallID string        // RoleTool: which tool call this result answers
 }

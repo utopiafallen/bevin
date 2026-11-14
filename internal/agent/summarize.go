@@ -18,15 +18,15 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // it. The result is the content of the next role=summary message (chained: each
 // new summary folds in the previous, so the latest alone carries the history).
 // includeReasoning mirrors the chat request builder: the summarizer sees the
-// turns in the same model-facing format (timestamps + stored reasoning when
-// sent back to the model).
+// turns in the same model-facing form (timestamps + stored reasoning replayed
+// in the API's native field when sent back to the model).
 func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary string, includeReasoning bool, turns []store.Message) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+1)
 	if prevSummary != "" {
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
 	}
 	for _, m := range turns {
-		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Text: modelFacing(m, includeReasoning)})
+		msgs = append(msgs, assistantFacing(m, includeReasoning))
 	}
 	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
 		System:   []provider.ContentPart{{Text: summarizationSystemPrompt}},
