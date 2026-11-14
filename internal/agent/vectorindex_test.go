@@ -16,7 +16,7 @@ import (
 func newQdrantForTest(baseURL string) *qdrant.Client { return qdrant.New(baseURL) }
 
 // embedFake records the embed inputs and returns a fixed 768-dim vector
-// (so the MRL truncation path is exercised).
+// (the embedder's full native output is stored as-is).
 type embedFake struct {
 	inputs []string
 	vec    []float32
@@ -112,8 +112,8 @@ func TestVectorIndexIndexMessage(t *testing.T) {
 		t.Fatalf("point id = %v, want the message id 42", p["id"])
 	}
 	v := p["vector"].([]any)
-	if len(v) != storedDim {
-		t.Fatalf("vector dim = %d, want %d (MRL-truncated)", len(v), storedDim)
+	if len(v) != 768 {
+		t.Fatalf("vector dim = %d, want the full native 768 (no truncation)", len(v))
 	}
 	pl := p["payload"].(map[string]any)
 	if pl["conversation_id"] != "cv1" || pl["seq"] != float64(3) || pl["role"] != "user" || pl["content"] != "how do I bake sourdough" {
@@ -168,33 +168,5 @@ func TestVectorIndexSkipsNonConversationRows(t *testing.T) {
 	}
 	if len(emb.inputs) != 0 || len(qd.upserts) != 0 {
 		t.Fatalf("tool/summary/empty rows must not be embedded: inputs=%v upserts=%d", emb.inputs, len(qd.upserts))
-	}
-}
-
-func TestMRL(t *testing.T) {
-	// A 768-dim unit-ish vector truncates to 512 and renormalizes.
-	in := make([]float32, 768)
-	for i := 0; i < 512; i++ {
-		in[i] = 1
-	}
-	out := mrl(in)
-	if len(out) != 512 {
-		t.Fatalf("dim = %d, want %d", len(out), 512)
-	}
-	var norm float64
-	for _, x := range out {
-		norm += float64(x) * float64(x)
-	}
-	if norm < 0.999 || norm > 1.001 {
-		t.Fatalf("renormalized norm = %v, want 1", norm)
-	}
-	// The input must not be mutated.
-	if len(in) != 768 {
-		t.Fatal("input mutated")
-	}
-	// Shorter vectors pass through unchanged.
-	short := []float32{0.3, 0.4}
-	if got := mrl(short); len(got) != 2 || got[0] != 0.3 || got[1] != 0.4 {
-		t.Fatalf("short vector = %v, want unchanged", got)
 	}
 }

@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 	"sync"
 
@@ -28,11 +27,14 @@ import (
 )
 
 const (
-	// storedDim is the MRL-truncated vector dimension (the embedder returns
-	// 768-dim natively; the design stores 512 — leading dims + renormalize,
-	// ~no quality loss, smaller points). Shorter vectors (other backends)
-	// are stored as-is.
-	storedDim = 512
+	// The conversation index stores the embedder's FULL native output (the
+	// local embeddinggemma-2 returns 768-dim) — user directive: conversation
+	// history is a small per-user corpus, so there is no reason to MRL-
+	// truncate it (the 512-dim MRL storage remains the design for the large
+	// workspace-file corpus, where point size matters at scale). The
+	// collection dimension is learned from the first embedding, so a
+	// different-dim embedder later works without code changes.
+	//
 	// queryPrefix is the task prefix the embedding model expects on search
 	// queries (text only, per the model card).
 	queryPrefix = "task: search result | query: "
@@ -130,7 +132,7 @@ func (v *vectorIndex) embed(ctx context.Context, text string) ([]float32, error)
 	if len(vecs) == 0 {
 		return nil, fmt.Errorf("embed: no vectors returned")
 	}
-	return mrl(vecs[0]), nil
+	return vecs[0], nil
 }
 
 func (v *vectorIndex) ensureCollection(ctx context.Context, name string, vec []float32) error {
@@ -143,26 +145,6 @@ func (v *vectorIndex) ensureCollection(ctx context.Context, name string, vec []f
 		v.collDim[name] = dim
 	}
 	return v.qd.EnsureCollection(ctx, name, dim)
-}
-
-// mrl truncates to the stored dimension (leading dims + renormalize) and
-// returns shorter vectors unchanged.
-func mrl(vec []float32) []float32 {
-	if len(vec) <= storedDim {
-		return vec
-	}
-	v := append([]float32(nil), vec[:storedDim]...)
-	var norm float64
-	for _, x := range v {
-		norm += float64(x) * float64(x)
-	}
-	if norm > 0 {
-		n := float32(1.0 / math.Sqrt(norm))
-		for i := range v {
-			v[i] *= n
-		}
-	}
-	return v
 }
 
 func str(v any) string {
