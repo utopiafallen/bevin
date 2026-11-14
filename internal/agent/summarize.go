@@ -83,7 +83,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		return nil
 	}
 	modelID := conv.ActiveModelID
-	_, err = us.AppendMessage(conv.ID, roleSummary, summary, "", &modelID, nil)
+	_, err = us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
 	return err
 }
 

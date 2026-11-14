@@ -79,47 +79,18 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handle ON sessions(handle);
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	// v1: initial schema.
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 1, nowUTC()); err != nil {
-		return err
-	}
-	// v2: add the email column (existing installs; fresh installs already have
-	// it from the schema above).
+	// Single flat schema version, no migration steps (no live data worth
+	// migrating — user directive): a file written by a NEWER build is refused
+	// loudly, everything else is created fresh by the DDL above.
 	var v int
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v < 2 {
-		var hasCol int
-		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'email'`).Scan(&hasCol)
-		if hasCol == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 2, nowUTC()); err != nil {
-			return err
-		}
+	if v > 1 {
+		return fmt.Errorf("server.db was written by a newer bevin build (schema v%d > v1) — delete the data dir or upgrade bevin", v)
 	}
-	// v3: add the IdP origin + external subject columns (OAuth users). A
-	// user's stable identity for an external IdP is the provider's subject
-	// claim; idp labels the origin ("" = the server's own IdP, "oauth").
-	if v < 3 {
-		var hasCol int
-		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'idp'`).Scan(&hasCol)
-		if hasCol == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN idp TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
-			if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN idp_subject TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 3, nowUTC()); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 1, nowUTC())
+	return err
 }
 
 // User is an S1 account row.

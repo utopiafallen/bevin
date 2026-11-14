@@ -465,10 +465,10 @@ func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 	}
 	// Simulate an earlier turn whose reasoning was persisted.
 	model := "m1"
-	if _, err := us.AppendMessage(convID, roleUser, "the first question", "", nil, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleUser, "the first question", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := us.AppendMessage(convID, roleAssistant, "the first answer", "the first turn's stored reasoning trace", &model, nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleAssistant, "the first answer", "the first turn's stored reasoning trace", "", &model); err != nil {
 		t.Fatal(err)
 	}
 	// A new user message: the next request must include the prior reasoning.
@@ -532,10 +532,10 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	}
 	// Add enough messages to exceed the budget (each ~100 chars).
 	for i := 0; i < 45; i++ {
-		if _, err := us.AppendMessage(convID, roleUser, "hello "+strings.Repeat("x", 100), "", nil, nil); err != nil {
+		if _, err := us.AppendMessage(convID, roleUser, "hello "+strings.Repeat("x", 100), "", "", nil); err != nil {
 			t.Fatalf("AppendMessage %d: %v", i, err)
 		}
-		if _, err := us.AppendMessage(convID, roleAssistant, "hi", "", &conv.ActiveModelID, nil); err != nil {
+		if _, err := us.AppendMessage(convID, roleAssistant, "hi", "", "", &conv.ActiveModelID); err != nil {
 			t.Fatalf("AppendMessage %d: %v", i, err)
 		}
 	}

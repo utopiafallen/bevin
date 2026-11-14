@@ -18,9 +18,11 @@ type HistoryRecall struct {
 	Message *Message
 }
 
-// Retriever is the single seam for retrieval. v1 implements it by brute-force
-// over the small per-user SQLite sets (memories + conversation history). The
-// Qdrant-backed workspace-chunk retriever is a later impl behind this seam.
+// Retriever is the single seam for retrieval. The current implementation
+// brute-forces the small per-user memory set (memories are intentionally
+// NOT in the vector DB — small, per-user, confidence/recency-weighted);
+// conversation-history retrieval is served by the per-user vector DB (the
+// message rows carry no local embeddings).
 //
 // Constraint (skill): never scatter "load all vectors + brute force" across the
 // codebase — route retrieval through this interface.
@@ -84,23 +86,17 @@ func (r *memoryRetriever) RecallHistory(ctx context.Context, query string, query
 	if q == "" {
 		return nil, nil
 	}
-	// FTS5 prefilter (capped), then cosine-rank the survivors.
-	msgs, err := r.store.SearchMessages(q, 200)
+	// Lexical (FTS5) candidate list only. Semantic history search does NOT run
+	// over the SQLite rows: conversation messages live in the per-user vector
+	// DB and are searched there (queryEmb is accepted for interface
+	// uniformity; the vector-backed Retriever implementation consumes it).
+	msgs, err := r.store.SearchMessages(q, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]HistoryRecall, 0, len(msgs))
 	for i := range msgs {
-		m := &msgs[i]
-		var score float64
-		if queryEmb != nil && len(m.Embedding) > 0 {
-			score = 2.0 * cosine(queryEmb, m.Embedding)
-		}
-		out = append(out, HistoryRecall{Score: score, Message: m})
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	if len(out) > limit {
-		out = out[:limit]
+		out = append(out, HistoryRecall{Message: &msgs[i]})
 	}
 	return out, nil
 }

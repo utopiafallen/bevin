@@ -94,6 +94,7 @@ func assistantFacing(m store.Message, includeReasoning bool) provider.Message {
 	pm := provider.Message{Role: provider.Role(m.Role), Text: withTimestamp(m)}
 	if m.Role == roleAssistant && includeReasoning && m.Reasoning != "" {
 		pm.Reasoning = m.Reasoning
+		pm.ReasoningSignature = m.ReasoningSignature
 	}
 	return pm
 }

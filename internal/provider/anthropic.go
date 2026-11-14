@@ -42,8 +42,10 @@ type antSource struct {
 }
 
 type antContentBlock struct {
-	Type      string          `json:"type"` // text | image | tool_use | tool_result
+	Type      string          `json:"type"` // text | image | tool_use | tool_result | thinking
 	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`  // type=thinking
+	Signature string          `json:"signature,omitempty"` // type=thinking: per-turn signature
 	Source    *antSource      `json:"source,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
@@ -103,11 +105,15 @@ type antDelta struct {
 }
 
 type antStreamEvent struct {
-	Type         string          `json:"type"`
-	Index        int             `json:"index"`
-	ContentBlock antContentBlock `json:"content_block"`
-	Delta        antDelta        `json:"delta"`
-	Usage        *antUsage       `json:"usage"`
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+	// ContentBlock carries the (start) block on content_block_start and the
+	// FINALIZED block on content_block_stop — for thinking blocks the
+	// per-turn signature rides in there (it is only complete once the block
+	// closes, so the stop event is the reliable carrier; both are checked).
+	ContentBlock antOutBlock `json:"content_block"`
+	Delta        antDelta    `json:"delta"`
+	Usage        *antUsage   `json:"usage"`
 	Message      struct {
 		Usage *antUsage `json:"usage"`
 	} `json:"message"`
@@ -134,12 +140,22 @@ func (a *Anthropic) doJSON(ctx context.Context, req *http.Request) (*http.Respon
 	return resp, nil
 }
 
+// encodeAntContent maps a neutral message to Anthropic content blocks. For an
+// assistant message carrying a stored reasoning trace + its per-turn
+// signature, the trace is replayed as a thinking block FIRST (the API
+// requires thinking blocks to precede the text/tool_use blocks of the same
+// message, sent back verbatim with their signature). A trace WITHOUT a
+// signature is not replayed — the API rejects a thinking block it cannot
+// verify, and a text-only replay is the valid fallback.
 func encodeAntContent(m Message) ([]antContentBlock, error) {
 	// A tool result is a single tool_result block whose content is m.Text.
 	if m.Role == RoleTool {
 		return []antContentBlock{{Type: "tool_result", ToolUseID: m.ToolCallID, Content: m.Text}}, nil
 	}
 	var blocks []antContentBlock
+	if m.Role == RoleAssistant && m.Reasoning != "" && m.ReasoningSignature != "" {
+		blocks = append(blocks, antContentBlock{Type: "thinking", Thinking: m.Reasoning, Signature: m.ReasoningSignature})
+	}
 	if len(m.Parts) == 0 && m.Text != "" {
 		blocks = append(blocks, antContentBlock{Type: "text", Text: m.Text})
 	}
@@ -228,14 +244,11 @@ func buildAntRequest(req ChatRequest, model string, stream bool) (antRequest, er
 }
 
 // decodeAntResponse parses an Anthropic response into a Result. Thinking
-// blocks (extended thinking) are accumulated into Result.Reasoning — their
-// text is the model's trace, persisted + shown in the UI like any other
-// reasoning. Replay is deliberately NOT wired on the Anthropic encoder
-// (encodeAntContent ignores Message.Reasoning): the API requires each
-// thinking block back VERBATIM with its per-turn signature (which we do not
-// persist), and a thinking block without a valid signature is rejected — so
-// until signature capture lands, Anthropic turns simply don't replay the
-// trace rather than send an invalid one.
+// blocks (extended thinking) are accumulated into Result.Reasoning with their
+// per-turn signature in Result.ReasoningSignature — the trace is persisted +
+// shown in the UI, and the signature is what lets the encoder replay the
+// block verbatim on the next request (a thinking block without its signature
+// is rejected by the API).
 func decodeAntResponse(ar antResponse) *Result {
 	res := &Result{StopReason: ar.StopReason}
 	for _, b := range ar.Content {
@@ -244,6 +257,9 @@ func decodeAntResponse(ar antResponse) *Result {
 			res.Text += b.Text
 		case "thinking":
 			res.Reasoning += b.Thinking
+			if b.Signature != "" {
+				res.ReasoningSignature = b.Signature
+			}
 		case "tool_use":
 			args := string(b.Input)
 			if strings.TrimSpace(args) == "" {
@@ -330,6 +346,10 @@ func (a *Anthropic) Stream(ctx context.Context, model string, req ChatRequest, e
 			if ev.ContentBlock.Type == "tool_use" {
 				openTools[ev.Index] = &openTool{id: ev.ContentBlock.ID, name: ev.ContentBlock.Name}
 			}
+			if ev.ContentBlock.Type == "thinking" && ev.ContentBlock.Signature != "" {
+				res.ReasoningSignature = ev.ContentBlock.Signature
+				c.ReasoningSignature = ev.ContentBlock.Signature
+			}
 		case "content_block_delta":
 			switch ev.Delta.Type {
 			case "text_delta":
@@ -352,6 +372,12 @@ func (a *Anthropic) Stream(ctx context.Context, model string, req ChatRequest, e
 				res.ToolCalls = append(res.ToolCalls, ToolCall{ID: ot.id, Name: ot.name, Arguments: args})
 				delete(openTools, ev.Index)
 			}
+			// The finalized thinking block carries the per-turn signature
+			// (stop over start if both events happen to carry one).
+			if ev.ContentBlock.Type == "thinking" && ev.ContentBlock.Signature != "" {
+				res.ReasoningSignature = ev.ContentBlock.Signature
+				c.ReasoningSignature = ev.ContentBlock.Signature
+			}
 		case "message_delta":
 			if ev.Delta.StopReason != "" {
 				res.StopReason = ev.Delta.StopReason
@@ -361,7 +387,7 @@ func (a *Anthropic) Stream(ctx context.Context, model string, req ChatRequest, e
 				res.Usage = &Usage{PromptTokens: inputTokens, CompletionTokens: ev.Usage.OutputTokens, TotalTokens: inputTokens + ev.Usage.OutputTokens}
 			}
 		}
-		if c.TextDelta != "" || c.ReasoningDelta != "" || c.StopReason != "" {
+		if c.TextDelta != "" || c.ReasoningDelta != "" || c.StopReason != "" || c.ReasoningSignature != "" {
 			if emit != nil {
 				if err := emit(c); err != nil {
 					return &res, err

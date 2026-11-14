@@ -5,11 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/utopiafallen/bevin/internal/prompt"
 )
 
 func openTestStore(t *testing.T) *UserStore {
@@ -32,14 +29,14 @@ func TestConversationAndMessages(t *testing.T) {
 		t.Fatalf("conv = %+v", c)
 	}
 
-	m1, err := s.AppendMessage(c.ID, "user", "what is a quasar?", "", nil, nil)
+	m1, err := s.AppendMessage(c.ID, "user", "what is a quasar?", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m1.Seq != 0 {
 		t.Fatalf("seq = %d", m1.Seq)
 	}
-	m2, err := s.AppendMessage(c.ID, "assistant", "a quasar is a luminous active galactic nucleus", "", ptrStr("m1"), nil)
+	m2, err := s.AppendMessage(c.ID, "assistant", "a quasar is a luminous active galactic nucleus", "", "", ptrStr("m1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +88,7 @@ func TestConcurrentWritersNoBusy(t *testing.T) {
 				errs[i] = err
 				return
 			}
-			if _, err := s.AppendMessage(c.ID, "user", "concurrent write test", "", nil, nil); err != nil {
+			if _, err := s.AppendMessage(c.ID, "user", "concurrent write test", "", "", nil); err != nil {
 				errs[i] = err
 			}
 		}(i)
@@ -106,7 +103,6 @@ func TestConcurrentWritersNoBusy(t *testing.T) {
 
 func TestConcurrentBurstShape(t *testing.T) {
 	// The full e2e burst shape: at t=0 three turns each do
-	// CreateConversation + SetFrozenSystemPrompt + AppendMessage(user)
 	// concurrently (a write storm); at t≈delay each appends its reply
 	// concurrently. Pre-fix (deferred txs) this failed the reply/user appends
 	// with SQLITE_LOCKED(517): a deferred transaction reads first (MAX(seq)),
@@ -121,10 +117,10 @@ func TestConcurrentBurstShape(t *testing.T) {
 			t.Fatal(err)
 		}
 		for j := 0; j < 2; j++ {
-			if _, err := s.AppendMessage(c.ID, "user", "seed message", "", nil, nil); err != nil {
+			if _, err := s.AppendMessage(c.ID, "user", "seed message", "", "", nil); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.AppendMessage(c.ID, "assistant", "seed reply", "", ptrStr("m1"), nil); err != nil {
+			if _, err := s.AppendMessage(c.ID, "assistant", "seed reply", "", "", ptrStr("m1")); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -150,7 +146,7 @@ func TestConcurrentBurstShape(t *testing.T) {
 					errs[i] = fmt.Errorf("frozen: %w", err)
 					return
 				}
-				if _, err := s.AppendMessage(c.ID, "user", "ping", "", nil, nil); err != nil {
+				if _, err := s.AppendMessage(c.ID, "user", "ping", "", "", nil); err != nil {
 					errs[i] = fmt.Errorf("user append: %w", err)
 					return
 				}
@@ -174,7 +170,7 @@ func TestConcurrentBurstShape(t *testing.T) {
 			go func(i int) {
 				defer func() { done2 <- struct{}{} }()
 				<-start2
-				_, err := s.AppendMessage(ids[i], "assistant", "fake reply text", "", ptrStr("m1"), nil)
+				_, err := s.AppendMessage(ids[i], "assistant", "fake reply text", "", "", ptrStr("m1"))
 				errs2[i] = err
 			}(i)
 		}
@@ -203,7 +199,7 @@ func TestConcurrentReplyAppends(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.AppendMessage(c.ID, "user", "existing user message", "", nil, nil); err != nil {
+		if _, err := s.AppendMessage(c.ID, "user", "existing user message", "", "", nil); err != nil {
 			t.Fatal(err)
 		}
 		ids[i] = c.ID
@@ -213,7 +209,7 @@ func TestConcurrentReplyAppends(t *testing.T) {
 	for i := 0; i < writers; i++ {
 		go func(i int) {
 			<-start
-			_, err := s.AppendMessage(ids[i], "assistant", "the model reply text", "", ptrStr("m1"), nil)
+			_, err := s.AppendMessage(ids[i], "assistant", "the model reply text", "", "", ptrStr("m1"))
 			errs[i] = err
 		}(i)
 	}
@@ -376,73 +372,44 @@ func TestProfile(t *testing.T) {
 	}
 }
 
-func TestUserStoreMigrationV2RefreezesLegacyPrompt(t *testing.T) {
-	// A v1 user DB: the conversations table exists, one conversation still
-	// carries the exact pre-upgrade prompt, one carries a custom (never
-	// legacy) prompt. Opening the store must re-freeze ONLY the legacy one
-	// onto the current prompt.Base.
+// TestUserStoreRefusesNewerSchema pins the version-reset invariant (user
+// directive: no migration paths — no live data worth migrating): a bevin.db
+// stamped with a schema version NEWER than this build is refused loudly at
+// open, while a fresh DB is created at the current version.
+func TestUserStoreRefusesNewerSchema(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "bevin.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	v1 := `
+	dml := `
 CREATE TABLE IF NOT EXISTS schema_version (
 	version    INTEGER PRIMARY KEY,
 	applied_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS conversations (
-	id                    TEXT PRIMARY KEY,
-	title                 TEXT NOT NULL DEFAULT '',
-	created_at            TEXT NOT NULL,
-	last_activity_at      TEXT NOT NULL,
-	state                 TEXT NOT NULL DEFAULT 'active',
-	frozen_system_prompt  TEXT NOT NULL DEFAULT '',
-	prompt_input_versions TEXT NOT NULL DEFAULT '',
-	owner_task_id         TEXT,
-	active_model_id       TEXT NOT NULL
-);
-INSERT INTO schema_version (version, applied_at) VALUES (1, 'x');
-INSERT INTO conversations (id, title, created_at, last_activity_at, active_model_id, frozen_system_prompt)
-VALUES
-	('legacy', 'legacy', 'x', 'x', 'm1', 'You are Bevin, a personal assistant. Be direct and concise.'),
-	('custom', 'custom', 'x', 'x', 'm1', 'a custom frozen prompt');
-`
-	if _, err := raw.Exec(v1); err != nil {
+INSERT INTO schema_version (version, applied_at) VALUES (99, 'x');`
+	if _, err := raw.Exec(dml); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := OpenUser(dir); err == nil {
+		t.Fatal("a DB stamped with a newer schema version must be refused, got nil error")
+	}
 
-	s, err := OpenUser(dir)
+	s, err := OpenUser(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
-
-	legacy, err := s.GetConversation("legacy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if legacy.FrozenSystemPrompt != prompt.Base {
-		t.Fatalf("legacy conv prompt = %q, want prompt.Base", legacy.FrozenSystemPrompt)
-	}
-	custom, err := s.GetConversation("custom")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if custom.FrozenSystemPrompt != "a custom frozen prompt" {
-		t.Fatalf("custom conv prompt = %q (must be untouched)", custom.FrozenSystemPrompt)
-	}
-	// The version row was recorded.
+	defer s.Close()
 	var v int
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v < currentSchemaVersion {
-		t.Fatalf("schema version = %d, want >= %d", v, currentSchemaVersion)
+	if v != currentSchemaVersion {
+		t.Fatalf("fresh DB schema version = %d, want %d", v, currentSchemaVersion)
 	}
 }
 
@@ -452,15 +419,18 @@ func TestMessageReasoningRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendMessage(c.ID, "user", "solve this", "", nil, nil); err != nil {
+	if _, err := s.AppendMessage(c.ID, "user", "solve this", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := s.AppendMessage(c.ID, "assistant", "the answer is 42", "let me reason about this step by step", ptrStr("m1"), nil)
+	reply, err := s.AppendMessage(c.ID, "assistant", "the answer is 42", "let me reason about this step by step", "EqQCsig-abc", ptrStr("m1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reply.Reasoning != "let me reason about this step by step" {
 		t.Fatalf("reply.Reasoning = %q (not returned from append)", reply.Reasoning)
+	}
+	if reply.ReasoningSignature != "EqQCsig-abc" {
+		t.Fatalf("reply.ReasoningSignature = %q (not returned from append)", reply.ReasoningSignature)
 	}
 	msgs, err := s.ListMessages(c.ID)
 	if err != nil {
@@ -469,108 +439,15 @@ func TestMessageReasoningRoundTrip(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("msgs = %d, want 2", len(msgs))
 	}
-	if msgs[0].Reasoning != "" {
-		t.Fatalf("user msg reasoning = %q, want empty", msgs[0].Reasoning)
+	if msgs[0].Reasoning != "" || msgs[0].ReasoningSignature != "" {
+		t.Fatalf("user msg reasoning/sig = %q/%q, want empty/empty", msgs[0].Reasoning, msgs[0].ReasoningSignature)
 	}
 	if msgs[1].Reasoning != "let me reason about this step by step" {
 		t.Fatalf("assistant reasoning not round-tripped: %q", msgs[1].Reasoning)
 	}
-}
-
-func TestUserStoreMigrationV5AddsReasoningColumn(t *testing.T) {
-	// A pre-v5 user DB: the messages table was created WITHOUT the reasoning
-	// column (the v5 ALTER must add it), one conversation carries the exact
-	// v5-era base prompt (the re-freeze must move it to the current Base —
-	// today's v6, which dropped the [thinking] framing), and one message row
-	// must still be readable after the migration.
-	dir := t.TempDir()
-	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "bevin.db"))
-	if err != nil {
-		t.Fatal(err)
+	if msgs[1].ReasoningSignature != "EqQCsig-abc" {
+		t.Fatalf("assistant signature not round-tripped: %q", msgs[1].ReasoningSignature)
 	}
-	v4 := `
-CREATE TABLE IF NOT EXISTS schema_version (
-	version    INTEGER PRIMARY KEY,
-	applied_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS conversations (
-	id                    TEXT PRIMARY KEY,
-	title                 TEXT NOT NULL DEFAULT '',
-	created_at            TEXT NOT NULL,
-	last_activity_at      TEXT NOT NULL,
-	state                 TEXT NOT NULL DEFAULT 'active',
-	frozen_system_prompt  TEXT NOT NULL DEFAULT '',
-	prompt_input_versions TEXT NOT NULL DEFAULT '',
-	owner_task_id         TEXT,
-	active_model_id       TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-	id              INTEGER PRIMARY KEY AUTOINCREMENT,
-	conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-	role            TEXT NOT NULL,
-	content         TEXT NOT NULL DEFAULT '',
-	seq             INTEGER NOT NULL,
-	created_at      TEXT NOT NULL,
-	model_id        TEXT,
-	embedding       BLOB
-);
-INSERT INTO schema_version (version, applied_at) VALUES (4, 'x');
-INSERT INTO conversations (id, title, created_at, last_activity_at, active_model_id, frozen_system_prompt)
-VALUES ('c1', 'old chat', 'x', 'x', 'm1', ` + mustQuote(prompt.Legacy[0]) + `);
-INSERT INTO messages (conversation_id, role, content, seq, created_at, model_id)
-VALUES ('c1', 'assistant', 'an old reply', 0, '2026-11-01T00:00:00Z', 'm1');
-`
-	if _, err := raw.Exec(v4); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := OpenUser(dir)
-	if err != nil {
-		t.Fatalf("OpenUser (v4 -> v5 migration): %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-
-	// The column now exists (the ALTER ran).
-	if !s.messageColumnExists("reasoning") {
-		t.Fatal("messages.reasoning column missing after v5 migration")
-	}
-	// The old row is readable; its reasoning is empty (NULL -> '').
-	msgs, err := s.ListMessages("c1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 || msgs[0].Content != "an old reply" {
-		t.Fatalf("old messages = %+v, want the pre-migration row intact", msgs)
-	}
-	if msgs[0].Reasoning != "" {
-		t.Fatalf("old msg reasoning = %q, want empty", msgs[0].Reasoning)
-	}
-	// The v4-era conversation was re-frozen onto the current Base.
-	c, err := s.GetConversation("c1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.FrozenSystemPrompt != prompt.Base {
-		t.Fatalf("prompt not re-frozen to current Base")
-	}
-	// The v5 version row was recorded.
-	var v int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
-		t.Fatal(err)
-	}
-	if v < currentSchemaVersion {
-		t.Fatalf("schema version = %d, want >= %d", v, currentSchemaVersion)
-	}
-}
-
-// mustQuote renders a Go string as a single-quoted SQL literal (test helper
-// for seeding raw databases with prompt texts).
-func mustQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func TestServerStoreUserCredSession(t *testing.T) {

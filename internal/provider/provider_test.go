@@ -402,8 +402,33 @@ func TestAnthropicThinkingCapture(t *testing.T) {
 	if res.Reasoning != "hmm, let me work it out" {
 		t.Fatalf("reasoning = %q, want the thinking block text", res.Reasoning)
 	}
-	// Replay: send the captured trace back — the encoder must NOT emit a
-	// thinking block (no signature to send with it).
+	if res.ReasoningSignature != "sig-abc" {
+		t.Fatalf("reasoning signature = %q, want the thinking block signature", res.ReasoningSignature)
+	}
+
+	// Replay WITH the signature: the encoder must send a thinking block
+	// (thinking + signature) before the text block.
+	_, err = p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, Text: "the answer is 42", Reasoning: "hmm, let me work it out", ReasoningSignature: "sig-abc"},
+			{Role: RoleUser, Text: "why?"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	ab := msgs[0].(map[string]any)["content"].([]any)
+	if len(ab) != 2 || ab[0].(map[string]any)["type"] != "thinking" {
+		t.Fatalf("replay content = %v, want thinking block first", ab)
+	}
+	tb := ab[0].(map[string]any)
+	if tb["thinking"] != "hmm, let me work it out" || tb["signature"] != "sig-abc" {
+		t.Fatalf("thinking block = %v, want the captured trace + signature", tb)
+	}
+
+	// Replay WITHOUT a signature: no thinking block may be sent (the API
+	// requires the signature on replayed thinking blocks).
 	_, err = p.Chat(context.Background(), "m", ChatRequest{
 		Messages: []Message{
 			{Role: RoleAssistant, Text: "the answer is 42", Reasoning: "hmm, let me work it out"},
@@ -413,12 +438,72 @@ func TestAnthropicThinkingCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgs := body["messages"].([]any)
-	ab := msgs[0].(map[string]any)["content"].([]any)
+	ab = body["messages"].([]any)[0].(map[string]any)["content"].([]any)
 	for _, b := range ab {
 		if b.(map[string]any)["type"] == "thinking" {
-			t.Fatalf("anthropic encoder sent a thinking block (it must not — replay needs the signature): %v", b)
+			t.Fatalf("encoder sent a thinking block without a signature: %v", b)
 		}
+	}
+}
+
+// TestAnthropicThinkingStreamSignature — streaming captures the thinking text
+// (thinking_delta) AND the per-turn signature, which arrives with the
+// finalized content block on content_block_stop.
+func TestAnthropicThinkingStreamSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm, "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me work it out"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0,"content_block":{"type":"thinking","thinking":"hmm, let me work it out","signature":"sig-stream"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"the answer is 42"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`))
+	}))
+	defer srv.Close()
+
+	p := NewAnthropic(srv.URL, "k")
+	var gotReasoning, gotSignature, gotText string
+	_, err := p.Stream(context.Background(), "m", ChatRequest{
+		Messages: []Message{{Role: RoleUser, Text: "solve it"}},
+	}, func(c Chunk) error {
+		gotText += c.TextDelta
+		gotReasoning += c.ReasoningDelta
+		if c.ReasoningSignature != "" {
+			gotSignature = c.ReasoningSignature
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotText != "the answer is 42" {
+		t.Fatalf("text = %q", gotText)
+	}
+	if gotReasoning != "hmm, let me work it out" {
+		t.Fatalf("reasoning = %q, want the streamed thinking", gotReasoning)
+	}
+	if gotSignature != "sig-stream" {
+		t.Fatalf("signature = %q, want the streamed block signature", gotSignature)
 	}
 }
 

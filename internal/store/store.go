@@ -22,12 +22,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/utopiafallen/bevin/internal/prompt"
-
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 6
+const currentSchemaVersion = 1
 
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
@@ -131,6 +129,12 @@ func cosine(a, b []float32) float64 {
 }
 
 // migrate creates the per-user schema (idempotent) and records the version.
+//
+// The schema is a single flat version with NO migration steps: there is no
+// live data worth migrating (user directive), so rather than grow a
+// numbered-migration path forever, a file written by a NEWER build is refused
+// loudly (delete the user data dir or upgrade bevin) and everything else is
+// created fresh by the DDL above.
 func (s *UserStore) migrate() error {
 	if _, err := s.db.Exec(userSchema); err != nil {
 		return err
@@ -139,66 +143,13 @@ func (s *UserStore) migrate() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v < currentSchemaVersion {
-		// Prompt re-freeze step (idempotent; exact match only): conversations
-		// still carrying one of the previous base texts (prompt.Legacy) get
-		// the current prompt.Base. Fresh conversations already carry it; a
-		// conversation with a custom prompt is never touched.
-		for _, legacy := range prompt.Legacy {
-			if legacy == prompt.Base {
-				// This previous base text IS the current one (e.g. v6
-				// reverted to the v4 text) — nothing to re-freeze; skipping
-				// avoids a same-value UPDATE on every store open.
-				continue
-			}
-			if _, err := s.db.Exec(
-				`UPDATE conversations SET frozen_system_prompt = ? WHERE frozen_system_prompt = ?`,
-				prompt.Base, legacy); err != nil {
-				return err
-			}
-		}
-	}
-	if v < 5 {
-		// v5: persist the assistant's reasoning (thinking trace) per message.
-		// Guarded on the column: a fresh DB already created the column (the
-		// DDL above carries it), so the ALTER runs only for pre-v5 files.
-		if !s.messageColumnExists("reasoning") {
-			if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`); err != nil {
-				return fmt.Errorf("v5 alter messages: %w", err)
-			}
-		}
+	if v > currentSchemaVersion {
+		return fmt.Errorf("bevin.db was written by a newer bevin build (schema v%d > v%d) — delete the user data dir or upgrade bevin", v, currentSchemaVersion)
 	}
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		currentSchemaVersion, nowUTC())
 	return err
-}
-
-// messageColumnExists reports whether the messages table has the named column
-// (used to guard the v5 ALTER: a fresh DB already created the column).
-func (s *UserStore) messageColumnExists(name string) bool {
-	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			cid     int
-			colName string
-			ctype   string
-			notnull int
-			dflt    any
-			pk      int
-		)
-		if err := rows.Scan(&cid, &colName, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false
-		}
-		if colName == name {
-			return true
-		}
-	}
-	return false
 }
 
 // userSchema is the full per-user schema (P1–P13, with FTS5).
@@ -224,17 +175,18 @@ CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(owner_task_id);
 CREATE INDEX IF NOT EXISTS idx_conv_model ON conversations(active_model_id);
 CREATE INDEX IF NOT EXISTS idx_conv_state ON conversations(state);
 
--- P3 message (atomic unit of truth; embedded + FTS5)
+-- P3 message (atomic unit of truth; searchable in the per-user vector DB —
+-- see the Embedding/vector-DB design — so no local embedding column)
 CREATE TABLE IF NOT EXISTS messages (
-	id              INTEGER PRIMARY KEY AUTOINCREMENT,
-	conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-	role            TEXT NOT NULL,
-	content         TEXT NOT NULL DEFAULT '',
-	reasoning       TEXT NOT NULL DEFAULT '',
-	seq             INTEGER NOT NULL,
-	created_at      TEXT NOT NULL,
-	model_id        TEXT,
-	embedding       BLOB
+	id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+	conversation_id       TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+	role                  TEXT NOT NULL,
+	content               TEXT NOT NULL DEFAULT '',
+	reasoning             TEXT NOT NULL DEFAULT '',
+	reasoning_signature   TEXT NOT NULL DEFAULT '',
+	seq                   INTEGER NOT NULL,
+	created_at            TEXT NOT NULL,
+	model_id              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv_seq ON messages(conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_msg_model ON messages(model_id);

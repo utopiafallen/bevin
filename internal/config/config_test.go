@@ -229,8 +229,9 @@ func TestAgentRoundTrip(t *testing.T) {
 
 func TestConfigVersioning(t *testing.T) {
 	dir := t.TempDir()
-	// A v0 config (no "version" field) is migrated forward to the current
-	// version on load.
+	// A config with no "version" key is at-or-below the current version:
+	// accepted as-is, and stamped with the current version on save. (No
+	// migration steps exist — user directive: no live data worth migrating.)
 	v0 := `[auth]
 mode = "internal"
 session_secret = "deadbeef"
@@ -251,12 +252,11 @@ enabled = true
 	}
 	got, err := Load(dir)
 	if err != nil {
-		t.Fatalf("load v0 config: %v", err)
+		t.Fatalf("load versionless config: %v", err)
 	}
-	if got.Version != ConfigVersion {
-		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
+	if got.Version != 0 {
+		t.Fatalf("in-memory version = %d, want 0 (nothing was migrated)", got.Version)
 	}
-	// Saving a migrated config stamps the current version on disk.
 	if err := Save(dir, got); err != nil {
 		t.Fatal(err)
 	}
@@ -264,153 +264,14 @@ enabled = true
 	if !strings.Contains(string(b), "version = "+strconv.Itoa(ConfigVersion)) {
 		t.Fatalf("saved config missing version stamp:\n%s", b)
 	}
-	// A config newer than this build is refused. (The version key must precede
-	// any table header to be top-level — that is also where Save writes it.)
+	// A config newer than this build is refused (the version key must
+	// precede any table header to be top-level — that is also where Save
+	// writes it).
 	if err := os.WriteFile(Path(dir), []byte("version = 999\n"+v0), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(dir); err == nil {
 		t.Fatal("expected an error for a config newer than the build")
-	}
-}
-
-func TestAuxKindToKindsMigration(t *testing.T) {
-	dir := t.TempDir()
-	// A v1 config with the deprecated aux "kind" (a single modality) is
-	// migrated to "kinds" (one or more) on load.
-	v1 := `version = 1
-
-[auth]
-mode = "internal"
-session_secret = "deadbeef"
-
-[[models]]
-id = "m1"
-provider = "openai"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-test"
-model_id = "ornith"
-
-[[aux]]
-kind = "vision"
-provider = "llama"
-base_url = "http://127.0.0.1:8081/v1"
-model_id = "v"
-`
-	if err := os.WriteFile(Path(dir), []byte(v1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load(dir)
-	if err != nil {
-		t.Fatalf("load v1 config: %v", err)
-	}
-	if got.Version != ConfigVersion {
-		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
-	}
-	if len(got.Aux) != 1 {
-		t.Fatalf("aux count = %d, want 1", len(got.Aux))
-	}
-	if len(got.Aux[0].Kinds) != 1 || got.Aux[0].Kinds[0] != "vision" {
-		t.Fatalf("migrated aux kinds = %v, want [vision]", got.Aux[0].Kinds)
-	}
-}
-
-// TestBaseURIMigration — the public base URI has moved through two schema
-// versions: v3 stored an admin-entered [auth.oauth] redirect_uri, v4 stored
-// [auth.oauth] base_uri, v5 keeps it at the server level (top-level
-// base_uri). A v3 file migrates v3->v4->v5 in one load: the base is
-// recovered from the legacy redirect when it ends in the callback path.
-// A v4 file migrates v4->v5: the base lifts out of [auth.oauth] as-is.
-func TestBaseURIMigration(t *testing.T) {
-	const base = "https://bevin.example.com"
-	const redirect = base + "/auth/oauth/callback"
-
-	// v3: the base is recovered from the legacy redirect_uri.
-	v3 := `version = 3
-
-[auth]
-mode = "internal"
-session_secret = "deadbeef"
-
-[auth.oauth]
-enabled = true
-name = "TestIDP"
-client_id = "app-1"
-client_secret = "cs-1"
-auth_url = "https://idp.example.com/o/authorize/"
-token_url = "https://idp.example.com/o/token/"
-userinfo_url = "https://idp.example.com/o/user/"
-scopes = "openid profile email"
-redirect_uri = "` + redirect + `"
-
-[[models]]
-id = "m1"
-provider = "openai"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-test"
-model_id = "ornith"
-max_context = 200000
-slots = 2
-enabled = true
-`
-	dir := t.TempDir()
-	if err := os.WriteFile(Path(dir), []byte(v3), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load(dir)
-	if err != nil {
-		t.Fatalf("load v3 config: %v", err)
-	}
-	if got.Version != ConfigVersion {
-		t.Fatalf("migrated version = %d, want %d", got.Version, ConfigVersion)
-	}
-	if got.BaseURI != base {
-		t.Fatalf("migrated base_uri = %q, want %s", got.BaseURI, base)
-	}
-	if got.OAuthRedirectURI() != redirect {
-		t.Fatalf("derived redirect = %q, want %s", got.OAuthRedirectURI(), redirect)
-	}
-	// Saving the migrated config keeps the base at the server level and
-	// drops both legacy keys.
-	if err := Save(dir, got); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(Path(dir))
-	if !strings.Contains(string(b), "base_uri = \""+base+"\"") {
-		t.Fatalf("saved config missing top-level base_uri:\n%s", b)
-	}
-	if strings.Contains(string(b), "redirect_uri") {
-		t.Fatalf("saved config must not carry the legacy redirect key:\n%s", b)
-	}
-	if strings.Count(string(b), "base_uri") != 1 {
-		t.Fatalf("saved config must carry exactly one base_uri (top-level):\n%s", b)
-	}
-
-	// v4: the base lifts out of [auth.oauth] as-is.
-	v4 := strings.Replace(v3, "version = 3", "version = 4", 1)
-	v4 = strings.Replace(v4, "redirect_uri = \""+redirect+"\"", "base_uri = \""+base+"\"", 1)
-	if err := os.WriteFile(Path(dir), []byte(v4), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err = Load(dir)
-	if err != nil {
-		t.Fatalf("load v4 config: %v", err)
-	}
-	if got.BaseURI != base || got.OAuthRedirectURI() != redirect {
-		t.Fatalf("v4 migration: base = %q, redirect = %q", got.BaseURI, got.OAuthRedirectURI())
-	}
-
-	// A v3 redirect that doesn't end in the callback path is not
-	// decomposable — with OAuth enabled the load now FAILS validation
-	// (enabled OAuth needs a base) instead of silently starting with no
-	// redirect; the admin fixes it by setting the base.
-	v3b := strings.Replace(v3, "redirect_uri = \""+redirect+"\"",
-		"redirect_uri = \"https://somewhere.else/elsewhere\"", 1)
-	if err := os.WriteFile(Path(dir), []byte(v3b), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); err == nil {
-		t.Fatal("expected a validation error for an unreconstructable base with OAuth enabled")
 	}
 }
 

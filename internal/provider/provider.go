@@ -61,12 +61,13 @@ type Tool struct {
 
 // Message is a provider-neutral chat message.
 type Message struct {
-	Role       Role
-	Text       string        // plain text; for RoleTool this is the tool result
-	Parts      []ContentPart // structured text/media; used when non-empty
-	Reasoning  string        // RoleAssistant: the model's thinking trace for this turn, replayed in the API's native field (OAI wire: reasoning_content) when non-empty; empty when the model didn't think (or thinking is disabled)
-	ToolCalls  []ToolCall    // RoleAssistant: tool calls the model requested
-	ToolCallID string        // RoleTool: which tool call this result answers
+	Role               Role
+	Text               string        // plain text; for RoleTool this is the tool result
+	Parts              []ContentPart // structured text/media; used when non-empty
+	Reasoning          string        // RoleAssistant: the model's thinking trace for this turn, replayed in the API's native field when non-empty (OAI wire: reasoning_content; Anthropic: a thinking content block, which additionally needs the signature); empty when the model didn't think (or thinking is disabled)
+	ReasoningSignature string        // RoleAssistant: the per-turn signature of the trace (Anthropic extended thinking — replay is invalid without it); empty for APIs without signatures
+	ToolCalls          []ToolCall    // RoleAssistant: tool calls the model requested
+	ToolCallID         string        // RoleTool: which tool call this result answers
 }
 
 // Usage reports token accounting.
@@ -87,20 +88,22 @@ type ChatRequest struct {
 
 // Result is the aggregated result of a completion (streaming or not).
 type Result struct {
-	Text       string
-	Reasoning  string
-	ToolCalls  []ToolCall
-	StopReason string
-	Usage      *Usage
+	Text               string
+	Reasoning          string
+	ReasoningSignature string // Anthropic: the thinking block's per-turn signature (required to replay the trace); empty for APIs without signatures
+	ToolCalls          []ToolCall
+	StopReason         string
+	Usage              *Usage
 }
 
 // Chunk is a streaming delta.
 type Chunk struct {
-	TextDelta      string
-	ReasoningDelta string
-	StopReason     string
-	Usage          *Usage
-	Done           bool
+	TextDelta          string // incremental text
+	ReasoningDelta     string // incremental reasoning trace
+	ReasoningSignature string // Anthropic: per-turn signature when the thinking block finalizes
+	StopReason         string // stop_reason from message_delta
+	Usage              *Usage
+	Done               bool
 }
 
 // ModelInfo describes one model a backend serves, incl. its modalities.

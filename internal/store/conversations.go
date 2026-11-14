@@ -144,34 +144,30 @@ func (s *UserStore) SetFrozenSystemPrompt(id, prompt string) error {
 
 // Message is a P3 row.
 type Message struct {
-	ID             int64     `json:"id"`
-	ConversationID string    `json:"conversation_id"`
-	Role           string    `json:"role"`
-	Content        string    `json:"content"`
-	Reasoning      string    `json:"reasoning,omitempty"`
-	Seq            int       `json:"seq"`
-	CreatedAt      string    `json:"created_at"`
-	ModelID        *string   `json:"model_id,omitempty"`
-	Embedding      []float32 `json:"-"`
+	ID                 int64   `json:"id"`
+	ConversationID     string  `json:"conversation_id"`
+	Role               string  `json:"role"`
+	Content            string  `json:"content"`
+	Reasoning          string  `json:"reasoning,omitempty"`
+	ReasoningSignature string  `json:"-"` // the per-turn signature of the trace (Anthropic replay); never sent to the client
+	Seq                int     `json:"seq"`
+	CreatedAt          string  `json:"created_at"`
+	ModelID            *string `json:"model_id,omitempty"`
 }
 
-const msgCols = `id, conversation_id, role, content, reasoning, seq, created_at, model_id, embedding`
+// Messages are searched in the per-user vector DB (semantic) + FTS5 (lexical);
+// they carry no local embedding column.
+const msgCols = `id, conversation_id, role, content, reasoning, reasoning_signature, seq, created_at, model_id`
 
 func scanMsg(rs interface{ Scan(...any) error }, m *Message) error {
-	var emb []byte
-	if err := rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Reasoning, &m.Seq, &m.CreatedAt, &m.ModelID, &emb); err != nil {
-		return err
-	}
-	if len(emb) > 0 {
-		m.Embedding = blobEmbed(emb)
-	}
-	return nil
+	return rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Reasoning, &m.ReasoningSignature, &m.Seq, &m.CreatedAt, &m.ModelID)
 }
 
 // AppendMessage adds a message to a conversation with the next seq (atomic).
-// reasoning (the model's thinking trace for an assistant turn), modelID and
-// emb may be empty/nil.
-func (s *UserStore) AppendMessage(convID, role, content, reasoning string, modelID *string, emb []float32) (*Message, error) {
+// reasoning (the model's thinking trace for an assistant turn) +
+// reasoningSignature (its per-turn signature, Anthropic) and modelID may be
+// empty/nil.
+func (s *UserStore) AppendMessage(convID, role, content, reasoning, reasoningSignature string, modelID *string) (*Message, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("append: begin: %w", err)
@@ -182,12 +178,8 @@ func (s *UserStore) AppendMessage(convID, role, content, reasoning string, model
 		return nil, fmt.Errorf("append: seq: %w", err)
 	}
 	now := nowUTC()
-	var embCol any
-	if emb != nil {
-		embCol = embedBlob(emb)
-	}
-	res, err := tx.Exec(`INSERT INTO messages (conversation_id, role, content, reasoning, seq, created_at, model_id, embedding) VALUES (?,?,?,?,?,?,?,?)`,
-		convID, role, content, reasoning, next, now, modelID, embCol)
+	res, err := tx.Exec(`INSERT INTO messages (conversation_id, role, content, reasoning, reasoning_signature, seq, created_at, model_id) VALUES (?,?,?,?,?,?,?,?)`,
+		convID, role, content, reasoning, reasoningSignature, next, now, modelID)
 	if err != nil {
 		return nil, fmt.Errorf("append: insert: %w", err)
 	}
@@ -201,7 +193,7 @@ func (s *UserStore) AppendMessage(convID, role, content, reasoning string, model
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("append: commit: %w", err)
 	}
-	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Reasoning: reasoning, Seq: next, CreatedAt: now, ModelID: modelID, Embedding: emb}, nil
+	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Reasoning: reasoning, ReasoningSignature: reasoningSignature, Seq: next, CreatedAt: now, ModelID: modelID}, nil
 }
 
 func (s *UserStore) GetMessage(id int64) (*Message, error) {
@@ -217,7 +209,7 @@ func (s *UserStore) GetMessage(id int64) (*Message, error) {
 }
 
 func (s *UserStore) ListMessages(convID string) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT ` + msgCols + ` FROM messages WHERE conversation_id = ? ORDER BY seq`, convID)
+	rows, err := s.db.Query(`SELECT `+msgCols+` FROM messages WHERE conversation_id = ? ORDER BY seq`, convID)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +232,7 @@ func (s *UserStore) SearchMessages(query string, limit int) ([]Message, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-		SELECT id, conversation_id, role, content, reasoning, seq, created_at, model_id, embedding
+		SELECT `+msgCols+`
 		FROM messages
 		WHERE EXISTS (SELECT 1 FROM messages_fts WHERE messages_fts.rowid = messages.id AND messages_fts MATCH ?)
 		ORDER BY id

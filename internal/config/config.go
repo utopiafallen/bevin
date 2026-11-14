@@ -25,10 +25,12 @@ const (
 	AgentFileName  = "agent.toml"
 )
 
-// ConfigVersion is the schema version of server.toml. Bump it when a release
-// changes the schema and add a matching step in migrate() so older configs are
-// upgraded in place on load; Load refuses a config newer than this build.
-const ConfigVersion = 5
+// ConfigVersion is the schema version of server.toml. It is a single flat
+// version with NO migration steps (no live data worth migrating — user
+// directive): Save stamps it, Load refuses a config newer than this build,
+// and a config with a lower (or missing) version key is accepted as-is when
+// it validates — the next Save restamps it.
+const ConfigVersion = 1
 
 // DefaultSessionTTL is 30 days.
 const DefaultSessionTTLSeconds = 30 * 24 * 3600
@@ -58,14 +60,6 @@ type ServerConfig struct {
 	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
 	Email            Email      `toml:"email" json:"email"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
-	// Pre-v5 OAuth legacy values, captured by Load from the raw file before
-	// migrate() folds them into BaseURI (unexported: never persisted).
-	// v3 stored an admin-entered [auth.oauth] redirect_uri; v4 stored
-	// [auth.oauth] base_uri.
-	legacyOAuthRedirect string
-	legacyOAuthBase     string
-	// pendingBase carries the recovered base through the v3->v4->v5 chain.
-	pendingBase string
 }
 
 // PublicURL derives an absolute public link for a server-relative path
@@ -166,9 +160,6 @@ type AuxModel struct {
 	BaseURL  string   `toml:"base_url" json:"base_url"`
 	APIKey   string   `toml:"api_key" json:"api_key"`
 	ModelID  string   `toml:"model_id" json:"model_id"`
-	// Kind is the deprecated v1 field (a single modality). It exists only so a
-	// v1 config's value survives unmarshal; migrate() folds it into Kinds.
-	Kind string `toml:"kind,omitempty" json:"kind,omitempty"`
 }
 
 // Embedder is the local llama-server serving /v1/embeddings (embeddinggemma-2).
@@ -224,9 +215,9 @@ func Exists(dir string) bool {
 }
 
 // Load reads and validates server.toml from the data dir. A config whose
-// version is newer than this build is refused; an older config is migrated in
-// place to the current schema (the migrated version is persisted the next time
-// the config is saved).
+// version is newer than this build is refused (the operator must upgrade); a
+// config at or below the current version is validated as-is (the next Save
+// stamps the current version).
 func Load(dir string) (*ServerConfig, error) {
 	dir = filepath.Clean(dir)
 	b, err := os.ReadFile(Path(dir))
@@ -240,28 +231,6 @@ func Load(dir string) (*ServerConfig, error) {
 	if cfg.Version > ConfigVersion {
 		return nil, fmt.Errorf("server.toml version %d is newer than this bevin build (v%d) — upgrade bevin", cfg.Version, ConfigVersion)
 	}
-	// Pre-v5 OAuth values lived under [auth.oauth] in two shapes (v3: an
-	// admin-entered redirect_uri; v4: a base_uri); the v5 struct keeps the
-	// base at the server level and drops the fields, so the unmarshal above
-	// discarded them. Re-read just those keys from the raw file for
-	// migrate() to fold into BaseURI.
-	if cfg.Version < 5 {
-		var legacy struct {
-			Auth struct {
-				OAuth struct {
-					RedirectURI string `toml:"redirect_uri"`
-					BaseURI     string `toml:"base_uri"`
-				} `toml:"oauth"`
-			} `toml:"auth"`
-		}
-		if err := toml.Unmarshal(b, &legacy); err == nil {
-			cfg.legacyOAuthRedirect = legacy.Auth.OAuth.RedirectURI
-			cfg.legacyOAuthBase = legacy.Auth.OAuth.BaseURI
-		}
-	}
-	if err := migrate(&cfg); err != nil {
-		return nil, err
-	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = dir
 	}
@@ -269,62 +238,6 @@ func Load(dir string) (*ServerConfig, error) {
 		return nil, err
 	}
 	return &cfg, nil
-}
-
-// migrate upgrades a parsed config from its stored version up to ConfigVersion.
-// Each release that changes the schema adds one numbered step; the loop applies
-// them in order so a config several versions old is walked forward one step at
-// a time.
-func migrate(c *ServerConfig) error {
-	for c.Version < ConfigVersion {
-		switch c.Version {
-		case 0:
-			// v0 -> v1: the schema gained the "version" field. v0 configs were
-			// already structurally valid v1, so no field transform is needed —
-			// just stamp the version. Future schema changes add cases here.
-			c.Version = 1
-		case 1:
-			// v1 -> v2: aux "kind" (a single modality) became "kinds" (one or
-			// more). Fold any v1 aux Kind into Kinds.
-			for i := range c.Aux {
-				if len(c.Aux[i].Kinds) == 0 && strings.TrimSpace(c.Aux[i].Kind) != "" {
-					c.Aux[i].Kinds = []string{c.Aux[i].Kind}
-				}
-			}
-			c.Version = 2
-		case 2:
-			// v2 -> v3: the schema gained the optional [email] section (the
-			// server-managed SMTP notifier). A v2 config simply has an empty
-			// Email (email disabled) — no field transform, just stamp the
-			// version.
-			c.Version = 3
-		case 3:
-			// v3 -> v4: the OAuth redirect_uri (admin-entered) became a value
-			// derived from the public base — bevin knows its own callback
-			// route, so only the base is configured. Recover the base from the
-			// legacy redirect when it ends in the callback path; a
-			// non-decomposable legacy value leaves the base empty for the
-			// admin to re-enter. (The base still lives under [auth.oauth] in
-			// v4 — the server-level move is the next step.)
-			if legacy := strings.TrimSpace(c.legacyOAuthRedirect); strings.HasSuffix(legacy, OAuthCallbackPath) {
-				c.pendingBase = strings.TrimSuffix(legacy, OAuthCallbackPath)
-			}
-			c.Version = 4
-		case 4:
-			// v4 -> v5: the OAuth base_uri moved from [auth.oauth] to the
-			// server level (top-level base_uri) — it is the public address of
-			// the whole instance, and every system-generated link (OAuth
-			// redirect, password reset, ...) derives from it.
-			if legacy := strings.TrimSpace(c.legacyOAuthBase); legacy != "" {
-				c.pendingBase = legacy
-			}
-			c.BaseURI = c.pendingBase
-			c.Version = 5
-		default:
-			return fmt.Errorf("server.toml: unknown config version %d", c.Version)
-		}
-	}
-	return nil
 }
 
 // Save writes server.toml atomically with 0600 permissions (it holds secrets).
