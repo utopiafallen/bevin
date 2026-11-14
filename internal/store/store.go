@@ -27,7 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
