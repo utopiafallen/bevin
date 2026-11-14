@@ -461,6 +461,21 @@ func (a *Agent) Conversations(handle string) ([]ConversationSummary, error) {
 	return out, nil
 }
 
+// Conversation returns one of the user's conversations (the slim summary —
+// the UI reads it to show + switch the conversation's active model).
+// store.ErrNotFound when it is not in the user's store.
+func (a *Agent) Conversation(handle, convID string) (*ConversationSummary, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	c, err := us.GetConversation(convID)
+	if err != nil {
+		return nil, err
+	}
+	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID}, nil
+}
+
 // UpdateConversation changes a conversation's active model and/or title
 // (either or both; at least one is required, enforced by the caller). The
 // model must be available right now — also enforced by the caller. The

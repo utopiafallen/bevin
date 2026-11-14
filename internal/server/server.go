@@ -130,6 +130,7 @@ func (a *App) routes() {
 	// the admin).
 	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
 	mux.HandleFunc("GET /api/conversations", a.chatGate(a.listConversations))
+	mux.HandleFunc("GET /api/conversations/{id}", a.chatGate(a.getConversation))
 	mux.HandleFunc("PATCH /api/conversations/{id}", a.chatGate(a.updateConversation))
 	mux.HandleFunc("DELETE /api/conversations/{id}", a.chatGate(a.deleteConversation))
 	mux.HandleFunc("GET /api/conversations/search", a.chatGate(a.searchConversations))
@@ -366,6 +367,22 @@ func (a *App) listConversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"conversations": convos})
+}
+
+// getConversation returns one conversation's slim row (the UI reads it to
+// show the conversation's active model + switch it).
+func (a *App) getConversation(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	summary, err := a.ag.Conversation(u.Handle, r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary})
 }
 
 // updateConversation changes a conversation's model and/or title

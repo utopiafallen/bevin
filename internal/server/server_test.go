@@ -618,6 +618,35 @@ func TestConversationManagement(t *testing.T) {
 		t.Fatalf("patch missing code = %d, want 404", w.Code)
 	}
 
+	// Single get: the slim row (title + active model), as the UI reads it
+	// before switching the model.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/"+cNew, "tok-bob", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("get code = %d body=%s", w.Code, w.Body.String())
+	}
+	one := struct {
+		Conversation struct {
+			Title         string `json:"title"`
+			ActiveModelID string `json:"active_model_id"`
+		} `json:"conversation"`
+	}{}
+	_ = json.Unmarshal(w.Body.Bytes(), &one)
+	if one.Conversation.Title != "renamed" || one.Conversation.ActiveModelID != "m2" {
+		t.Fatalf("single get = %+v, want 'renamed' on m2", one.Conversation)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/nope", "tok-bob", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("get missing code = %d, want 404", w.Code)
+	}
+	// The {id} wildcard must not shadow the literal /search route.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/search", "tok-bob", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("search-without-q code = %d, want 400 (the literal route), not the wildcard's 404", w.Code)
+	}
+
 	// Delete: ok, then the conversation is gone from the list and the
 	// message endpoint 404s; deleting again is 404.
 	w = httptest.NewRecorder()
