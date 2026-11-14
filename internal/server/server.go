@@ -129,6 +129,9 @@ func (a *App) routes() {
 	// dashboard instead; this also stops a stale user tab from chatting as
 	// the admin).
 	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
+	mux.HandleFunc("GET /api/conversations", a.chatGate(a.listConversations))
+	mux.HandleFunc("PATCH /api/conversations/{id}", a.chatGate(a.updateConversation))
+	mux.HandleFunc("DELETE /api/conversations/{id}", a.chatGate(a.deleteConversation))
 	mux.HandleFunc("GET /api/conversations/search", a.chatGate(a.searchConversations))
 	mux.HandleFunc("GET /api/conversations/{id}/messages", a.chatGate(a.getMessages))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
@@ -351,6 +354,67 @@ func (a *App) createConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+}
+
+// listConversations returns the user's conversations, most recently active
+// first (the slim list form — the UI's history panel).
+func (a *App) listConversations(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	convos, err := a.ag.Conversations(u.Handle)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversations": convos})
+}
+
+// updateConversation changes a conversation's model and/or title
+// (at least one required). The model must be available right now; the
+// switch takes effect on the next turn (an in-flight turn keeps its model).
+func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	var req struct {
+		ModelID *string `json:"model_id"`
+		Title   *string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ModelID == nil && req.Title == nil) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide model_id and/or title"})
+		return
+	}
+	if req.ModelID != nil && !a.ag.ModelAvailable(*req.ModelID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model not available"})
+		return
+	}
+	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title must not be blank"})
+		return
+	}
+	summary, err := a.ag.UpdateConversation(u.Handle, r.PathValue("id"), req.ModelID, req.Title)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary})
+}
+
+// deleteConversation removes the user's conversation (its message rows, the
+// FTS index via triggers, and its indexed vectors best-effort).
+func (a *App) deleteConversation(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	err := a.ag.DeleteConversation(r.Context(), u.Handle, r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // getMessages returns the conversation's displayable history (user +

@@ -133,6 +133,77 @@ func TestUpsertAndSearch(t *testing.T) {
 	}
 }
 
+// TestDeletePoints — the delete is a POST to /collections/{name}/points/
+// delete with wait=true as a query param and the id filter as the raw body
+// (the current Qdrant form: {"filter":{"must":[{"has_id":[...]}]}}); an
+// empty id list sends nothing; a missing collection (404) is a no-op.
+func TestDeletePoints(t *testing.T) {
+	var deleteBody map[string]any
+	var deleteQuery string
+	var deletes, requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method == http.MethodPost && r.URL.Path == "/collections/c1/points/delete" {
+			deletes++
+			deleteQuery = r.URL.RawQuery
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &deleteBody)
+			_, _ = w.Write([]byte(`{"result":{"status":"completed"}}`))
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/collections/nope/points/delete" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"status":{"error":"not found"}}`))
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	ctx := context.Background()
+
+	// Empty id list: no request at all.
+	if err := c.DeletePoints(ctx, "c1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests for empty id list = %d, want 0", requests)
+	}
+
+	if err := c.DeletePoints(ctx, "c1", []int64{901, 902}); err != nil {
+		t.Fatal(err)
+	}
+	if deletes != 1 {
+		t.Fatalf("deletes = %d, want 1", deletes)
+	}
+	if deleteQuery != "wait=true" {
+		t.Fatalf("query = %q, want wait=true (durable on return)", deleteQuery)
+	}
+	filter, ok := deleteBody["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("delete body missing filter: %v", deleteBody)
+	}
+	must, ok := filter["must"].([]any)
+	if !ok || len(must) != 1 {
+		t.Fatalf("filter.must = %v, want one condition", filter)
+	}
+	cond, ok := must[0].(map[string]any)
+	if !ok {
+		t.Fatalf("condition = %v", must[0])
+	}
+	ids, ok := cond["has_id"].([]any)
+	if !ok || len(ids) != 2 || ids[0] != float64(901) || ids[1] != float64(902) {
+		t.Fatalf("condition = %v, want has_id [901 902] (the message ids)", cond)
+	}
+
+	// Missing collection: no error.
+	if err := c.DeletePoints(ctx, "nope", []int64{1}); err != nil {
+		t.Fatalf("delete on missing collection = %v, want nil", err)
+	}
+}
+
 // TestNewEmpty — a blank endpoint yields a nil client (vector search is
 // "off", never an error path).
 func TestNewEmpty(t *testing.T) {

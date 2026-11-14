@@ -450,6 +450,68 @@ func TestMessageReasoningRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDeleteConversation — a delete removes the conversation row and every
+// one of its message rows (the FTS index follows via its triggers, so a
+// search no longer surfaces the deleted content); deleting an unknown or
+// already-deleted conversation is ErrNotFound.
+func TestDeleteConversation(t *testing.T) {
+	s := openTestStore(t)
+	c, err := s.CreateConversation("doomed", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(c.ID, "user", "zebra fact one", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(c.ID, "assistant", "zebra fact two", "", "", ptrStr("m1")); err != nil {
+		t.Fatal(err)
+	}
+	// A second conversation must be untouched.
+	other, err := s.CreateConversation("keeper", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendMessage(other.ID, "user", "stay put", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteConversation(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetConversation(c.ID); err != ErrNotFound {
+		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+	// The messages are gone (ListMessages reports an empty history for a
+	// conversation with no rows).
+	msgs, err := s.ListMessages(c.ID)
+	if err != nil {
+		t.Fatalf("list after delete = %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages after delete = %+v, want none", msgs)
+	}
+	// FTS no longer matches the deleted content...
+	hits, err := s.SearchMessages("zebra", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("fts hits after delete = %+v, want none", hits)
+	}
+	// ...and the other conversation is intact.
+	if _, err := s.GetConversation(other.ID); err != nil {
+		t.Fatalf("sibling conversation damaged: %v", err)
+	}
+	// Deleting again is ErrNotFound (no double-delete surprise).
+	if err := s.DeleteConversation(c.ID); err != ErrNotFound {
+		t.Fatalf("second delete = %v, want ErrNotFound", err)
+	}
+	// Unknown id is ErrNotFound.
+	if err := s.DeleteConversation("nope"); err != ErrNotFound {
+		t.Fatalf("delete unknown = %v, want ErrNotFound", err)
+	}
+}
+
 func TestServerStoreUserCredSession(t *testing.T) {
 	ss, err := OpenServer(t.TempDir())
 	if err != nil {

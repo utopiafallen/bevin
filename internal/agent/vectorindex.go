@@ -106,6 +106,14 @@ func (v *vectorIndex) IndexMessage(ctx context.Context, handle string, msg store
 	return v.qd.Upsert(ctx, coll, []qdrant.Point{{ID: msg.ID, Vector: vec, Payload: payload}})
 }
 
+// DeleteMessages removes the points of the given messages from the user's
+// collection (the conversation-delete path: the SQLite rows go first, the
+// vectors follow). Point ids are the message ids, so the list needs no
+// other mapping.
+func (v *vectorIndex) DeleteMessages(ctx context.Context, handle string, msgIDs []int64) error {
+	return v.qd.DeletePoints(ctx, v.collection(handle), msgIDs)
+}
+
 // Search embeds the query and returns the user's nearest message points.
 func (v *vectorIndex) Search(ctx context.Context, handle, query string, limit int) ([]SearchHit, error) {
 	vec, err := v.embed(ctx, queryPrefix+query)

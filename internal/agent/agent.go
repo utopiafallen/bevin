@@ -402,6 +402,101 @@ func (a *Agent) SearchConversations(ctx context.Context, handle, query string, l
 	return vi.Search(ctx, handle, query, limit)
 }
 
+// DeleteConversation removes the user's conversation: its message rows go
+// first (the authoritative step — the FTS index follows via its triggers),
+// then the indexed vectors, best-effort (an unconfigured vector index or a
+// sidecar blip leaves no SQLite residue; a failed point removal is logged,
+// never fatal — an orphaned point just stops being reachable, the
+// conversation itself is gone). store.ErrNotFound when the conversation is
+// not in the user's store.
+func (a *Agent) DeleteConversation(ctx context.Context, handle, convID string) error {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return err
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		return err
+	}
+	ids := make([]int64, 0, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+	if err := us.DeleteConversation(convID); err != nil {
+		return err
+	}
+	if vi := a.vectorIndex(); vi != nil {
+		if err := vi.DeleteMessages(ctx, handle, ids); err != nil {
+			logVectorIndexError("delete points", err)
+		}
+	}
+	return nil
+}
+
+// ConversationSummary is one row of the user's conversation list: the
+// identity + scheduling facts the UI needs (no frozen prompt, no messages).
+type ConversationSummary struct {
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	CreatedAt      string `json:"created_at"`
+	LastActivityAt string `json:"last_activity_at"`
+	ActiveModelID  string `json:"active_model_id"`
+}
+
+// Conversations lists the user's conversations, most recently active first
+// (the store's order).
+func (a *Agent) Conversations(handle string) ([]ConversationSummary, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	convos, err := us.ListConversations()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ConversationSummary, 0, len(convos))
+	for _, c := range convos {
+		out = append(out, ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID})
+	}
+	return out, nil
+}
+
+// UpdateConversation changes a conversation's active model and/or title
+// (either or both; at least one is required, enforced by the caller). The
+// model must be available right now — also enforced by the caller. The
+// change applies to the NEXT turn: an in-flight turn keeps the model it
+// started on (the scheduler already queued it in that model's pool).
+// Returns the updated summary. store.ErrNotFound when the conversation is
+// not in the user's store.
+func (a *Agent) UpdateConversation(handle, convID string, modelID, title *string) (*ConversationSummary, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := us.GetConversation(convID); err != nil {
+		return nil, err
+	}
+	if modelID != nil && *modelID != "" {
+		if err := us.SetConversationModel(convID, *modelID); err != nil {
+			return nil, err
+		}
+	}
+	if title != nil {
+		t := strings.TrimSpace(*title)
+		if t == "" {
+			return nil, fmt.Errorf("title must not be blank")
+		}
+		if err := us.SetConversationTitle(convID, t); err != nil {
+			return nil, err
+		}
+	}
+	c, err := us.GetConversation(convID)
+	if err != nil {
+		return nil, err
+	}
+	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID}, nil
+}
+
 // ConversationMessage is one displayable message from a conversation. The
 // store also keeps bevin-internal rows (summary context artifacts, and tool
 // rows once tools exist); those are never rendered as chat, so

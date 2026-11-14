@@ -66,7 +66,30 @@ func (s *UserStore) FindConversationByTitle(title string) (*Conversation, error)
 	return c, nil
 }
 
-// HasMessages reports whether the conversation has any messages.
+// DeleteConversation removes a conversation and all of its message rows in
+// one transaction (the FTS5 index follows via its triggers). The
+// conversation row determines existence: a delete that matches nothing is
+// ErrNotFound and rolls back, so a missing id never touches message rows.
+func (s *UserStore) DeleteConversation(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`DELETE FROM conversations WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM messages WHERE conversation_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// HasMessages reports whether the conversation has at least one message.
 func (s *UserStore) HasMessages(convID string) (bool, error) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, convID).Scan(&n); err != nil {

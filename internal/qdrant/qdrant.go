@@ -1,8 +1,8 @@
 // Package qdrant is a thin REST client for the Qdrant vector database
 // (the loopback sidecar the setup provisions; see setup/sidecar.go). It
 // covers exactly what bevin needs: ensure a collection, upsert points,
-// and vector-search them. No other Qdrant features (shards, aliases,
-// snapshots, gRPC) are used.
+// vector-search them, and delete them. No other Qdrant features (shards,
+// aliases, snapshots, gRPC) are used.
 //
 // Point IDs are the SQLite message IDs (integer IDs are natively
 // supported and returned verbatim on search — a string ID would be
@@ -113,6 +113,38 @@ func (c *Client) Upsert(ctx context.Context, name string, pts []Point) error {
 	ioClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("qdrant: upsert %s: %s", name, resp.Status)
+	}
+	return nil
+}
+
+// DeletePoints removes the given points by id (wait=true so the delete is
+// durable on return). The current Qdrant API takes the selector as the raw
+// body — an id filter is {"filter":{"must":[{"has_id":[...]}]}} (the older
+// top-level {"id": [...]} form was removed) — with wait as a query param.
+// An empty id list is a no-op; a missing collection is a no-op, not an
+// error (nothing to delete).
+func (c *Client) DeletePoints(ctx context.Context, name string, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]any{
+		"filter": map[string]any{"must": []any{map[string]any{"has_id": ids}}},
+	})
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/collections/"+name+"/points/delete?wait=true", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTP.Do(r)
+	if err != nil {
+		return err
+	}
+	ioClose(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("qdrant: delete points %s: %s", name, resp.Status)
 	}
 	return nil
 }

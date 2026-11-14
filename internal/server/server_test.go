@@ -459,6 +459,214 @@ func TestAdminConfigEndpoints(t *testing.T) {
 	}
 }
 
+// twoModelApp builds an App with two available models (the model-switch
+// tests need a second one to switch to) + a regular user "bob" with a live
+// session.
+func twoModelApp(t *testing.T) (*App, *config.ServerConfig, *store.ServerStore) {
+	t.Helper()
+	dir := t.TempDir()
+	srv, err := store.OpenServer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	if _, err := srv.CreateUser("admin", "Admin", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.CreateUser("bob", "Bob", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-bob", "bob", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	prov := auth.NewInternalProvider(srv, time.Hour)
+	oai := fakeOAIStream(t)
+	t.Cleanup(oai.Close)
+	cfg := &config.ServerConfig{
+		DataDir: dir,
+		Auth:    config.Auth{SessionTTLSeconds: 3600},
+		Models: []config.Model{
+			{ID: "m1", Provider: "openai", BaseURL: oai.URL + "/v1", APIKey: "sk-test", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 1, Enabled: true},
+			{ID: "m2", Provider: "openai", BaseURL: oai.URL + "/v1", APIKey: "sk-test", ModelID: "gpt-4o-mini", DisplayName: "GPT-4o Mini", MaxContext: 128000, Slots: 1, Enabled: true},
+		},
+	}
+	ag, err := agent.New(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	a := &App{cfg: cfg, prov: prov, ag: ag, srv: srv, ttl: time.Hour, dataDir: dir}
+	a.routes()
+	return a, cfg, srv
+}
+
+// TestConversationManagement — the conversation lifecycle endpoints: list
+// (slim rows, most recently active first), model switch (validated against
+// the available set), rename, and delete (404 afterwards; the message
+// endpoint follows).
+func TestConversationManagement(t *testing.T) {
+	a, _, srv := twoModelApp(t)
+
+	// Create two conversations (bob's default model is m1 — the first
+	// available one).
+	mkConv := func(title string) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob", map[string]string{"title": title}))
+		if w.Code != http.StatusOK {
+			t.Fatalf("create %q code = %d body=%s", title, w.Code, w.Body.String())
+		}
+		var res map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &res)
+		return res["id"].(string)
+	}
+	cOld := mkConv("older one")
+	cNew := mkConv("newer one")
+	// Touch the old conversation so it is the most recently active. The
+	// activity timestamps have second precision, so wait across a second
+	// boundary to make the ordering assertion deterministic.
+	time.Sleep(1100 * time.Millisecond)
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations/"+cOld+"/messages/stream", "tok-bob", map[string]string{"message": "keep me warm"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("warm turn code = %d body=%s", w.Code, w.Body.String())
+	}
+
+	// List: both conversations, most recently active first, slim fields.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations", "tok-bob", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list code = %d body=%s", w.Code, w.Body.String())
+	}
+	var list struct {
+		Conversations []struct {
+			ID             string `json:"id"`
+			Title          string `json:"title"`
+			ActiveModelID  string `json:"active_model_id"`
+			LastActivityAt string `json:"last_activity_at"`
+		} `json:"conversations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Conversations) != 2 {
+		t.Fatalf("list = %+v, want 2 rows", list)
+	}
+	if list.Conversations[0].ID != cOld {
+		t.Fatalf("list[0] = %+v, want the most recently active (%s)", list.Conversations[0], cOld)
+	}
+	if list.Conversations[0].ActiveModelID != "m1" || list.Conversations[0].Title != "older one" {
+		t.Fatalf("row = %+v, want title 'older one' on m1", list.Conversations[0])
+	}
+
+	// Switch the newer conversation to m2: the response is the updated row.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"model_id": "m2"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("model switch code = %d body=%s", w.Code, w.Body.String())
+	}
+	var up struct {
+		Conversation struct {
+			ID            string `json:"id"`
+			Title         string `json:"title"`
+			ActiveModelID string `json:"active_model_id"`
+		} `json:"conversation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &up); err != nil {
+		t.Fatal(err)
+	}
+	if up.Conversation.ID != cNew || up.Conversation.ActiveModelID != "m2" {
+		t.Fatalf("updated = %+v, want %s on m2", up, cNew)
+	}
+
+	// A model that is not available is rejected (400, conversation intact).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"model_id": "m-nope"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown model code = %d, want 400", w.Code)
+	}
+
+	// Rename: the title updates, the model is untouched.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"title": "renamed"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename code = %d body=%s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &up); err != nil {
+		t.Fatal(err)
+	}
+	if up.Conversation.Title != "renamed" || up.Conversation.ActiveModelID != "m2" {
+		t.Fatalf("renamed = %+v, want title 'renamed' still on m2", up.Conversation)
+	}
+
+	// A blank title is rejected.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"title": "   "}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("blank title code = %d, want 400", w.Code)
+	}
+	// An empty patch is rejected.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty patch code = %d, want 400", w.Code)
+	}
+	// Patching a missing conversation is 404.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/nope", "tok-bob", map[string]any{"title": "x"}))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("patch missing code = %d, want 404", w.Code)
+	}
+
+	// Delete: ok, then the conversation is gone from the list and the
+	// message endpoint 404s; deleting again is 404.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodDelete, "/api/conversations/"+cNew, "tok-bob", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete code = %d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations", "tok-bob", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("post-delete list code = %d", w.Code)
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list.Conversations) != 1 || list.Conversations[0].ID != cOld {
+		t.Fatalf("list after delete = %+v, want only the older conversation", list)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/"+cNew+"/messages", "tok-bob", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("messages after delete code = %d, want 404", w.Code)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodDelete, "/api/conversations/"+cNew, "tok-bob", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("second delete code = %d, want 404", w.Code)
+	}
+
+	// Per-user isolation: a second user's list is empty (routing is by
+	// session, and each user only ever sees their own conversations).
+	if _, err := srv.CreateUser("carol", "Carol", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-carol", "carol", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations", "tok-carol", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("carol list code = %d", w.Code)
+	}
+	var carol struct {
+		Conversations []any `json:"conversations"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &carol)
+	if len(carol.Conversations) != 0 {
+		t.Fatalf("carol sees %d conversations, want 0 (per-user isolation)", len(carol.Conversations))
+	}
+}
+
 // TestSendMessageStream verifies the SSE chat endpoint: it emits "message"
 // events for the deltas + a "done" event carrying the conversation id, the full
 // reply, and the API-reported usage (from the final chunk).
