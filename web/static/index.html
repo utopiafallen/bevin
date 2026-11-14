@@ -92,7 +92,15 @@
       <div id="chatCard" style="display:none;">
         <div style="display:flex; gap:.5rem; margin:.4rem 0 .2rem; flex-wrap:wrap; align-items:center;">
           <button class="btn btn-ghost" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
+          <button class="btn btn-ghost" id="searchBtn" type="button" title="Search your conversations (semantic)">Search</button>
           <span id="modelInfo" class="chip chip-ghost" title="This conversation's model (set server-side)"></span>
+        </div>
+        <div id="searchPanel" style="display:none; margin:.2rem 0 .5rem; padding:.55rem .7rem; border:1px solid var(--border); border-radius:8px;">
+          <form id="searchForm" style="display:flex; gap:.5rem; align-items:center;">
+            <input id="searchInput" placeholder="Search your conversations…" autocomplete="off" style="flex:1;">
+            <button class="btn btn-primary" type="submit">Go</button>
+          </form>
+          <div id="searchResults" style="margin-top:.5rem; max-height:16rem; overflow-y:auto;"></div>
         </div>
         <div id="chatLog"></div>
         <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
@@ -570,6 +578,78 @@
       $("chatLog").innerHTML = "";
       addNote("New conversation started.");
     });
+
+    // Conversation search (semantic — the per-user vector DB). The panel
+    // toggles next to "New chat"; a query fetches the top matches from
+    // /api/conversations/search and clicking a hit opens that
+    // conversation (same open path as a fresh page load).
+    function toggleSearchPanel(show) {
+      var p = $("searchPanel");
+      var next = (show === undefined) ? (p.style.display === "none") : show;
+      p.style.display = next ? "" : "none";
+      if (next) $("searchInput").focus();
+      return next;
+    }
+    $("searchBtn").addEventListener("click", function () { toggleSearchPanel(); });
+
+    async function runSearch() {
+      var q = $("searchInput").value.trim();
+      var box = $("searchResults");
+      if (!q) return;
+      box.innerHTML = '<p class="muted" style="font-size:.85rem;">searching…</p>';
+      try {
+        var r = await fetch("/api/conversations/search?q=" + encodeURIComponent(q) + "&limit=10");
+        if (!r.ok) { var je = {}; try { je = await r.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + r.status)); }
+        var d = await r.json();
+        box.innerHTML = "";
+        var hits = d.results || [];
+        if (!hits.length) {
+          box.innerHTML = '<p class="muted" style="font-size:.85rem;">no matches in your conversations.</p>';
+          return;
+        }
+        hits.forEach(function (h) {
+          var item = document.createElement("div");
+          item.style.cssText = "padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem; cursor:pointer;";
+          item.onmouseenter = function () { item.style.background = "var(--hover, rgba(127,127,127,.08));"; };
+          item.onmouseleave = function () { item.style.background = ""; };
+          var head = document.createElement("div");
+          head.style.cssText = "font-size:.78rem; color:var(--muted, #666); margin-bottom:.15rem;";
+          var when = "";
+          try { when = fmtWhen(new Date(h.created_at)); } catch (e) {}
+          head.textContent = (h.role === "user" ? "you" : "bevin") + (when ? " · " + when : "") + " · " + (Math.round(h.score * 100) + "%");
+          var body = document.createElement("div");
+          body.style.cssText = "font-size:.9rem;";
+          var text = h.content || "";
+          if (text.length > 160) text = text.slice(0, 160) + "…";
+          body.textContent = text;
+          item.appendChild(head);
+          item.appendChild(body);
+          item.addEventListener("click", function () { openConversation(h.conversation_id); });
+          box.appendChild(item);
+        });
+      } catch (err) {
+        box.innerHTML = "";
+        var p = document.createElement("p");
+        p.style.cssText = "font-size:.85rem; color:var(--danger, #c0392b);";
+        p.textContent = "⚠ " + err.message;
+        box.appendChild(p);
+      }
+    }
+    $("searchForm").addEventListener("submit", function (e) { e.preventDefault(); runSearch(); });
+
+    // openConversation switches the active conversation (from a search hit):
+    // set the id, clear the log, and restore the persisted history.
+    function openConversation(id) {
+      if (!id || sending) return;
+      convID = id;
+      try { localStorage.setItem("bevin-conv", id); } catch (e) {}
+      $("chatLog").innerHTML = "";
+      toggleSearchPanel(false);
+      loadHistory();
+      loadModels();
+      scrollChat();
+      $("message").focus();
+    }
 
     $("chat").addEventListener("submit", function (e) {
       e.preventDefault();

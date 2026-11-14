@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -128,6 +129,7 @@ func (a *App) routes() {
 	// dashboard instead; this also stops a stale user tab from chatting as
 	// the admin).
 	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
+	mux.HandleFunc("GET /api/conversations/search", a.chatGate(a.searchConversations))
 	mux.HandleFunc("GET /api/conversations/{id}/messages", a.chatGate(a.getMessages))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
@@ -365,6 +367,36 @@ func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+}
+
+// searchConversations semantically searches the user's conversation history
+// (their per-user Qdrant collection — the message texts are embedded at
+// append time; see agent.vectorIndex). q is required; limit defaults to 10
+// (max 25). Results are the matched messages (not whole conversations),
+// newest-scored; the UI jumps to the hit's conversation.
+func (a *App) searchConversations(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q is required"})
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 25 {
+		limit = 25
+	}
+	hits, err := a.ag.SearchConversations(r.Context(), u.Handle, q, limit)
+	if err != nil {
+		log.Printf("conversation search: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": hits})
 }
 
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/prompt"
 	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/qdrant"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -35,6 +36,11 @@ type Agent struct {
 
 	mu    sync.Mutex
 	users map[string]*store.UserStore
+
+	// vec is the conversation vector index (embedder + per-user Qdrant
+	// collection); nil when the embedder or the Qdrant endpoint is not
+	// configured — turns then skip indexing and search returns no hits.
+	vec *vectorIndex
 
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
@@ -64,7 +70,26 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if len(a.providers) == 0 {
 		return nil, fmt.Errorf("no enabled models configured")
 	}
+	a.vec = a.buildVectorIndex(cfg)
 	return a, nil
+}
+
+// buildVectorIndex assembles the conversation vector index from the config
+// (the local llama-server embedder + the Qdrant sidecar endpoint). It is nil
+// when either is absent — vector search is simply off, not an error.
+func (a *Agent) buildVectorIndex(cfg *config.ServerConfig) *vectorIndex {
+	if cfg.Embedder.BaseURL == "" || cfg.Embedder.ModelID == "" || cfg.Sidecars.Qdrant == "" {
+		return nil
+	}
+	emb := provider.NewLlama(cfg.Embedder.BaseURL, cfg.Embedder.APIKey)
+	return newVectorIndex(emb, cfg.Embedder.ModelID, qdrant.New(cfg.Sidecars.Qdrant))
+}
+
+// vectorIndex returns the current index (nil when not configured).
+func (a *Agent) vectorIndex() *vectorIndex {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.vec
 }
 
 // DefaultModelID returns the default (first available) model ID.
@@ -134,6 +159,7 @@ func (a *Agent) Reload(cfg *config.ServerConfig) error {
 	a.mu.Lock()
 	a.providers = providers
 	a.defaultModel = defaultModel
+	a.vec = a.buildVectorIndex(cfg)
 	a.mu.Unlock()
 	for _, m := range cfg.Models {
 		a.sched.Poke(m.ID)
@@ -309,8 +335,10 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	}
 	if conv, err := us.FindConversationByTitle(onboardingTitle); err == nil {
 		if has, err := us.HasMessages(conv.ID); err == nil && !has {
-			if _, err := us.AppendMessage(conv.ID, "assistant", welcome, "", "", nil); err != nil {
+			if m, err := us.AppendMessage(conv.ID, "assistant", welcome, "", "", nil); err != nil {
 				return "", err
+			} else {
+				a.indexMessage(ctx, handle, m, onboardingTitle)
 			}
 		}
 		return conv.ID, nil
@@ -331,8 +359,10 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 		return "", err
 	}
 	if welcome != "" {
-		if _, err := us.AppendMessage(c.ID, "assistant", welcome, "", "", nil); err != nil {
+		if m, err := us.AppendMessage(c.ID, "assistant", welcome, "", "", nil); err != nil {
 			return "", err
+		} else {
+			a.indexMessage(ctx, handle, m, onboardingTitle)
 		}
 	}
 	return c.ID, nil
@@ -347,6 +377,29 @@ func (a *Agent) ModelAvailable(modelID string) bool {
 		}
 	}
 	return false
+}
+
+// indexMessage embeds + upserts a persisted message into the user's vector
+// collection (best-effort — a failure is logged, never fatal to the turn).
+func (a *Agent) indexMessage(ctx context.Context, handle string, msg *store.Message, title string) {
+	vi := a.vectorIndex()
+	if vi == nil {
+		return
+	}
+	if err := vi.IndexMessage(ctx, handle, *msg, title); err != nil {
+		logVectorIndexError("index", err)
+	}
+}
+
+// SearchConversations semantically searches the user's conversation history
+// (their Qdrant collection). An unconfigured index yields an empty result —
+// not an error — so the endpoint stays 200 either way.
+func (a *Agent) SearchConversations(ctx context.Context, handle, query string, limit int) ([]SearchHit, error) {
+	vi := a.vectorIndex()
+	if vi == nil {
+		return []SearchHit{}, nil
+	}
+	return vi.Search(ctx, handle, query, limit)
 }
 
 // ConversationMessage is one displayable message from a conversation. The
@@ -414,9 +467,11 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
 	// Persist the user message first, so history is always durable/consistent.
-	if _, err := us.AppendMessage(convID, roleUser, userText, "", "", nil); err != nil {
+	userMsg, err := us.AppendMessage(convID, roleUser, userText, "", "", nil)
+	if err != nil {
 		return conv.ID, "", err
 	}
+	a.indexMessage(ctx, handle, userMsg, conv.Title)
 	hist, err := us.ListMessages(convID)
 	if err != nil {
 		return conv.ID, "", err
@@ -465,9 +520,11 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// the streaming "done" event / returned from Turn).
 	res.Text = stripLeadingTranscriptTimestamp(res.Text)
 	modelID := conv.ActiveModelID
-	if _, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID); err != nil {
+	assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+	if err != nil {
 		return conv.ID, "", err
 	}
+	a.indexMessage(ctx, handle, assistantMsg, conv.Title)
 	// Post-compact: if the prompt (now including the reply) exceeds the
 	// budget, compact the older turns so the next call fits. Prefer the
 	// API-reported usage (res.Usage — from the final SSE chunk when
