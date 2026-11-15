@@ -3,6 +3,10 @@ package web
 import (
 	"bytes"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +16,7 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 	want := []string{
 		"index.html",
 		"brand.css",
+		"app.css",
 		"config-forms.css",
 		"config-forms.js",
 		"markdown.js",
@@ -83,6 +88,58 @@ func TestModelProfileUISurface(t *testing.T) {
 	} {
 		if !bytes.Contains(page, []byte(want)) {
 			t.Errorf("admin-models.html missing: %s", want)
+		}
+	}
+}
+
+// TestIndexInlineJSValid syntax-checks every inline <script> block in the
+// main user page with `node --check` (the page is the only UI with
+// hand-maintained shell logic — the sidebar/drawer wiring — so a typo there
+// would break the whole page silently). Skipped where node is unavailable.
+func TestIndexInlineJSValid(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	f, err := FS.Open("static/index.html")
+	if err != nil {
+		t.Fatalf("open index.html: %v", err)
+	}
+	defer f.Close()
+	var b bytes.Buffer
+	if _, err := io.Copy(&b, f); err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	page := b.String()
+
+	// Inline script bodies: <script> … </script> (the src= scripts are
+	// external files and match "<script src=", not "<script>").
+	var bodies []string
+	for i := 0; ; {
+		s := strings.Index(page[i:], "<script>")
+		if s < 0 {
+			break
+		}
+		s += i
+		e := strings.Index(page[s:], "</script>")
+		if e < 0 {
+			break
+		}
+		bodies = append(bodies, page[s+len("<script>"):s+e])
+		i = s + e
+	}
+	if len(bodies) == 0 {
+		t.Fatal("no inline script blocks found in index.html")
+	}
+	for i, body := range bodies {
+		tmp := filepath.Join(t.TempDir(), "inline.js")
+		if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+			t.Fatalf("write temp script: %v", err)
+		}
+		out, err := exec.Command("node", "--check", tmp).CombinedOutput()
+		if err != nil {
+			t.Errorf("inline script %d failed node --check: %v\n%s", i, err, out)
+		} else {
+			t.Logf("inline script %d: OK", i)
 		}
 	}
 }

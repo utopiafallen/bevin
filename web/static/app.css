@@ -1,0 +1,214 @@
+/* bevin — full-screen chat shell (the main user page, index.html only).
+ *
+ * Desktop: a persistent sidebar (new chat, search, conversation history,
+ * user actions) plus a chat that fills the rest of the window; the menu
+ * button collapses the sidebar (the state persists in localStorage).
+ *
+ * Mobile / narrow portrait: the sidebar becomes an off-canvas drawer behind
+ * the same menu button (with a scrim), and everything else stacks cleanly
+ * at full width.
+ *
+ * The chat column is centered in the remaining space. On ultrawide screens
+ * its width is derived from the viewport height (×1.6), so the visible chat
+ * stays roughly 16:10 and the screen's extra width becomes margin; on
+ * normal screens the width cap hits first, so the chat uses the full
+ * available width.
+ *
+ * Loaded only by index.html — the admin and setup pages keep their own
+ * layouts.
+ */
+
+:root {
+  --sb-w: 18rem;
+  --topbar-h: 3.2rem;
+}
+
+/* The page is a fixed full-viewport shell: the chat log scrolls internally,
+   the document itself never does. */
+html, body { height: 100%; }
+body { margin: 0; min-height: 0; overflow: hidden; }
+
+.app { display: flex; height: 100vh; height: 100dvh; }
+
+/* ---- sidebar (desktop: persistent, collapsible) ---- */
+.sidebar {
+  width: var(--sb-w);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  transition: margin-left 0.18s ease;
+  z-index: 60;
+}
+body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
+
+.sb-brand {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 1rem 1rem 0.5rem;
+}
+.sb-brand .brand { font-size: 1.3rem; }
+.sb-close { display: none; }
+
+.sb-nav { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.25rem 0.9rem 0.5rem; }
+.sb-newchat { width: 100%; }
+
+.sb-search { display: flex; gap: 0.4rem; padding: 0 0.9rem 0.5rem; }
+.sb-search input { flex: 1; min-width: 0; padding: 0.55rem 0.75rem; }
+.sb-search-go {
+  padding: 0.55rem 0.85rem; font-size: 0.88rem;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+}
+
+/* Search results and the conversation history share one scroll region. */
+.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0.9rem 0.5rem; }
+.sb-results {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.4rem 0.55rem 0.55rem; margin-bottom: 0.6rem;
+  background: var(--surface-2);
+}
+.sb-results-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+.sb-clear { padding: 0.05rem 0.5rem; line-height: 1.6; font-size: 0.9rem; }
+.sb-section {
+  font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: 0.72rem; color: var(--text-muted);
+  margin: 0.4rem 0.2rem 0.45rem;
+}
+
+/* Signed-out state: only the brand + user chip remain. */
+.sidebar.signed-out .sb-nav,
+.sidebar.signed-out .sb-search,
+.sidebar.signed-out .sb-scroll,
+.sidebar.signed-out .sb-actions { display: none; }
+
+.sb-footer {
+  flex: none;
+  display: flex; flex-direction: column; gap: 0.45rem;
+  padding: 0.7rem 0.9rem 0.9rem;
+  border-top: 1px solid var(--border);
+}
+.sb-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.sb-logout { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
+
+/* ---- main column ---- */
+.main {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+}
+
+.topbar {
+  flex: none;
+  height: var(--topbar-h);
+  display: flex; align-items: center; gap: 0.55rem;
+  padding: 0 4.6rem 0 0.7rem; /* the right keeps room for the fixed theme toggle */
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.topbar .spacer { flex: 1; }
+.topbar-brand { display: none; font-size: 1.15rem; }
+.health-line {
+  font-size: 0.78rem; color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.icon-btn {
+  display: grid; place-items: center; flex: none;
+  width: 2.5rem; height: 2.5rem;
+  border: 1px solid transparent; border-radius: 10px;
+  background: transparent; color: var(--text); cursor: pointer;
+  transition: background 0.15s;
+}
+.icon-btn:hover { background: var(--surface-2); }
+
+/* The stage centers the chat column in the remaining space. */
+.stage {
+  flex: 1; min-height: 0;
+  display: flex; justify-content: center;
+  padding: 0.9rem 1.1rem 1.1rem;
+}
+
+/* The chat column: centered. On ultrawide screens its width is derived
+   from its own height (1.6× → roughly 16:10): the stage's vertical padding
+   (0.9 + 1.1 = 2rem) is subtracted so the ratio is against the column's
+   actual height, not the viewport's. min(100%, …) keeps the cap below the
+   available width on normal screens, where the chat simply fills it. */
+.column {
+  width: 100%;
+  max-width: min(100%, calc((100vh - var(--topbar-h) - 2rem) * 1.6));
+  max-width: min(100%, calc((100dvh - var(--topbar-h) - 2rem) * 1.6));
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+
+/* Centered fixed-height cards (login, onboarding). */
+.center-card { margin: auto; width: 100%; max-width: 26rem; }
+
+/* The chat card: a full-height flex column — tools, the scrolling log, and
+   the composer pinned at the bottom. */
+.chat-card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.chat-tools {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.2rem 0.1rem 0.55rem;
+}
+.chat-tools #modelSelect {
+  width: auto; max-width: 12rem;
+  padding: 0.3rem 0.5rem; font-size: 0.9rem;
+}
+#chatLog {
+  flex: 1; min-height: 0; overflow-y: auto;
+  max-height: none; /* overrides brand.css's 26rem card cap */
+  padding: 0.3rem 0.35rem 0.9rem;
+}
+#chat {
+  display: flex; gap: 0.5rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+#chat #message { flex: 1; }
+
+/* The theme toggle floats above the drawer scrim so it stays clickable
+   while the mobile drawer is open. */
+.theme-toggle { z-index: 70; }
+
+.scrim { display: none; }
+
+/* ---- mobile / narrow portrait: the sidebar is an off-canvas drawer ---- */
+@media (max-width: 839px) {
+  .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0;
+    width: min(85vw, 19rem);
+    margin-left: 0 !important; /* the desktop collapse must not double-shift the drawer */
+    transform: translateX(-104%);
+    transition: transform 0.2s ease;
+    box-shadow: none;
+  }
+  body.nav-open .sidebar { transform: none; box-shadow: var(--shadow); }
+
+  .scrim {
+    display: block;
+    position: fixed; inset: 0; z-index: 55;
+    background: rgba(20, 15, 5, 0.4);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  body.nav-open .scrim { opacity: 1; pointer-events: auto; }
+
+  .sb-close { display: grid; }
+  .topbar-brand { display: inline-flex; }
+  .topbar { padding-left: 0.5rem; gap: 0.45rem; }
+  .health-line { display: none; } /* diagnostic-only; the drawer is the focus on phones */
+  .stage { padding: 0.5rem 0.6rem 0.6rem; }
+  .column { max-width: 100%; }
+  .center-card { max-width: 100%; }
+  .msg { max-width: 92%; }
+  .chat-tools #modelSelect { flex: 1; max-width: none; }
+  #chat { padding: 0.5rem 0.05rem 0.55rem; }
+  .sb-brand { padding-top: 1.1rem; }
+  .sb-footer { padding-bottom: max(0.9rem, env(safe-area-inset-bottom, 0px)); }
+}

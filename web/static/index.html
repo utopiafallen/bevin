@@ -6,6 +6,7 @@
   <title>bevin</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/brand.css">
+  <link rel="stylesheet" href="/app.css">
   <script>
     // Apply the saved theme (or the system preference) before first paint.
     (function () {
@@ -20,6 +21,16 @@
   </script>
 </head>
 <body>
+  <script>
+    // Restore the desktop sidebar state (collapsed / open) before first
+    // paint, so the shell never flashes open and then slides closed.
+    try {
+      if (localStorage.getItem("bevin-sidebar") === "closed") {
+        document.body.classList.add("sb-collapsed");
+      }
+    } catch (e) {}
+  </script>
+
   <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
     <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="12" cy="12" r="4"></circle>
@@ -30,93 +41,121 @@
     </svg>
   </button>
 
-  <div class="wrap">
-    <header class="topbar">
-      <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
-      <div style="display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end;">
+  <div class="app">
+    <aside class="sidebar signed-out" id="sidebar" aria-label="Navigation">
+      <div class="sb-brand">
+        <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
+        <button class="icon-btn sb-close" id="sbCloseBtn" type="button" aria-label="Close navigation" title="Close navigation">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+
+      <div class="sb-nav">
+        <button class="btn btn-primary sb-newchat" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
+      </div>
+
+      <form id="searchForm" class="sb-search">
+        <input id="searchInput" placeholder="Search conversations…" autocomplete="off">
+        <button class="btn btn-ghost sb-search-go" type="submit">Search</button>
+      </form>
+
+      <div class="sb-scroll">
+        <div id="searchResults" class="sb-results" hidden>
+          <div class="sb-results-head">
+            <span>Search results</span>
+            <button class="btn btn-ghost sb-clear" id="clearSearchBtn" type="button" title="Clear results" aria-label="Clear results">×</button>
+          </div>
+          <div id="searchResultsList"></div>
+        </div>
+        <div class="sb-section">Conversations</div>
+        <div id="historyList" class="sb-history"></div>
+      </div>
+
+      <div class="sb-footer">
         <span class="chip"><span class="dot"></span> <span id="userChip">signed out</span></span>
-        <button class="btn btn-ghost" id="logoutBtn" type="button" style="display:none; padding:.25rem .7rem;">Sign out</button>
-        <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/models" style="display:none;" title="Models &amp; config editors (admin)">Models</a>
-      </div>
-    </header>
-
-    <section class="card" id="chatSection">
-      <h3>Conversation</h3>
-
-      <div id="loginCard">
-        <p class="muted" style="margin-top:.2rem;">Sign in to start a conversation.</p>
-        <form id="loginForm" style="display:flex; flex-direction:column; gap:.5rem; margin-top:.6rem;">
-          <input id="handle" placeholder="handle" autocomplete="username" required>
-          <input id="password" type="password" placeholder="password" autocomplete="current-password" required>
-          <button class="btn btn-primary" type="submit">Sign in</button>
-          <span id="loginErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
-        </form>
-        <div id="oauthLogin" style="display:none; margin-top:.9rem;">
-          <div style="display:flex; align-items:center; gap:.6rem; margin-bottom:.55rem;">
-            <span style="flex:1; border-top:1px solid var(--border);"></span>
-            <span class="muted" style="font-size:.8rem;">or</span>
-            <span style="flex:1; border-top:1px solid var(--border);"></span>
-          </div>
-          <a class="btn" id="oauthBtn" href="/auth/oauth/login" style="text-align:center; text-decoration:none;">Sign in with external provider</a>
+        <div class="sb-actions">
+          <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/models" hidden title="Models &amp; config editors (admin)">Models</a>
+          <button class="btn btn-ghost sb-logout" id="logoutBtn" type="button" hidden>Sign out</button>
         </div>
       </div>
+    </aside>
 
-      <div id="onboardCard" style="display:none;">
-        <div class="eyebrow">First time here</div>
-        <h3 style="margin:.3rem 0 .2rem;">Meet Bevin</h3>
-        <p class="muted" style="margin-top:.2rem;">
-          Bevin is your personal assistant — talk to it, and it keeps up with
-          the conversation. A few quick things before we start:
-        </p>
-        <form id="onboardForm" style="display:flex; flex-direction:column; gap:.55rem; margin-top:.7rem;">
-          <div>
-            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Your name <span>(optional)</span></div>
-            <input id="obName" placeholder="how should Bevin call you?" maxlength="64" autocomplete="off">
-          </div>
-          <div>
-            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Default model <span>(for new conversations)</span></div>
-            <select id="obModel"></select>
-          </div>
-          <div>
-            <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Email for notifications <span>(optional)</span></div>
-            <input id="obEmail" type="email" placeholder="you@example.com" autocomplete="off">
-          </div>
-          <span id="obErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
-          <div style="display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.2rem;">
-            <button class="btn btn-primary" type="submit">Start chatting</button>
-            <button class="btn btn-ghost" id="obSkip" type="button" title="Finish with the defaults">Skip for now</button>
-          </div>
-        </form>
+    <div class="scrim" id="scrim"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="menuBtn" type="button" aria-label="Toggle navigation" title="Toggle navigation">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+        </button>
+        <a class="brand topbar-brand" href="/"><img src="/logo-mark.svg" alt=""> bevin</a>
+        <div class="spacer"></div>
+        <div class="health-line">bevin &middot; <span id="health">checking&hellip;</span></div>
+      </header>
+
+      <div class="stage">
+        <div class="column">
+          <section class="card center-card" id="loginCard">
+            <div class="eyebrow">Welcome</div>
+            <h3 style="margin:.3rem 0 .2rem;">Sign in</h3>
+            <p class="muted" style="margin-top:.2rem;">Sign in to start a conversation.</p>
+            <form id="loginForm" style="display:flex; flex-direction:column; gap:.5rem; margin-top:.6rem;">
+              <input id="handle" placeholder="handle" autocomplete="username" required>
+              <input id="password" type="password" placeholder="password" autocomplete="current-password" required>
+              <button class="btn btn-primary" type="submit">Sign in</button>
+              <span id="loginErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
+            </form>
+            <div id="oauthLogin" style="display:none; margin-top:.9rem;">
+              <div style="display:flex; align-items:center; gap:.6rem; margin-bottom:.55rem;">
+                <span style="flex:1; border-top:1px solid var(--border);"></span>
+                <span class="muted" style="font-size:.8rem;">or</span>
+                <span style="flex:1; border-top:1px solid var(--border);"></span>
+              </div>
+              <a class="btn" id="oauthBtn" href="/auth/oauth/login" style="text-align:center; text-decoration:none;">Sign in with external provider</a>
+            </div>
+          </section>
+
+          <section class="card center-card" id="onboardCard" style="display:none;">
+            <div class="eyebrow">First time here</div>
+            <h3 style="margin:.3rem 0 .2rem;">Meet Bevin</h3>
+            <p class="muted" style="margin-top:.2rem;">
+              Bevin is your personal assistant — talk to it, and it keeps up with
+              the conversation. A few quick things before we start:
+            </p>
+            <form id="onboardForm" style="display:flex; flex-direction:column; gap:.55rem; margin-top:.7rem;">
+              <div>
+                <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Your name <span>(optional)</span></div>
+                <input id="obName" placeholder="how should Bevin call you?" maxlength="64" autocomplete="off">
+              </div>
+              <div>
+                <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Default model <span>(for new conversations)</span></div>
+                <select id="obModel"></select>
+              </div>
+              <div>
+                <div class="muted" style="font-size:.85rem; margin-bottom:.25rem;">Email for notifications <span>(optional)</span></div>
+                <input id="obEmail" type="email" placeholder="you@example.com" autocomplete="off">
+              </div>
+              <span id="obErr" style="color:var(--danger, #c0392b); font-size:.85rem;"></span>
+              <div style="display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.2rem;">
+                <button class="btn btn-primary" type="submit">Start chatting</button>
+                <button class="btn btn-ghost" id="obSkip" type="button" title="Finish with the defaults">Skip for now</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="chat-card" id="chatCard" style="display:none;">
+            <div class="chat-tools">
+              <button class="btn btn-ghost" id="chatNewChatBtn" type="button" title="Start a new conversation">New chat</button>
+              <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message"></select>
+            </div>
+            <div id="chatLog"></div>
+            <form id="chat">
+              <input id="message" placeholder="Say something&hellip;" autocomplete="off">
+              <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
+            </form>
+          </section>
+        </div>
       </div>
-
-      <div id="chatCard" style="display:none;">
-        <div style="display:flex; gap:.5rem; margin:.4rem 0 .2rem; flex-wrap:wrap; align-items:center;">
-          <button class="btn btn-ghost" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
-          <button class="btn btn-ghost" id="historyBtn" type="button" title="Your past conversations">History</button>
-          <button class="btn btn-ghost" id="searchBtn" type="button" title="Search your conversations (semantic)">Search</button>
-          <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message" style="max-width:11.5rem; padding:.3rem .5rem;"></select>
-        </div>
-        <div id="historyPanel" style="display:none; margin:.2rem 0 .5rem; padding:.55rem .7rem; border:1px solid var(--border); border-radius:8px;">
-          <div id="historyList" style="max-height:16rem; overflow-y:auto;"></div>
-        </div>
-        <div id="searchPanel" style="display:none; margin:.2rem 0 .5rem; padding:.55rem .7rem; border:1px solid var(--border); border-radius:8px;">
-          <form id="searchForm" style="display:flex; gap:.5rem; align-items:center;">
-            <input id="searchInput" placeholder="Search your conversations…" autocomplete="off" style="flex:1;">
-            <button class="btn btn-primary" type="submit">Go</button>
-          </form>
-          <div id="searchResults" style="margin-top:.5rem; max-height:16rem; overflow-y:auto;"></div>
-        </div>
-        <div id="chatLog"></div>
-        <form id="chat" style="display:flex; gap:.5rem; margin-top:.8rem;">
-          <input id="message" placeholder="Say something&hellip;" autocomplete="off">
-          <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
-        </form>
-      </div>
-    </section>
-
-    <p class="muted" style="text-align:center; margin-top:2rem; font-size:.85rem;">
-      bevin &middot; <span id="health">checking&hellip;</span>
-    </p>
+    </main>
   </div>
 
   <script src="/markdown.js"></script>
@@ -128,6 +167,40 @@
       root.setAttribute("data-theme", next);
       try { localStorage.setItem("bevin-theme", next); } catch (e) {}
     });
+
+    // ---- The sidebar: a persistent (collapsible) nav on desktop, an
+    // off-canvas drawer behind the same menu button on mobile / narrow
+    // portrait screens. The collapse state persists; the drawer state does
+    // not (it reopens deliberately each visit).
+    function isMobileNav() {
+      return window.matchMedia("(max-width: 839px)").matches;
+    }
+    function closeNav() { document.body.classList.remove("nav-open"); }
+    function setSidebarAuth(in_) {
+      // The nav (search, history, user actions) only makes sense once
+      // signed in — the signed-out state hides it (CSS).
+      $("sidebar").classList.toggle("signed-out", !in_);
+    }
+    document.getElementById("menuBtn").addEventListener("click", function () {
+      if (isMobileNav()) {
+        document.body.classList.toggle("nav-open");
+        return;
+      }
+      var collapsed = document.body.classList.toggle("sb-collapsed");
+      try { localStorage.setItem("bevin-sidebar", collapsed ? "closed" : "open"); } catch (e) {}
+    });
+    document.getElementById("scrim").addEventListener("click", closeNav);
+    document.getElementById("sbCloseBtn").addEventListener("click", closeNav);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeNav();
+    });
+    // A resize to desktop closes a stale mobile drawer.
+    (function () {
+      var mq = window.matchMedia("(max-width: 839px)");
+      var on = function (e) { if (!e.matches) closeNav(); };
+      if (mq.addEventListener) mq.addEventListener("change", on);
+      else if (mq.addListener) mq.addListener(on);
+    })();
 
     function $(id) { return document.getElementById(id); }
 
@@ -141,7 +214,12 @@
     var convID = null;
     var sending = false;
 
-    function scrollChat() { $("chatSection").scrollIntoView({ behavior: "smooth", block: "start" }); }
+    // The document itself never scrolls (the shell is full-viewport); this
+    // pins the chat log to the bottom instead.
+    function scrollChat() {
+      var log = $("chatLog");
+      if (log) log.scrollTop = log.scrollHeight;
+    }
 
     function addUserMsg(text, iso) {
       var m = document.createElement("div");
@@ -365,7 +443,7 @@
           convID = (await cr.json()).id;
           try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
           loadConvMeta(); // the conversation exists now: the switcher unlocks
-          if ($("historyPanel").style.display !== "none") refreshHistory();
+          refreshHistory(); // the sidebar list always reflects the open conversation
         }
         var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
           method: "POST",
@@ -463,8 +541,10 @@
       $("loginCard").style.display = "";
       $("onboardCard").style.display = "none";
       $("chatCard").style.display = "none";
-      $("logoutBtn").style.display = "none";
+      $("logoutBtn").hidden = true;
+      $("adminSetupLink").hidden = true;
       $("userChip").textContent = "signed out";
+      setSidebarAuth(false);
       showOauthLogin();
     }
 
@@ -472,13 +552,15 @@
       $("loginCard").style.display = "none";
       $("onboardCard").style.display = "none";
       $("chatCard").style.display = "";
-      $("logoutBtn").style.display = "";
+      $("logoutBtn").hidden = false;
+      $("adminSetupLink").hidden = !(me && me.role === "admin");
       $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
+      setSidebarAuth(true);
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       // The select shows the conversation's OWN model (the server default
       // only before it exists) — the model list must land first.
       loadModels().then(loadConvMeta);
-      if (me && me.role === "admin") $("adminSetupLink").style.display = "";
+      refreshHistory(); // the sidebar always shows the conversation list
       loadHistory();
     }
 
@@ -549,8 +631,10 @@
       $("loginCard").style.display = "none";
       $("onboardCard").style.display = "";
       $("chatCard").style.display = "none";
-      $("logoutBtn").style.display = "";
+      $("logoutBtn").hidden = false;
+      $("adminSetupLink").hidden = !(me && me.role === "admin");
       $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
+      setSidebarAuth(true);
       $("obErr").textContent = "";
       $("obName").value = (state && state.display_name) || (me && me.display_name) || "";
       // Model select: the enabled main models, pre-selected to the server
@@ -669,48 +753,41 @@
       showLogin();
     });
 
-    $("newChatBtn").addEventListener("click", function () {
+    // New conversation: two entry points (the sidebar nav and the chat
+    // tools row, so it stays reachable when the sidebar is collapsed).
+    function startNewChat() {
       if (sending) return;
       convID = null;
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
       buildModelSelect(null); // the (future) conversation takes the default model
       addNote("New conversation started.");
+      refreshHistory();
+      closeNav();
+    }
+    $("newChatBtn").addEventListener("click", startNewChat);
+    $("chatNewChatBtn").addEventListener("click", startNewChat);
+
+    // Conversation search (semantic — the per-user vector DB). The form
+    // lives in the sidebar; results render above the conversation list
+    // (with a clear ×), and clicking a hit opens that conversation (the
+    // same open path as a fresh page load).
+    $("clearSearchBtn").addEventListener("click", function () {
+      $("searchResults").hidden = true;
+      $("searchResultsList").innerHTML = "";
     });
 
-    // Conversation search (semantic — the per-user vector DB). The panel
-    // toggles next to "New chat"; a query fetches the top matches from
-    // /api/conversations/search and clicking a hit opens that
-    // conversation (same open path as a fresh page load).
-    function toggleSearchPanel(show) {
-      var p = $("searchPanel");
-      var next = (show === undefined) ? (p.style.display === "none") : show;
-      p.style.display = next ? "" : "none";
-      if (next) $("searchInput").focus();
-      return next;
-    }
-    $("searchBtn").addEventListener("click", function () { toggleSearchPanel(); });
-
     // Conversation history: the per-user list (GET /api/conversations),
-    // most recently active first. A row opens that conversation (the same
-    // path as a search hit); its × deletes it (message rows + indexed
-    // vectors, server-side). The store's timestamps are UTC
-    // "YYYY-MM-DD HH:MM:SS" — parseUtc normalizes them for the local
-    // display.
+    // most recently active first, always visible in the sidebar. A row
+    // opens that conversation (the same path as a search hit); its ×
+    // deletes it (message rows + indexed vectors, server-side). The
+    // store's timestamps are UTC "YYYY-MM-DD HH:MM:SS" — parseUtc
+    // normalizes them for the local display.
     function parseUtc(s) {
       if (!s) return null;
       var d = new Date(String(s).replace(" ", "T") + "Z");
       return isNaN(d) ? null : d;
     }
-
-    function toggleHistoryPanel(show) {
-      var p = $("historyPanel");
-      var next = (show === undefined) ? (p.style.display === "none") : show;
-      p.style.display = next ? "" : "none";
-      if (next) refreshHistory(); // always re-fetch: the list changes with every turn
-      return next;
-    }
-    $("historyBtn").addEventListener("click", function () { toggleHistoryPanel(); });
 
     async function refreshHistory() {
       var box = $("historyList");
@@ -772,7 +849,7 @@
           });
           row.addEventListener("click", function () {
             if (c.id !== convID) openConversation(c.id);
-            toggleHistoryPanel(false);
+            closeNav(); // picking a conversation returns to the chat (mobile drawer)
           });
           row.appendChild(title);
           row.appendChild(when);
@@ -790,8 +867,9 @@
 
     async function runSearch() {
       var q = $("searchInput").value.trim();
-      var box = $("searchResults");
+      var box = $("searchResultsList");
       if (!q) return;
+      $("searchResults").hidden = false;
       box.innerHTML = '<p class="muted" style="font-size:.85rem;">searching…</p>';
       try {
         var r = await fetch("/api/conversations/search?q=" + encodeURIComponent(q) + "&limit=10");
@@ -833,17 +911,19 @@
     }
     $("searchForm").addEventListener("submit", function (e) { e.preventDefault(); runSearch(); });
 
-    // openConversation switches the active conversation (from a search hit):
-    // set the id, clear the log, and restore the persisted history.
+    // openConversation switches the active conversation (from a history
+    // row or a search hit): set the id, clear the log, and restore the
+    // persisted history.
     function openConversation(id) {
       if (!id || sending) return;
       convID = id;
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
-      toggleSearchPanel(false);
       loadHistory();
       loadModels().then(loadConvMeta);
+      refreshHistory(); // re-highlight the open row in the sidebar
       scrollChat();
+      closeNav();
       $("message").focus();
     }
 
