@@ -370,9 +370,12 @@ func TestTurnNoUsageFallsBackToEstimate(t *testing.T) {
 	}
 }
 
-// TestBuildRequestWithTimestamp verifies the timestamp is prepended to each
-// message (so the model knows when it was sent) when the CreatedAt is set.
-func TestBuildRequestWithTimestamp(t *testing.T) {
+// TestBuildRequestTimestampUserOnly verifies that the completion request
+// stamps USER messages only: the user's turn carries the UTC timestamp
+// (RFC3339, without nanoseconds) and the assistant's earlier reply is sent
+// with its plain stored content (stamped replies confused the model; the UI
+// shows both messages' timestamps from the stored created_at).
+func TestBuildRequestTimestampUserOnly(t *testing.T) {
 	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
 	msgs := []store.Message{
 		{Role: roleUser, Content: "hello", Seq: 0, CreatedAt: "2026-11-12T10:30:00.123456789Z"},
@@ -382,21 +385,22 @@ func TestBuildRequestWithTimestamp(t *testing.T) {
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
-	// The timestamp is prepended (RFC3339, UTC, without the nanoseconds).
+	// The user's message is stamped (RFC3339, UTC, without the nanoseconds).
 	if req.Messages[0].Text != "[2026-11-12T10:30:00Z] hello" {
-		t.Fatalf("Messages[0] = %q, want the timestamp prepended", req.Messages[0].Text)
+		t.Fatalf("Messages[0] = %q, want the user message stamped", req.Messages[0].Text)
 	}
-	if req.Messages[1].Text != "[2026-11-12T10:30:05Z] hi" {
-		t.Fatalf("Messages[1] = %q, want the timestamp prepended", req.Messages[1].Text)
+	// The assistant's reply is plain (no timestamp prefix).
+	if req.Messages[1].Text != "hi" {
+		t.Fatalf("Messages[1] = %q, want the plain reply (no timestamp)", req.Messages[1].Text)
 	}
 }
 
 // TestBuildRequestWithReasoning verifies the request builder replays an
 // assistant's stored reasoning in the neutral message's Reasoning field (the
 // provider encodes it in the API's native field — OAI wire:
-// reasoning_content), while the message TEXT stays the plain timestamp +
-// reply (default on — reasoningInTranscript), and user messages are
-// unaffected.
+// reasoning_content), while the message TEXT stays the plain reply (user
+// turns carry the timestamp prefix, assistant turns don't — default on,
+// the profile's ReasoningInTranscript), and the user message is stamped.
 func TestBuildRequestWithReasoning(t *testing.T) {
 	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
 	msgs := []store.Message{
@@ -408,15 +412,15 @@ func TestBuildRequestWithReasoning(t *testing.T) {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
 	if req.Messages[0].Text != "[2026-11-12T10:30:00Z] solve it" {
-		t.Fatalf("Messages[0] = %q, want the user turn untouched", req.Messages[0].Text)
+		t.Fatalf("Messages[0] = %q, want the stamped user turn", req.Messages[0].Text)
 	}
 	if req.Messages[0].Reasoning != "" {
 		t.Fatalf("Messages[0].Reasoning = %q, want empty (user turn)", req.Messages[0].Reasoning)
 	}
-	// The reply text is plain (timestamp + content) — the reasoning is NOT
-	// framed into the text.
-	if req.Messages[1].Text != "[2026-11-12T10:30:05Z] the answer is 42" {
-		t.Fatalf("Messages[1] = %q, want the timestamp + reply only (no reasoning in the text)", req.Messages[1].Text)
+	// The reply text is plain (content only — no timestamp prefix, and the
+	// reasoning is NOT framed into the text).
+	if req.Messages[1].Text != "the answer is 42" {
+		t.Fatalf("Messages[1] = %q, want the plain reply (no timestamp, no reasoning in the text)", req.Messages[1].Text)
 	}
 	if req.Messages[1].Reasoning != "step one: read the problem\nstep two: compute" {
 		t.Fatalf("Messages[1].Reasoning = %q, want the stored trace (the API's native field)", req.Messages[1].Reasoning)
@@ -433,8 +437,8 @@ func TestAssistantFacingNoReasoningWhenDisabled(t *testing.T) {
 	if got.Reasoning != "" {
 		t.Fatalf("Reasoning = %q, want empty (override disabled)", got.Reasoning)
 	}
-	if got.Text != "[2026-11-12T10:30:05Z] hi" {
-		t.Fatalf("Text = %q, want the plain timestamped reply", got.Text)
+	if got.Text != "hi" {
+		t.Fatalf("Text = %q, want the plain reply (assistant turns carry no timestamp)", got.Text)
 	}
 	// An assistant message without a trace is identical either way (the model
 	// didn't think, or thinking was disabled — the field is simply absent).
@@ -448,9 +452,10 @@ func TestAssistantFacingNoReasoningWhenDisabled(t *testing.T) {
 // buildRequest): after an assistant reply with a stored reasoning trace, the
 // NEXT request to the model carries that trace in the message's Reasoning
 // field (the "send all reasoning back" default — the provider encodes it in
-// the API's native field), the message text stays the plain timestamped
-// reply (no [thinking] framing), so the model keeps continuity with its own
-// earlier thinking in the channel it produced it in.
+// the API's native field), the message text stays the plain reply (no
+// timestamp prefix on assistant turns, no [thinking] framing), so the model
+// keeps continuity with its own earlier thinking in the channel it produced
+// it in.
 func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()

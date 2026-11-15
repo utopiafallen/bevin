@@ -19,8 +19,9 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // it. The result is the content of the next role=summary message (chained: each
 // new summary folds in the previous, so the latest alone carries the history).
 // The summarizer sees the turns in the same model-facing form as the chat
-// request builder (timestamps + stored reasoning replayed in the API's native
-// field when the profile sends reasoning back).
+// request builder (user turns stamped with their timestamp, assistant turns
+// plain + stored reasoning replayed in the API's native field when the
+// profile sends reasoning back).
 func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary string, prof profile.Profile, turns []store.Message) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+1)
 	if prevSummary != "" {

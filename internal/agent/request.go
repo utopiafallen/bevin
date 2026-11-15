@@ -72,10 +72,11 @@ func timestampMarker(m store.Message) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// withTimestamp prepends the message's UTC timestamp (RFC3339) to its content,
-// so the model knows when each message was sent. The stored content is
-// untouched — the timestamp is only added to what the request sends. A message
-// with no CreatedAt (tests) is returned as-is.
+// withTimestamp prepends the message's UTC timestamp (RFC3339) to its content.
+// Only USER messages are stamped (assistantFacing gates it): the model knows
+// when the user spoke; its own earlier replies carry no prefix. The stored
+// content is untouched — the timestamp is only added to what the request
+// sends. A message with no CreatedAt (tests) is returned as-is.
 func withTimestamp(m store.Message) string {
 	marker := timestampMarker(m)
 	if marker == "" {
@@ -85,16 +86,23 @@ func withTimestamp(m store.Message) string {
 }
 
 // assistantFacing renders one stored message as the neutral provider message
-// the model receives: the UTC timestamp marker + the reply in the text, and —
-// for an assistant message that carries a stored reasoning trace (when
-// includeReasoning is set, see reasoningInTranscript) — the trace in the
-// message's Reasoning field, which the provider encodes in the API's native
-// field (OAI wire: reasoning_content; the Anthropic encoder deliberately
-// ignores it — see provider.decodeAntResponse). Stored content is untouched.
-// A trace is empty when the model didn't think (or thinking was disabled), in
-// which case the field is simply absent.
+// the model receives. Only USER messages carry the UTC timestamp marker —
+// the model's own earlier replies are sent with their plain stored content
+// (stamped replies confused the model; the UI still shows every message's
+// timestamp from the stored created_at, so nothing is lost for the user).
+// For an assistant message that carries a stored reasoning trace (when
+// includeReasoning is set, see the profile's ReasoningInTranscript) — the
+// trace goes in the message's Reasoning field, which the provider encodes in
+// the API's native field (OAI wire: reasoning_content; the Anthropic encoder
+// deliberately ignores it — see provider.decodeAntResponse). Stored content
+// is untouched. A trace is empty when the model didn't think (or thinking
+// was disabled), in which case the field is simply absent.
 func assistantFacing(m store.Message, includeReasoning bool) provider.Message {
-	pm := provider.Message{Role: provider.Role(m.Role), Text: withTimestamp(m)}
+	text := m.Content
+	if m.Role == roleUser {
+		text = withTimestamp(m)
+	}
+	pm := provider.Message{Role: provider.Role(m.Role), Text: text}
 	if m.Role == roleAssistant && includeReasoning && m.Reasoning != "" {
 		pm.Reasoning = m.Reasoning
 		pm.ReasoningSignature = m.ReasoningSignature
@@ -103,10 +111,10 @@ func assistantFacing(m store.Message, includeReasoning bool) provider.Message {
 }
 
 // leadingTranscriptTimestamp matches the transcript marker that withTimestamp
-// prepends to every message. Models occasionally echo that marker into the
-// start of their own reply — the system prompt forbids it, but during a long
-// reasoning phase the rule can be lost, so the reply is also sanitized
-// deterministically at the persistence boundary.
+// prepends to USER messages. Models occasionally echo a marker they saw in a
+// user message into the start of their own reply — the system prompt forbids
+// it, but during a long reasoning phase the rule can be lost, so the reply is
+// also sanitized deterministically at the persistence boundary.
 var leadingTranscriptTimestamp = regexp.MustCompile(`^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\][ 	]?`)
 
 // stripLeadingTranscriptTimestamp removes a transcript timestamp marker from
@@ -197,8 +205,9 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	// reasoning for continuity).
 	includeReasoning := prof.ReasoningInTranscript
 	for _, m := range turns {
-		// Prepend the message's UTC timestamp (and replay the assistant's
-		// stored reasoning, when sent back) — the stored content is untouched.
+		// Stamp the user's messages with their UTC timestamp (the assistant's
+		// replies stay plain; see assistantFacing) + replay the assistant's
+		// stored reasoning when sent back — the stored content is untouched.
 		pm := assistantFacing(m, includeReasoning)
 		reqMsgs = append(reqMsgs, pm)
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
