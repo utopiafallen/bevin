@@ -188,6 +188,17 @@ type Embedder struct {
 	ModelID string `toml:"model_id" json:"model_id"`
 }
 
+// EmbeddingMaxTokens is the maximum input the self-provisioned embedder can
+// process in ONE /v1/embeddings call. embeddinggemma-2 has an 8,192-token
+// context window (google/embeddinggemma-2 HF model card), so the llama-server
+// sidecar is launched with -c/-b/-ub set to this value: llama.cpp's embedding
+// path processes the whole input in a single physical batch (ubatch), and with
+// the default ubatch of 512 it answers 500 "input (N tokens) is too large to
+// process. increase the physical batch size" for anything longer. The vector
+// index (agent) additionally chunks inputs that still exceed this, so a
+// message of any length stays embeddable.
+const EmbeddingMaxTokens = 8192
+
 // Sidecars holds endpoints/paths of external sidecar processes. In production
 // these bind to loopback so only bevin (behind the reverse proxy) reaches
 // them.

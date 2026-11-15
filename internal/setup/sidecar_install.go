@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/utopiafallen/bevin/internal/config"
 )
 
 // Release artifacts — Qdrant + llama.cpp are resolved at setup time by querying
@@ -404,10 +406,26 @@ func installQdrant(ctx context.Context, dataDir string, preferredPort int) (stri
 	return endpoint, waitForHealthy(ctx, endpoint, "/collections")
 }
 
+// llamaServerArgs is the embedder sidecar's full launch line: CPU-only,
+// loopback, embedding mode. -c/-b/-ub are set to the embedder's full max
+// input (config.EmbeddingMaxTokens — embeddinggemma-2's 8,192-token context
+// per its HF card) because llama.cpp's embedding path processes the WHOLE
+// input in one physical batch (ubatch): with the default ubatch of 512 any
+// input over 512 tokens answers 500 "input (N tokens) is too large to
+// process. increase the physical batch size".
+func llamaServerArgs(gguf, mmproj string, port int) []string {
+	max := strconv.Itoa(config.EmbeddingMaxTokens)
+	return []string{
+		"-m", gguf, "--mmproj", mmproj, "--embedding",
+		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-ngl", "0",
+		"-c", max, "-b", max, "-ub", max,
+	}
+}
+
 // installLlamaServer downloads the llama-server binary (with its bundled libs)
 // + the embeddinggemma-2 GGUF + mmproj, and launches it in embedding mode on
 // loopback, CPU-only. Verified: /v1/models reports multimodal input_modalities
-// and /v1/embeddings returns a 512-dim vector.
+// and /v1/embeddings returns the model's full native 768-dim vector.
 func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) (string, error) {
 	dir := SidecarDir(dataDir, KindLlamaServer)
 	models := filepath.Join(dir, "models")
@@ -469,10 +487,7 @@ func installLlamaServer(ctx context.Context, dataDir string, preferredPort int) 
 	endpoint := "http://127.0.0.1:" + strconv.Itoa(port)
 	// CPU-only, loopback, embedding mode. Video input uses the system ffmpeg
 	// (already detected by installFFmpeg; llama-server finds it on PATH).
-	args := []string{
-		"-m", gguf, "--mmproj", mmproj, "--embedding",
-		"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-ngl", "0",
-	}
+	args := llamaServerArgs(gguf, mmproj, port)
 	report(KindLlamaServer, "starting", "Starting llama-server (the model load can take a couple minutes)…", 100)
 	if err := launchDaemon(ctx, bin, dataDir, KindLlamaServer, args...); err != nil {
 		return "", err

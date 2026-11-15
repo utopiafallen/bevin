@@ -11,6 +11,31 @@ import (
 	"github.com/utopiafallen/bevin/internal/config"
 )
 
+// TestLlamaServerArgsCoversEmbedderMaxInput pins the embedder launch flags:
+// -c/-b/-ub must all equal the embedder's max input — llama.cpp's embedding
+// path needs the whole input in one physical batch (ubatch), so the default
+// ubatch of 512 500s on any longer input ("input (N tokens) is too large to
+// process. increase the physical batch size").
+func TestLlamaServerArgsCoversEmbedderMaxInput(t *testing.T) {
+	args := llamaServerArgs("/models/e.gguf", "/models/m.gguf", 5999)
+	want := strconv.Itoa(config.EmbeddingMaxTokens)
+	for _, flag := range []string{"-c", "-b", "-ub"} {
+		if got := flagValue(args, flag); got != want {
+			t.Errorf("%s = %q, want %s (embeddinggemma-2's max input)", flag, got, want)
+		}
+	}
+}
+
+// flagValue returns the value that follows flag in args ("" if absent).
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 // TestPickFreePort verifies pickFreePort returns a bindable loopback port and
 // moves past a busy one.
 func TestPickFreePort(t *testing.T) {

@@ -18,9 +18,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/qdrant"
 	"github.com/utopiafallen/bevin/internal/store"
@@ -38,6 +42,15 @@ const (
 	// queryPrefix is the task prefix the embedding model expects on search
 	// queries (text only, per the model card).
 	queryPrefix = "task: search result | query: "
+
+	// embedMaxRuneBudget caps the runes per input sent to the embedder.
+	// Runes, not bytes/4: a gemma-family tokenizer (262k vocab) maps ~1:1
+	// or less from rune to token, so the rune count is an upper bound on
+	// the token count — and half of the model's max input
+	// (config.EmbeddingMaxTokens) leaves a 2× margin for tokenizer
+	// variance. Every chunk is therefore guaranteed to fit one embedding
+	// call.
+	embedMaxRuneBudget = config.EmbeddingMaxTokens / 2
 )
 
 // SearchHit is one semantically-matched conversation message (one vector
@@ -85,7 +98,16 @@ func (v *vectorIndex) IndexMessage(ctx context.Context, handle string, msg store
 	if strings.TrimSpace(msg.Content) == "" {
 		return nil
 	}
-	vec, err := v.embed(ctx, "title: "+title+" | text: "+msg.Content)
+	// Long messages are chunked BEFORE the document prefix is applied (each
+	// piece keeps the title); the pieces combine into the one point for the
+	// message (embedInputs). A short message is a single piece — the exact
+	// same input string as before chunking existed.
+	chunks := chunkForEmbedding(msg.Content)
+	inputs := make([]string, len(chunks))
+	for i, c := range chunks {
+		inputs[i] = "title: " + title + " | text: " + c
+	}
+	vec, err := v.embedInputs(ctx, inputs)
 	if err != nil {
 		return err
 	}
@@ -115,8 +137,15 @@ func (v *vectorIndex) DeleteMessages(ctx context.Context, handle string, msgIDs 
 }
 
 // Search embeds the query and returns the user's nearest message points.
+// A query longer than one embedder input is chunked like a message (each
+// piece keeps the search prefix) and combined the same way.
 func (v *vectorIndex) Search(ctx context.Context, handle, query string, limit int) ([]SearchHit, error) {
-	vec, err := v.embed(ctx, queryPrefix+query)
+	chunks := chunkForEmbedding(query)
+	inputs := make([]string, len(chunks))
+	for i, c := range chunks {
+		inputs[i] = queryPrefix + c
+	}
+	vec, err := v.embedInputs(ctx, inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -132,15 +161,90 @@ func (v *vectorIndex) Search(ctx context.Context, handle, query string, limit in
 	return out, nil
 }
 
-func (v *vectorIndex) embed(ctx context.Context, text string) ([]float32, error) {
-	vecs, err := v.emb.Embed(ctx, v.embModel, []string{text})
+// chunkForEmbedding splits content into pieces of at most
+// embedMaxRuneBudget runes, preferring a whitespace boundary (an
+// unbreakable run is hard-cut). Content that already fits comes back as a
+// single piece — the common path, byte-identical to pre-chunking behavior.
+// The caller applies its prefix to each piece (a titled document keeps its
+// title on every piece).
+func chunkForEmbedding(content string) []string {
+	if utf8.RuneCountInString(content) <= embedMaxRuneBudget {
+		return []string{content}
+	}
+	rs := []rune(content)
+	var chunks []string
+	for start := 0; start < len(rs); {
+		end := start + embedMaxRuneBudget
+		if end > len(rs) {
+			end = len(rs)
+		}
+		// Break at the last whitespace inside the window (the next chunk
+		// then starts right at/after the space); none found: hard cut.
+		cut := end
+		for i := end - 1; i > start; i-- {
+			if unicode.IsSpace(rs[i]) {
+				cut = i
+				break
+			}
+		}
+		chunks = append(chunks, string(rs[start:cut]))
+		start = cut
+	}
+	// Drop whitespace-only fragments (a window ending on a run of spaces
+	// could otherwise yield a final " " chunk — nothing to embed).
+	out := chunks[:0]
+	for _, c := range chunks {
+		if strings.TrimSpace(c) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// embedInputs embeds the inputs and returns ONE combined vector. A single
+// input returns exactly what the embedder gave (the common path — behavior
+// unchanged); multiple inputs (a chunked message or query) are averaged and
+// L2-normalized, so a long input maps to the same single, unit-length point
+// the rest of the corpus has (a mean of unit vectors is not unit-length, and
+// cosine ranking needs it normalized back).
+func (v *vectorIndex) embedInputs(ctx context.Context, inputs []string) ([]float32, error) {
+	vecs, err := v.emb.Embed(ctx, v.embModel, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("embed: %w", err)
 	}
 	if len(vecs) == 0 {
 		return nil, fmt.Errorf("embed: no vectors returned")
 	}
-	return vecs[0], nil
+	if len(vecs) == 1 {
+		return vecs[0], nil
+	}
+	if len(vecs) != len(inputs) {
+		return nil, fmt.Errorf("embed: %d vectors for %d inputs", len(vecs), len(inputs))
+	}
+	dim := len(vecs[0])
+	avg := make([]float32, dim)
+	for _, vec := range vecs {
+		if len(vec) != dim {
+			return nil, fmt.Errorf("embed: inconsistent vector dims (%d vs %d)", len(vec), dim)
+		}
+		for i := range vec {
+			avg[i] += vec[i]
+		}
+	}
+	for i := range avg {
+		avg[i] /= float32(len(vecs))
+	}
+	norm := float32(0)
+	for _, x := range avg {
+		norm += x * x
+	}
+	if norm > 0 {
+		inv := float32(1 / math.Sqrt(float64(norm)))
+		for i := range avg {
+			avg[i] *= inv
+		}
+	}
+	return avg, nil
 }
 
 func (v *vectorIndex) ensureCollection(ctx context.Context, name string, vec []float32) error {

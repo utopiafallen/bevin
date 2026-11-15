@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/qdrant"
@@ -168,5 +171,139 @@ func TestVectorIndexSkipsNonConversationRows(t *testing.T) {
 	}
 	if len(emb.inputs) != 0 || len(qd.upserts) != 0 {
 		t.Fatalf("tool/summary/empty rows must not be embedded: inputs=%v upserts=%d", emb.inputs, len(qd.upserts))
+	}
+}
+
+// chunkedEmbedFake returns a DIFFERENT vector per input (dim0 = the input
+// index, dim1 = 1), so the average + renormalization across chunked inputs
+// is verifiable.
+type chunkedEmbedFake struct {
+	embedFake
+}
+
+func (e *chunkedEmbedFake) Embed(_ context.Context, _ string, inputs []string) ([][]float32, error) {
+	e.inputs = append(e.inputs, inputs...)
+	out := make([][]float32, len(inputs))
+	for i := range inputs {
+		v := make([]float32, 2)
+		v[0] = float32(i)
+		v[1] = 1
+		out[i] = v
+	}
+	return out, nil
+}
+
+func TestChunkForEmbedding(t *testing.T) {
+	// Content that fits comes back as one unchanged piece (the common path —
+	// the exact input string the embedder always received).
+	one := chunkForEmbedding("hello world")
+	if len(one) != 1 || one[0] != "hello world" {
+		t.Fatalf("short content = %v, want one unchanged piece", one)
+	}
+
+	// Long content: several pieces, each within the per-input rune budget,
+	// none whitespace-only, and lossless when reassembled.
+	long := strings.Repeat("word ", 2000) // 10,000 runes
+	chunks := chunkForEmbedding(long)
+	if len(chunks) < 2 {
+		t.Fatalf("long content = %d piece(s), want several", len(chunks))
+	}
+	var total int
+	for i, c := range chunks {
+		if n := utf8.RuneCountInString(c); n > embedMaxRuneBudget {
+			t.Fatalf("piece %d has %d runes, over the budget %d", i, n, embedMaxRuneBudget)
+		}
+		if strings.TrimSpace(c) == "" {
+			t.Fatalf("whitespace-only piece %d in %v", i, chunks)
+		}
+		total += utf8.RuneCountInString(c)
+	}
+	if total != 0 {
+		// Whitespace-only fragments are intentionally dropped (they carry no
+		// content — the last cut can leave a lone trailing space), so
+		// reassembly equals the content minus those: compare trimmed.
+		got := strings.TrimSpace(strings.Join(chunks, ""))
+		want := strings.TrimSpace(long)
+		if got != want {
+			t.Fatalf("pieces lose content: %d vs %d runes", len(got), len(want))
+		}
+	}
+
+	// A single unbreakable run is hard-cut at the budget.
+	blob := strings.Repeat("x", embedMaxRuneBudget*2+1)
+	hc := chunkForEmbedding(blob)
+	if len(hc) != 3 {
+		t.Fatalf("hard-cut pieces = %d, want 3 (budget*2+1 runes)", len(hc))
+	}
+	if strings.Join(hc, "") != blob {
+		t.Fatal("hard-cut pieces do not reconstruct the input")
+	}
+}
+
+// TestIndexMessageChunksLongContent pins the long-message path: a message
+// longer than one embedder input is sent as several chunk inputs (each
+// keeping the title/text prefix, each within the per-input budget) and the
+// stored point is the L2-normalized average of the per-chunk vectors.
+func TestIndexMessageChunksLongContent(t *testing.T) {
+	emb := &chunkedEmbedFake{}
+	qd := &qdrantFake{t: t}
+	srv := httptest.NewServer(qd.handler())
+	defer srv.Close()
+	vi := newVectorIndex(emb, "emb-model", newQdrantForTest(srv.URL))
+
+	// ~21k runes — well past one embedder input (budget 4,096 runes).
+	content := strings.Repeat("long message content ", 1000)
+	msg := &store.Message{ID: 7, ConversationID: "cv7", Role: roleAssistant, Content: content, Seq: 1, CreatedAt: "2026-11-14T10:00:00Z"}
+	if err := vi.IndexMessage(context.Background(), "alice", *msg, "Long"); err != nil {
+		t.Fatal(err)
+	}
+	if len(emb.inputs) < 2 {
+		t.Fatalf("embed inputs = %d, want several for a long message", len(emb.inputs))
+	}
+	const prefix = "title: Long | text: "
+	for i, in := range emb.inputs {
+		if !strings.HasPrefix(in, prefix) {
+			t.Fatalf("input %d = %q, want the title/text prefix on every chunk", i, in)
+		}
+		if n := utf8.RuneCountInString(in[len(prefix):]); n > embedMaxRuneBudget {
+			t.Fatalf("input %d carries %d content runes, over the per-input budget", i, n)
+		}
+	}
+	if len(qd.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1 (one point per message, not per chunk)", len(qd.upserts))
+	}
+	v := qd.upserts[0]["vector"].([]any)
+	norm := 0.0
+	for _, x := range v {
+		norm += x.(float64) * x.(float64)
+	}
+	if math.Abs(norm-1) > 1e-4 {
+		t.Fatalf("stored vector norm = %v, want ~1 (renormalized average)", norm)
+	}
+}
+
+// TestSearchChunksLongQuery pins the query side: an over-budget query is
+// chunked the same way (every piece keeps the search prefix).
+func TestSearchChunksLongQuery(t *testing.T) {
+	emb := &chunkedEmbedFake{}
+	qd := &qdrantFake{t: t}
+	srv := httptest.NewServer(qd.handler())
+	defer srv.Close()
+	vi := newVectorIndex(emb, "emb-model", newQdrantForTest(srv.URL))
+
+	query := strings.Repeat("search term ", 1500) // 13,500 runes
+	if _, err := vi.Search(context.Background(), "alice", query, 5); err != nil {
+		t.Fatal(err)
+	}
+	if len(emb.inputs) < 2 {
+		t.Fatalf("query embed inputs = %d, want several for a long query", len(emb.inputs))
+	}
+	for i, in := range emb.inputs {
+		if !strings.HasPrefix(in, queryPrefix) {
+			t.Fatalf("query input %d = %q, want the search prefix on every chunk", i, in)
+		}
+		if n := utf8.RuneCountInString(in[len(queryPrefix):]); n > embedMaxRuneBudget {
+			t.Fatalf("query input %d carries %d runes, over the per-input budget", i, n)
+		}
 	}
 }
