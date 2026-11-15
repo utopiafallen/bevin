@@ -101,6 +101,12 @@ func (f *fakeProvider) allModels() []string {
 	return append([]string{}, f.models...)
 }
 
+func (f *fakeProvider) allCalls() []provider.ChatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.ChatRequest{}, f.calls...)
+}
+
 // TestTurnUsesProviderModelName — the conversation stores the INTERNAL model
 // id (a slug derived from the upstream name), but every wire request must
 // carry the VERBATIM upstream model name. A model whose upstream name
@@ -238,6 +244,152 @@ func TestBuildRequestNoSummary(t *testing.T) {
 	}
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2 (all turns)", len(req.Messages))
+	}
+}
+
+// TestBuildRequestReasoningEffort verifies the request builder's effort gate:
+// the conversation's stored reasoning-effort choice is sent only when the
+// active model's profile supports it — a supported level is sent verbatim,
+// while an unsupported profile, an unknown level (stale after a profile
+// reassignment), and an empty choice all send nothing (the provider's own
+// default then applies; nothing invalid ever goes on the wire).
+func TestBuildRequestReasoningEffort(t *testing.T) {
+	q, err := profile.Get("qwen3.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs := []store.Message{{Role: roleUser, Content: "hi", Seq: 0}}
+
+	// Supported level: sent verbatim.
+	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin.", ReasoningEffort: "xhigh"}
+	req, _ := buildRequest(conv, msgs, q)
+	if req.ReasoningEffort != "xhigh" {
+		t.Fatalf("supported: ReasoningEffort = %q, want %q", req.ReasoningEffort, "xhigh")
+	}
+
+	// A profile with no effort support: dropped (even a supported-looking value).
+	req, _ = buildRequest(conv, msgs, profile.Default())
+	if req.ReasoningEffort != "" {
+		t.Fatalf("no support: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
+	}
+
+	// A level the profile doesn't know (stale after a reassignment): dropped.
+	convUnknown := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin.", ReasoningEffort: "high"}
+	req, _ = buildRequest(convUnknown, msgs, q)
+	if req.ReasoningEffort != "" {
+		t.Fatalf("unknown level: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
+	}
+
+	// No stored choice: nothing to send.
+	convNone := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
+	req, _ = buildRequest(convNone, msgs, q)
+	if req.ReasoningEffort != "" {
+		t.Fatalf("no choice: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
+	}
+}
+
+// TestTurnCarriesReasoningEffort drives the full turn path: the conversation's
+// stored effort reaches the provider request only when the model's assigned
+// profile supports it (resolved per turn from live config — a profile
+// reassignment applies from the next turn, no restart), and the summarization
+// (compaction) call — also a provider call — runs under the same effort.
+func TestTurnCarriesReasoningEffort(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	// m1 gets the qwen3.8 profile: it supports the per-conversation effort.
+	cfg.Models[0].Profile = "qwen3.8"
+	fp := &fakeProvider{}
+	a.providers["m1"] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	if err := us.SetConversationReasoningEffort(convID, "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	// The conversation row round-trips the choice.
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.ReasoningEffort != "xhigh" {
+		t.Fatalf("stored ReasoningEffort = %q, want %q", conv.ReasoningEffort, "xhigh")
+	}
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if got := fp.lastCall().ReasoningEffort; got != "xhigh" {
+		t.Fatalf("request ReasoningEffort = %q, want %q (the conversation's choice; the model's profile supports it)", got, "xhigh")
+	}
+
+	// A level the profile doesn't know is dropped (a stale choice must never
+	// go on the wire).
+	if err := us.SetConversationReasoningEffort(convID, "high"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if got := fp.lastCall().ReasoningEffort; got != "" {
+		t.Fatalf("request ReasoningEffort = %q, want \"\" (the profile doesn't support %q)", got, "high")
+	}
+
+	// Live reassignment to general: the profile takes no effort, so even a
+	// supported value is dropped from the next turn on.
+	cfg.Models[0].Profile = "general"
+	if err := us.SetConversationReasoningEffort(convID, "low"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if got := fp.lastCall().ReasoningEffort; got != "" {
+		t.Fatalf("request ReasoningEffort = %q, want \"\" (general takes no effort)", got)
+	}
+
+	// The summarization (compaction) call is a provider call too — it must run
+	// under the same effort as the chat turns. The fake reports 900 total
+	// tokens every call (over the 800 budget), so the post-turn compaction
+	// fires once the conversation has more than KeepLastTurns raw turns.
+	cfg.Models[0].Profile = "qwen3.8"
+	fp2 := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
+	a.providers["m1"] = fp2
+	if err := us.SetConversationReasoningEffort(convID, "medium"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+	calls := fp2.allCalls()
+	if len(calls) < 5 {
+		t.Fatalf("%d provider calls, want >= 5 (4 chat turns + >= 1 summarization)", len(calls))
+	}
+	// Every provider call in this window — the chat turns AND the
+	// summarization compaction calls — carries the same effort.
+	for i, c := range calls {
+		if c.ReasoningEffort != "medium" {
+			t.Fatalf("provider call %d ReasoningEffort = %q, want %q (chat and summarization calls both run under the conversation's effort)", i, c.ReasoningEffort, "medium")
+		}
+	}
+	// At least one call was a summarization (compaction) call — proving the
+	// compaction path was exercised and inherited the effort (not just the
+	// chat path). The summarizer uses its own meta system prompt.
+	var sawSummary bool
+	for _, c := range calls {
+		if len(c.System) > 0 && strings.Contains(c.System[0].Text, "context summary") {
+			sawSummary = true
+			break
+		}
+	}
+	if !sawSummary {
+		t.Fatalf("no summarization call among %d provider calls — the compaction path was not exercised", len(calls))
 	}
 }
 

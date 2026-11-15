@@ -212,7 +212,15 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 		reqMsgs = append(reqMsgs, pm)
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 	}
-	return provider.ChatRequest{System: sysParts, Messages: reqMsgs}, tokens
+	req := provider.ChatRequest{System: sysParts, Messages: reqMsgs}
+	// The conversation's reasoning-effort choice, when the active model's
+	// profile supports it (see profile.ReasoningEffortFor): an unsupported
+	// or stale choice is dropped — the provider's own default then applies,
+	// and no value the model's API could reject is ever sent.
+	if e := prof.ReasoningEffortFor(conv.ReasoningEffort); e != "" {
+		req.ReasoningEffort = e
+	}
+	return req, tokens
 }
 
 // latestSummaryAndTurns returns the latest summary's content + the raw turns

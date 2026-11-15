@@ -90,3 +90,61 @@ func TestUnknownProfileFailsLoudly(t *testing.T) {
 		t.Fatal("Get(\"\") = no error (strict lookup must not invent a profile)")
 	}
 }
+
+// TestQwen38Profile pins the first model-specific profile: general's harness
+// behavior + the reasoning-effort levels (the per-conversation control's
+// option list). The harness values must stay equal to general's — qwen3.8 is
+// a control addition, not a behavior change.
+func TestQwen38Profile(t *testing.T) {
+	p, err := Get("qwen3.8")
+	if err != nil {
+		t.Fatalf("Get(qwen3.8): %v", err)
+	}
+	g := Default()
+	if p.ReasoningInTranscript != g.ReasoningInTranscript ||
+		p.KeepLastTurns != g.KeepLastTurns ||
+		p.CompactionTriggerFraction != g.CompactionTriggerFraction ||
+		p.CharsPerToken != g.CharsPerToken {
+		t.Fatalf("qwen3.8 deviates from general's harness behavior: %+v", p)
+	}
+	want := []string{"low", "medium", "xhigh"}
+	if len(p.ReasoningEfforts) != len(want) {
+		t.Fatalf("ReasoningEfforts = %v, want %v", p.ReasoningEfforts, want)
+	}
+	for i := range want {
+		if p.ReasoningEfforts[i] != want[i] {
+			t.Fatalf("ReasoningEfforts = %v, want %v", p.ReasoningEfforts, want)
+		}
+	}
+}
+
+// TestReasoningEffortFor pins the request builder's gate: a conversation's
+// stored choice is sent only when the profile supports it. Everything else —
+// a profile with no efforts, an empty choice, a level the profile doesn't
+// know (stale after a profile reassignment) — resolves to "" (nothing on the
+// wire; the provider's own default applies). Surrounding whitespace is
+// tolerated.
+func TestReasoningEffortFor(t *testing.T) {
+	// general: no effort support at all — always "".
+	if got := Default().ReasoningEffortFor("low"); got != "" {
+		t.Fatalf("general ReasoningEffortFor(low) = %q, want \"\"", got)
+	}
+	q, err := Get("qwen3.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []string{"low", "medium", "xhigh"} {
+		if got := q.ReasoningEffortFor(e); got != e {
+			t.Fatalf("qwen3.8 ReasoningEffortFor(%q) = %q, want it back", e, got)
+		}
+	}
+	if got := q.ReasoningEffortFor("  low  "); got != "low" {
+		t.Fatalf("qwen3.8 ReasoningEffortFor(whitespace) = %q, want \"low\" (trimmed)", got)
+	}
+	if got := q.ReasoningEffortFor("high"); got != "" {
+		t.Fatalf("qwen3.8 ReasoningEffortFor(high) = %q, want \"\" (not a supported level)", got)
+	}
+	if got := q.ReasoningEffortFor(""); got != "" {
+		t.Fatalf("qwen3.8 ReasoningEffortFor(\"\") = %q, want \"\" (nothing stored)", got)
+	}
+}

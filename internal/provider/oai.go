@@ -63,13 +63,19 @@ type oaiStreamOptions struct {
 }
 
 type oaiChatRequest struct {
-	Model         string            `json:"model"`
-	Messages      []oaiMessage      `json:"messages"`
-	Tools         []oaiTool         `json:"tools,omitempty"`
-	Temperature   *float64          `json:"temperature,omitempty"`
-	MaxTokens     *int              `json:"max_tokens,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
+	Model       string       `json:"model"`
+	Messages    []oaiMessage `json:"messages"`
+	Tools       []oaiTool    `json:"tools,omitempty"`
+	Temperature *float64     `json:"temperature,omitempty"`
+	MaxTokens   *int         `json:"max_tokens,omitempty"`
+	// ReasoningEffort: the OAI wire's reasoning-effort control (OpenAI's
+	// thinking models + llama.cpp map it to the model's thinking budget).
+	// Omitted when empty — backends without the control simply ignore an
+	// unknown field, so this is the "silently drop" path for APIs that
+	// don't support it.
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	Stream          bool              `json:"stream,omitempty"`
+	StreamOptions   *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
 type oaiUsage struct {
@@ -268,10 +274,11 @@ func encodeOAITools(tools []Tool) []oaiTool {
 // token accounting (OpenAI + compatible APIs omit usage otherwise).
 func buildOAIChatRequest(req ChatRequest, model string, stream, videoOK bool) (oaiChatRequest, error) {
 	ocr := oaiChatRequest{
-		Model:       model,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      stream,
+		Model:           model,
+		Temperature:     req.Temperature,
+		MaxTokens:       req.MaxTokens,
+		Stream:          stream,
+		ReasoningEffort: req.ReasoningEffort,
 	}
 	if stream {
 		ocr.StreamOptions = &oaiStreamOptions{IncludeUsage: true}

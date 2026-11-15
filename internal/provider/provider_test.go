@@ -127,6 +127,81 @@ func TestOpenAIReasoningContentWire(t *testing.T) {
 	}
 }
 
+// TestReasoningEffortWire verifies the reasoning-effort wire handling: a
+// request carrying a ReasoningEffort serializes the API's native
+// reasoning_effort field (OpenAI + llama.cpp share the OAI wire), an EMPTY
+// effort omits it (the "silently drop" path for APIs without the control),
+// and the Anthropic provider never maps it (its API has no such field —
+// extended thinking takes a token budget, a different control).
+func TestReasoningEffortWire(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, mustDecodeBody(t, r))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(srv.URL, "k")
+	// With an effort: the field is present with the exact value.
+	_, err := p.Chat(context.Background(), "m", ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Text: "hi"}},
+		ReasoningEffort: "xhigh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bodies[0]["reasoning_effort"] != "xhigh" {
+		t.Fatalf("reasoning_effort = %v, want %q", bodies[0]["reasoning_effort"], "xhigh")
+	}
+	// Without one: the field is omitted entirely (a backend without the
+	// control never sees it).
+	_, err = p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{{Role: RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := bodies[1]["reasoning_effort"]; present {
+		t.Fatalf("empty effort must omit reasoning_effort, got %v", bodies[1])
+	}
+
+	// llama.cpp shares the OAI wire: it carries the field the same way.
+	var llamaBody map[string]any
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llamaBody = mustDecodeBody(t, r)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv2.Close()
+	_, err = NewLlama(srv2.URL, "").Chat(context.Background(), "m", ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Text: "hi"}},
+		ReasoningEffort: "low",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if llamaBody["reasoning_effort"] != "low" {
+		t.Fatalf("llama reasoning_effort = %v, want %q", llamaBody["reasoning_effort"], "low")
+	}
+
+	// Anthropic: silently dropped — its request never carries the field.
+	var antBody map[string]any
+	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		antBody = mustDecodeBody(t, r)
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv3.Close()
+	_, err = NewAnthropic(srv3.URL, "k").Chat(context.Background(), "m", ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Text: "hi"}},
+		ReasoningEffort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := antBody["reasoning_effort"]; present {
+		t.Fatalf("the Anthropic provider must drop the effort (no such API field), got %v", antBody)
+	}
+}
+
 func TestOpenAIVideoUnsupported(t *testing.T) {
 	p := NewOpenAI("http://127.0.0.1:0", "k")
 	_, err := p.Chat(context.Background(), "m", ChatRequest{

@@ -139,6 +139,9 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
+	// The user's profile page: what bevin currently knows about them + their
+	// user-level settings (the chat UI's user-name button lands here).
+	mux.HandleFunc("GET /api/profile", a.requireAuth(a.userProfile))
 	// First-time onboarding (regular users only — the admin has no user UI).
 	mux.HandleFunc("GET /api/onboarding", a.chatGate(a.onboardingStatus))
 	mux.HandleFunc("POST /api/onboarding", a.chatGate(a.onboardingComplete))
@@ -336,10 +339,15 @@ func (a *App) models(w http.ResponseWriter, _ *http.Request) {
 		Reasoning   int    `json:"reasoning"`
 		Knowledge   int    `json:"knowledge"`
 		Speed       int    `json:"speed"`
+		// ReasoningEfforts: the model's profile's supported reasoning-effort
+		// levels (the chat's per-conversation control is populated from them;
+		// EMPTY = the model takes no explicit effort, so the UI hides the
+		// control).
+		ReasoningEfforts []string `json:"reasoning_efforts"`
 	}
 	out := []pubModel{}
 	for _, m := range a.ag.Models() {
-		out = append(out, pubModel{m.ID, m.DisplayName, m.ModelID, m.MaxContext, m.Slots, m.Metadata.Reasoning, m.Metadata.Knowledge, m.Metadata.Speed})
+		out = append(out, pubModel{m.ID, m.DisplayName, m.ModelID, m.MaxContext, m.Slots, m.Metadata.Reasoning, m.Metadata.Knowledge, m.Metadata.Speed, a.ag.ReasoningEffortsFor(m.ID)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "default": a.ag.DefaultModelID()})
 }
@@ -386,17 +394,20 @@ func (a *App) getConversation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary})
 }
 
-// updateConversation changes a conversation's model and/or title
-// (at least one required). The model must be available right now; the
-// switch takes effect on the next turn (an in-flight turn keeps its model).
+// updateConversation changes a conversation's model, title, and/or
+// reasoning-effort choice (at least one required). The model must be available
+// right now; the effort must be one of the (possibly new) model's profile
+// levels. Both take effect on the next turn (an in-flight turn keeps its
+// model + effort).
 func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	var req struct {
-		ModelID *string `json:"model_id"`
-		Title   *string `json:"title"`
+		ModelID         *string `json:"model_id"`
+		Title           *string `json:"title"`
+		ReasoningEffort *string `json:"reasoning_effort"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ModelID == nil && req.Title == nil) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide model_id and/or title"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ModelID == nil && req.Title == nil && req.ReasoningEffort == nil) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide model_id and/or title and/or reasoning_effort"})
 		return
 	}
 	if req.ModelID != nil && !a.ag.ModelAvailable(*req.ModelID) {
@@ -407,7 +418,38 @@ func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title must not be blank"})
 		return
 	}
-	summary, err := a.ag.UpdateConversation(u.Handle, r.PathValue("id"), req.ModelID, req.Title)
+	// The effort is validated against the model it will run under: the NEW
+	// model when this call also switches models, else the conversation's
+	// current one. A non-empty effort the model's profile doesn't support is
+	// rejected (the request builder would drop it anyway — failing here
+	// names the valid levels instead of silently ignoring the user's choice).
+	if req.ReasoningEffort != nil && *req.ReasoningEffort != "" {
+		target := ""
+		if req.ModelID != nil && *req.ModelID != "" {
+			target = *req.ModelID
+		} else {
+			if cur, err := a.ag.Conversation(u.Handle, r.PathValue("id")); err == nil {
+				target = cur.ActiveModelID
+			}
+		}
+		if target == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no model to validate the reasoning effort against"})
+			return
+		}
+		efforts := a.ag.ReasoningEffortsFor(target)
+		ok := false
+		for _, e := range efforts {
+			if e == *req.ReasoningEffort {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unsupported reasoning effort %q for this model (supported: %s)", *req.ReasoningEffort, strings.Join(efforts, ", "))})
+			return
+		}
+	}
+	summary, err := a.ag.UpdateConversation(u.Handle, r.PathValue("id"), req.ModelID, req.Title, req.ReasoningEffort)
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
 		return
@@ -549,11 +591,20 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	// The emit callback is called synchronously (same goroutine as TurnStream),
 	// so capturing the final chunk's usage here is race-free.
 	var lastUsage *provider.Usage
+	// Turn timing for the perf stats the UI prints under the reply: total
+	// elapsed (start → stream end) + the time to the FIRST content delta
+	// (reasoning or text — the "thinking" phase counts; a model that thinks
+	// a long time before its first token shows it honestly).
+	start := time.Now()
+	var ttft time.Duration
 	convID, reply, err := a.ag.TurnStream(r.Context(), u.Handle, id, req.Message, func(c provider.Chunk) error {
 		if c.Usage != nil {
 			lastUsage = c.Usage
 		}
 		if c.TextDelta != "" || c.ReasoningDelta != "" {
+			if ttft == 0 {
+				ttft = time.Since(start)
+			}
 			return writeEvent("message", map[string]any{"delta": c.TextDelta, "reasoning": c.ReasoningDelta})
 		}
 		return nil
@@ -563,6 +614,7 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 		_ = writeEvent("error", map[string]string{"error": err.Error()})
 		return
 	}
+	elapsed := time.Since(start)
 	var usage map[string]any
 	if lastUsage != nil {
 		usage = map[string]any{
@@ -571,7 +623,13 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 			"total_tokens":      lastUsage.TotalTokens,
 		}
 	}
-	_ = writeEvent("done", map[string]any{"conversation_id": convID, "reply": reply, "usage": usage})
+	_ = writeEvent("done", map[string]any{
+		"conversation_id": convID,
+		"reply":           reply,
+		"usage":           usage,
+		"elapsed_ms":      elapsed.Milliseconds(),
+		"ttft_ms":         ttft.Milliseconds(),
+	})
 }
 
 // notify sends an email notification to a user (by handle). It is fire-and-
@@ -639,6 +697,23 @@ func (a *App) setEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("email: %s address set by %s", target, u.Handle)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "email": req.Email})
+}
+
+// userProfile is the user's profile page data: what bevin currently knows
+// about them (their stored profile — the name bevin addresses them by, their
+// email) + the learned facts + the persona list. The facts + personas lists
+// are STUBS for now: the memory layer and the persona editor ship later, but
+// the shapes exist so the profile page renders its full layout from day one
+// (empty states, not missing sections).
+func (a *App) userProfile(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"handle":       u.Handle,
+		"display_name": u.DisplayName,
+		"email":        u.Email,
+		"facts":        []any{}, // bevin's learned notes (the memory layer ships later)
+		"personas":     []any{}, // the persona editor ships later
+	})
 }
 
 // clientIP reads the client IP from X-Forwarded-For (fallback X-Real-IP), else

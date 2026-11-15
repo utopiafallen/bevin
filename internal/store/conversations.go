@@ -17,6 +17,10 @@ type Conversation struct {
 	PromptInputVersions string  `json:"prompt_input_versions"`
 	OwnerTaskID         *string `json:"owner_task_id,omitempty"`
 	ActiveModelID       string  `json:"active_model_id"`
+	// ReasoningEffort: the per-conversation reasoning-effort choice (one of
+	// the active model's profile levels, e.g. low/medium/xhigh; "" = the
+	// model's own default — the request builder sends nothing).
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // ErrNotFound is returned when a row is missing.
@@ -34,10 +38,10 @@ func (s *UserStore) CreateConversation(title, activeModelID string) (*Conversati
 	return &Conversation{ID: id, Title: title, CreatedAt: now, LastActivityAt: now, State: "active", ActiveModelID: activeModelID}, nil
 }
 
-const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id`
+const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort`
 
 func scanConv(rs interface{ Scan(...any) error }, c *Conversation) error {
-	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID)
+	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort)
 }
 
 func (s *UserStore) GetConversation(id string) (*Conversation, error) {
@@ -149,6 +153,21 @@ func (s *UserStore) SetConversationOwnerTask(convID, taskID string) error {
 func (s *UserStore) SetConversationTitle(id, title string) error {
 	_, err := s.db.Exec(`UPDATE conversations SET title = ? WHERE id = ?`, title, id)
 	return err
+}
+
+// SetConversationReasoningEffort stores the per-conversation reasoning-effort
+// choice ("" clears it — the model's own default then applies). The value is
+// validated against the active model's profile by the caller (the store
+// stores what it is told; the harness never sends an unsupported effort).
+func (s *UserStore) SetConversationReasoningEffort(id, effort string) error {
+	res, err := s.db.Exec(`UPDATE conversations SET reasoning_effort = ? WHERE id = ?`, effort, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetFrozenSystemPrompt stores the system prompt frozen at conversation start.

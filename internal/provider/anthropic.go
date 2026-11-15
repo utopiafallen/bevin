@@ -205,6 +205,10 @@ func buildAntRequest(req ChatRequest, model string, stream bool) (antRequest, er
 	if req.MaxTokens != nil {
 		maxTok = *req.MaxTokens
 	}
+	// req.ReasoningEffort is deliberately NOT mapped: the Anthropic Messages
+	// API has no reasoning-effort field (extended thinking takes a budget in
+	// tokens, a different control) — the provider's "silently drop" path.
+	// A future anthropic-specific profile can map it to a thinking budget.
 	areq := antRequest{Model: model, MaxTokens: maxTok, Temperature: req.Temperature, Stream: stream}
 	var sys []string
 	for _, sp := range req.System {

@@ -157,6 +157,20 @@ func (a *Agent) profileFor(modelID string) profile.Profile {
 	return profile.Default()
 }
 
+// ReasoningEffortsFor returns the model's profile's supported reasoning-effort
+// levels — the per-conversation control's option list for that model (the
+// chat UI populates its dropdown from it; an EMPTY slice means the model
+// takes no explicit effort, and the UI hides the control). The live-config
+// resolution is the same as profileFor: a profile reassignment applies from
+// the next read, no restart.
+func (a *Agent) ReasoningEffortsFor(modelID string) []string {
+	efforts := a.profileFor(modelID).ReasoningEfforts
+	if efforts == nil {
+		return []string{}
+	}
+	return efforts
+}
+
 // Reload swaps in a freshly saved config (the admin edit wizard's finalize):
 // the model set, slot counts, and provider endpoints update in place — the
 // running agent does not need a restart. The per-user stores are untouched,
@@ -470,6 +484,10 @@ type ConversationSummary struct {
 	CreatedAt      string `json:"created_at"`
 	LastActivityAt string `json:"last_activity_at"`
 	ActiveModelID  string `json:"active_model_id"`
+	// ReasoningEffort: the conversation's stored reasoning-effort choice
+	// ("" = the model's own default — the UI's dropdown then shows the
+	// default).
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 // Conversations lists the user's conversations, most recently active first
@@ -485,7 +503,7 @@ func (a *Agent) Conversations(handle string) ([]ConversationSummary, error) {
 	}
 	out := make([]ConversationSummary, 0, len(convos))
 	for _, c := range convos {
-		out = append(out, ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID})
+		out = append(out, ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort})
 	}
 	return out, nil
 }
@@ -502,17 +520,18 @@ func (a *Agent) Conversation(handle, convID string) (*ConversationSummary, error
 	if err != nil {
 		return nil, err
 	}
-	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID}, nil
+	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort}, nil
 }
 
-// UpdateConversation changes a conversation's active model and/or title
-// (either or both; at least one is required, enforced by the caller). The
-// model must be available right now — also enforced by the caller. The
-// change applies to the NEXT turn: an in-flight turn keeps the model it
-// started on (the scheduler already queued it in that model's pool).
-// Returns the updated summary. store.ErrNotFound when the conversation is
-// not in the user's store.
-func (a *Agent) UpdateConversation(handle, convID string, modelID, title *string) (*ConversationSummary, error) {
+// UpdateConversation changes a conversation's active model, title, and/or
+// reasoning-effort choice (any of them; at least one is required, enforced by
+// the caller). The model must be available right now — also enforced by the
+// caller; the effort is validated against the (possibly new) model's profile
+// levels by the caller too. The changes apply to the NEXT turn: an in-flight
+// turn keeps the model + effort it started on (the scheduler already queued
+// it in that model's pool). Returns the updated summary. store.ErrNotFound
+// when the conversation is not in the user's store.
+func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reasoningEffort *string) (*ConversationSummary, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return nil, err
@@ -534,11 +553,16 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title *string
 			return nil, err
 		}
 	}
+	if reasoningEffort != nil {
+		if err := us.SetConversationReasoningEffort(convID, *reasoningEffort); err != nil {
+			return nil, err
+		}
+	}
 	c, err := us.GetConversation(convID)
 	if err != nil {
 		return nil, err
 	}
-	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID}, nil
+	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort}, nil
 }
 
 // ConversationMessage is one displayable message from a conversation. The

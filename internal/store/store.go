@@ -169,7 +169,13 @@ CREATE TABLE IF NOT EXISTS conversations (
 	frozen_system_prompt  TEXT NOT NULL DEFAULT '',
 	prompt_input_versions TEXT NOT NULL DEFAULT '',
 	owner_task_id         TEXT,
-	active_model_id       TEXT NOT NULL
+	active_model_id       TEXT NOT NULL,
+	-- the per-conversation reasoning-effort choice (one of the active model's
+	-- profile levels, e.g. low/medium/xhigh; '' = the model's own default).
+	-- Stored on the conversation (not the model): it is the user's choice for
+	-- THIS conversation, and it survives a model switch that lands on another
+	-- model with the same levels.
+	reasoning_effort      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_conv_task ON conversations(owner_task_id);
 CREATE INDEX IF NOT EXISTS idx_conv_model ON conversations(active_model_id);

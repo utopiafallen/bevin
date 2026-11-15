@@ -84,6 +84,14 @@ type ChatRequest struct {
 	Tools       []Tool
 	Temperature *float64
 	MaxTokens   *int
+	// ReasoningEffort: the requested reasoning effort (one of the active
+	// model's profile levels — profile.Profile.ReasoningEfforts, e.g.
+	// "low"/"medium"/"xhigh"; set by the request builder only when the
+	// profile supports the conversation's stored choice). The provider
+	// adapts it to its API's native thinking control (the OAI wire's
+	// reasoning_effort) or drops it when its API has none (Anthropic).
+	// Empty = the model's own default.
+	ReasoningEffort string
 }
 
 // Result is the aggregated result of a completion (streaming or not).

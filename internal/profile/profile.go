@@ -70,6 +70,16 @@ type Profile struct {
 	// reports no usage (no local tokenizer; ~4 chars/token for English
 	// undercounts code/JSON — the trigger fraction's headroom covers it).
 	CharsPerToken int
+	// ReasoningEfforts: the reasoning-effort levels the model supports —
+	// the per-conversation control the user picks from (see
+	// ReasoningEffortFor): the request builder sends the conversation's
+	// stored choice when it is one of these, and the provider adapts it to
+	// its API's native thinking control or drops it when its API has none.
+	// EMPTY = the model takes no explicit effort (general): the control is
+	// hidden in the UI and the request carries nothing. The first
+	// model-specific user control — the pattern every future one follows
+	// (a struct field the request builder + provider layers read).
+	ReasoningEfforts []string
 }
 
 // generalFraming is the standard summary framing: the model is told the
@@ -90,6 +100,23 @@ var registry = map[string]Profile{
 		CompactionTriggerFraction: 0.8,
 		KeepLastTurns:             5,
 		CharsPerToken:             4,
+	},
+	// qwen3.8: general's harness behavior + the per-conversation
+	// reasoning-effort control (low/medium/xhigh). The first profile to
+	// carry a model-specific user control: the conversation stores the
+	// choice, the request builder sends it when this profile supports it,
+	// and the provider adapts it to its API's native thinking budget — or
+	// drops it, when its API has no such control (a request is never sent
+	// with a value the model's API could reject).
+	"qwen3.8": {
+		Name:                      "qwen3.8",
+		Description:               "Tuned for Qwen 3.8 models: the standard context management and transcript behavior, plus a per-conversation reasoning-effort control (low/medium/xhigh) the model honors — the chat's controls row lets you pick how hard it thinks, and the model's provider API maps the choice to its thinking budget (or drops it when the API has no such control).",
+		ReasoningInTranscript:     true,
+		SummaryFraming:            generalFraming,
+		CompactionTriggerFraction: 0.8,
+		KeepLastTurns:             5,
+		CharsPerToken:             4,
+		ReasoningEfforts:          []string{"low", "medium", "xhigh"},
 	},
 }
 
@@ -127,4 +154,20 @@ func List() []Profile {
 		out = append(out, registry[name])
 	}
 	return out
+}
+
+// ReasoningEffortFor returns the conversation's stored reasoning-effort
+// choice when this profile supports it (the value the request builder
+// sends), and "" otherwise: the model takes no explicit effort, or the
+// stored choice is not one of the profile's levels (stale after a profile
+// reassignment — the provider's own default then applies; an invalid value
+// is never put on the wire).
+func (p Profile) ReasoningEffortFor(stored string) string {
+	stored = strings.TrimSpace(stored)
+	for _, e := range p.ReasoningEfforts {
+		if e == stored {
+			return stored
+		}
+	}
+	return ""
 }

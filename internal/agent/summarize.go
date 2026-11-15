@@ -21,8 +21,11 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // The summarizer sees the turns in the same model-facing form as the chat
 // request builder (user turns stamped with their timestamp, assistant turns
 // plain + stored reasoning replayed in the API's native field when the
-// profile sends reasoning back).
-func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary string, prof profile.Profile, turns []store.Message) (string, error) {
+// profile sends reasoning back). effort is the conversation's stored
+// reasoning-effort choice, already profile-validated ("" = none) — the
+// internal call runs under the same "how hard to think" setting as the chat
+// turns.
+func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+1)
 	if prevSummary != "" {
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
@@ -31,8 +34,9 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 		msgs = append(msgs, assistantFacing(m, prof.ReasoningInTranscript))
 	}
 	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
-		System:   []provider.ContentPart{{Text: summarizationSystemPrompt}},
-		Messages: msgs,
+		System:          []provider.ContentPart{{Text: summarizationSystemPrompt}},
+		Messages:        msgs,
+		ReasoningEffort: effort,
 	})
 	if err != nil {
 		return "", err
@@ -83,7 +87,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	// name (the internal ID would be rejected for slug-mangled upstream
 	// names).
 	toSummarize := turns[:len(turns)-prof.KeepLastTurns]
-	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof, toSummarize)
+	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize)
 	if err != nil {
 		return err
 	}

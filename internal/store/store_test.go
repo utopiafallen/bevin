@@ -450,6 +450,56 @@ func TestMessageReasoningRoundTrip(t *testing.T) {
 	}
 }
 
+// TestConversationReasoningEffortRoundTrip — the conversation's stored
+// reasoning-effort choice round-trips through the store (set, read back,
+// clear) and is included in the list rows (the UI reads it from the
+// conversation list, not a per-row fetch).
+func TestConversationReasoningEffortRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	c, err := s.CreateConversation("effort", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No choice yet: empty.
+	c0, err := s.GetConversation(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c0.ReasoningEffort != "" {
+		t.Fatalf("new conversation ReasoningEffort = %q, want empty", c0.ReasoningEffort)
+	}
+	// Set it; the choice round-trips.
+	if err := s.SetConversationReasoningEffort(c.ID, "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	c1, err := s.GetConversation(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c1.ReasoningEffort != "xhigh" {
+		t.Fatalf("ReasoningEffort = %q, want %q", c1.ReasoningEffort, "xhigh")
+	}
+	// The list rows carry it too.
+	convList, err := s.ListConversations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(convList) != 1 || convList[0].ReasoningEffort != "xhigh" {
+		t.Fatalf("list = %+v, want one conversation with effort xhigh", convList)
+	}
+	// Clearing it stores empty again (the provider's default applies).
+	if err := s.SetConversationReasoningEffort(c.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := s.GetConversation(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.ReasoningEffort != "" {
+		t.Fatalf("cleared ReasoningEffort = %q, want empty", c2.ReasoningEffort)
+	}
+}
+
 // TestDeleteConversation — a delete removes the conversation row and every
 // one of its message rows (the FTS index follows via its triggers, so a
 // search no longer surfaces the deleted content); deleting an unknown or

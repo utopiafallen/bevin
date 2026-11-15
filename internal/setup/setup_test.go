@@ -810,11 +810,21 @@ func TestProfilesEndpoint(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Profiles) != 1 || got.Profiles[0].Name != "general" {
-		t.Fatalf("profiles = %+v, want exactly general", got.Profiles)
+	// The build's registry, general included (the default). The registry
+	// grows with model-specific profiles (e.g. qwen3.8's reasoning-effort
+	// control), so assert membership, not an exact count — the count is
+	// pinned against profile.Names() below.
+	foundGeneral := false
+	for i := range got.Profiles {
+		if got.Profiles[i].Name == "general" {
+			foundGeneral = true
+			if got.Profiles[i].Description == "" {
+				t.Fatal("general has no description (the forms show it under the select)")
+			}
+		}
 	}
-	if got.Profiles[0].Description == "" {
-		t.Fatal("general has no description (the forms show it under the select)")
+	if !foundGeneral {
+		t.Fatalf("profiles = %+v, missing general (the default)", got.Profiles)
 	}
 	// The response matches the registry exactly (single source of truth).
 	if len(got.Profiles) != len(profile.Names()) {
