@@ -311,6 +311,31 @@ func (s *UserStore) ListWorkspaceFiles(wsid string) ([]WorkspaceFile, error) {
 	return out, rows.Err()
 }
 
+// SearchWorkspaceFiles matches a query against a workspace's file names +
+// relative paths (case-insensitive substring — file CONTENTS are not indexed
+// yet, only the metadata). The search page's per-workspace scope.
+func (s *UserStore) SearchWorkspaceFiles(wsid, query string, limit int) ([]WorkspaceFile, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	like := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
+	rows, err := s.db.Query(`SELECT `+wfCols+` FROM workspace_files WHERE workspace_id = ? AND (lower(name) LIKE ? OR lower(relative_path) LIKE ?) ORDER BY added_at DESC LIMIT ?`,
+		wsid, like, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WorkspaceFile
+	for rows.Next() {
+		var f WorkspaceFile
+		if err := scanWF(rows, &f); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 func (s *UserStore) SetWorkspaceFileIngested(id int64, ingested bool) error {
 	_, err := s.db.Exec(`UPDATE workspace_files SET ingested = ? WHERE id = ?`, boolInt(ingested), id)
 	return err

@@ -445,6 +445,121 @@ func (a *Agent) SearchConversations(ctx context.Context, handle, query string, l
 	return vi.Search(ctx, handle, query, limit)
 }
 
+// UserProfileData returns the user's profile-page data: bevin's profile of
+// them (the durable profile KVs that are injected into the system prompt —
+// what bevin knows about the user), the learned facts (active memories), and
+// the persona list. Personas are a STUB for now (no table, no editor yet) —
+// the shape exists so the page renders its full layout from day one.
+func (a *Agent) UserProfileData(handle string) (map[string]string, []store.Memory, []any, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prof, err := us.GetProfile()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	facts, err := us.ListActiveMemories()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if facts == nil {
+		facts = []store.Memory{}
+	}
+	return prof, facts, []any{}, nil
+}
+
+// ftsQuery sanitizes raw user search text into a safe FTS5 query: each
+// whitespace-separated token becomes a quoted phrase, space-joined (the FTS5
+// default is AND between terms) — so raw input containing FTS5 operators
+// (NOT, AND, *, or unbalanced quotes) cannot break the query or widen its
+// scope. "" when there are no tokens.
+func ftsQuery(raw string) string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, `"`+strings.ReplaceAll(f, `"`, `""`)+`"`)
+	}
+	return strings.Join(out, " ")
+}
+
+// SearchAll backs the dedicated search page: it searches the user's data
+// across every source at once — conversations (semantic, the per-user vector
+// index), memories (FTS5), the profile (case-insensitive substring over keys
+// + values), and, when a workspace is named, that workspace's files (name +
+// path match — file CONTENTS are not indexed yet, metadata only). An empty
+// workspaceID is the default scope: all of the user's data. The
+// user's workspaces are returned in `workspaces` so the page's scope
+// selector can offer them. The vector-index leg is best-effort (an
+// unconfigured index or a sidecar blip leaves the local sources intact);
+// a store failure is a real error.
+func (a *Agent) SearchAll(ctx context.Context, handle, query, workspaceID string, limit int) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	out := map[string]any{
+		"conversations": []any{},
+		"memories":      []any{},
+		"profile":       []any{},
+		"workspaces":    []any{},
+		"workspace":     []any{},
+	}
+	if hits, err := a.SearchConversations(ctx, handle, query, limit); err == nil {
+		out["conversations"] = hits
+	}
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	if fq := ftsQuery(query); fq != "" {
+		if mems, err := us.SearchMemories(fq, limit); err == nil && mems != nil {
+			out["memories"] = mems
+		}
+	}
+	type kvHit struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	kv, err := us.GetProfile()
+	if err != nil {
+		return nil, err
+	}
+	var profileHits []any
+	for k, v := range kv {
+		if strings.Contains(strings.ToLower(k), strings.ToLower(query)) || strings.Contains(strings.ToLower(v), strings.ToLower(query)) {
+			profileHits = append(profileHits, kvHit{k, v})
+		}
+	}
+	out["profile"] = profileHits
+	type wsRef struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	ws, err := us.ListWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	wsRefs := make([]wsRef, 0, len(ws))
+	for _, w := range ws {
+		wsRefs = append(wsRefs, wsRef{w.ID, w.Title})
+	}
+	out["workspaces"] = wsRefs
+	if workspaceID != "" {
+		if _, err := us.GetWorkspace(workspaceID); err != nil {
+			return nil, err
+		}
+		files, err := us.SearchWorkspaceFiles(workspaceID, query, limit)
+		if err != nil {
+			return nil, err
+		}
+		out["workspace"] = files
+	}
+	return out, nil
+}
+
 // DeleteConversation removes the user's conversation: its message rows go
 // first (the authoritative step — the FTS index follows via its triggers),
 // then the indexed vectors, best-effort (an unconfigured vector index or a
@@ -563,6 +678,31 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 		return nil, err
 	}
 	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort}, nil
+}
+
+// ContextUsage reports what the conversation's NEXT turn would send: the
+// estimated prompt size in tokens (frozen system prompt + latest summary +
+// the raw turns since it, estimated exactly the way the request builder and
+// the compaction budget do) and the active model's total context window
+// (0 = unknown). The UI's context-window usage visualization reads it when
+// a conversation opens, then refines the numerator from each turn's
+// API-reported usage (the done event's usage.prompt_tokens).
+func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	c, err := us.GetConversation(convID)
+	if err != nil {
+		return nil, err
+	}
+	hist, err := us.ListMessages(convID)
+	if err != nil {
+		return nil, err
+	}
+	prof := a.profileFor(c.ActiveModelID)
+	_, tokens := buildRequest(c, hist, prof)
+	return map[string]any{"tokens": tokens, "max_tokens": a.modelMaxContext(c.ActiveModelID)}, nil
 }
 
 // ConversationMessage is one displayable message from a conversation. The

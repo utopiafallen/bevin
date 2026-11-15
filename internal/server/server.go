@@ -134,6 +134,7 @@ func (a *App) routes() {
 	mux.HandleFunc("PATCH /api/conversations/{id}", a.chatGate(a.updateConversation))
 	mux.HandleFunc("DELETE /api/conversations/{id}", a.chatGate(a.deleteConversation))
 	mux.HandleFunc("GET /api/conversations/search", a.chatGate(a.searchConversations))
+	mux.HandleFunc("GET /api/search", a.chatGate(a.searchAll))
 	mux.HandleFunc("GET /api/conversations/{id}/messages", a.chatGate(a.getMessages))
 	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
 	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
@@ -378,8 +379,9 @@ func (a *App) listConversations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"conversations": convos})
 }
 
-// getConversation returns one conversation's slim row (the UI reads it to
-// show the conversation's active model + switch it).
+// getConversation returns one conversation's slim row + its context-window
+// usage (the UI reads it to show the conversation's active model + switch
+// it, and to seed the context usage visualization above the input).
 func (a *App) getConversation(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	summary, err := a.ag.Conversation(u.Handle, r.PathValue("id"))
@@ -391,7 +393,11 @@ func (a *App) getConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary})
+	ctxUsage, ctxErr := a.ag.ContextUsage(u.Handle, r.PathValue("id"))
+	if ctxErr != nil {
+		ctxUsage = map[string]any{"tokens": 0, "max_tokens": 0}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary, "context": ctxUsage})
 }
 
 // updateConversation changes a conversation's model, title, and/or
@@ -521,6 +527,39 @@ func (a *App) searchConversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": hits})
+}
+
+// searchAll backs the dedicated search page: it searches the user's data
+// across every source (conversations semantically + memories + profile
+// lexically) in one query. scope is the workspace id to limit file hits to
+// ("" = the default: all of the user's data). q is required; limit defaults
+// to 10 (max 25).
+func (a *App) searchAll(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q is required"})
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 25 {
+		limit = 25
+	}
+	out, err := a.ag.SearchAll(r.Context(), u.Handle, q, r.URL.Query().Get("workspace"), limit)
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -700,19 +739,26 @@ func (a *App) setEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 // userProfile is the user's profile page data: what bevin currently knows
-// about them (their stored profile — the name bevin addresses them by, their
-// email) + the learned facts + the persona list. The facts + personas lists
-// are STUBS for now: the memory layer and the persona editor ship later, but
-// the shapes exist so the profile page renders its full layout from day one
-// (empty states, not missing sections).
+// about them (their stored profile — the durable KVs injected into the
+// system prompt, so this is literally the profile bevin has of the user) +
+// their email + the learned facts (active memories) + the persona list.
+// Personas are a STUB for now (the persona editor ships later); the shape
+// exists so the profile page renders its full layout from day one (empty
+// states, not missing sections).
 func (a *App) userProfile(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
+	prof, facts, personas, err := a.ag.UserProfileData(u.Handle)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"handle":       u.Handle,
 		"display_name": u.DisplayName,
 		"email":        u.Email,
-		"facts":        []any{}, // bevin's learned notes (the memory layer ships later)
-		"personas":     []any{}, // the persona editor ships later
+		"profile":      prof,     // bevin's profile of the user (key: value)
+		"facts":        facts,    // bevin's learned notes (active memories)
+		"personas":     personas, // the persona editor ships later
 	})
 }
 
