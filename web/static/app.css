@@ -1,12 +1,16 @@
 /* bevin — full-screen chat shell (the main user page, index.html only).
  *
- * Desktop: a persistent sidebar (new chat, search, conversation history,
- * user actions) plus a chat that fills the rest of the window; the menu
- * button collapses the sidebar (the state persists in localStorage).
+ * The header bar is gone: a narrow ICON RAIL (the collapsed sidebar) is
+ * always visible on the left — the brand mark at the top (the logo is always
+ * visible), one icon per function in the middle (chats, new chat, search,
+ * workspace, task board), and theme + the user's profile button at the
+ * bottom. Clicking the chats icon opens the NESTED PANEL for that function
+ * (the conversation list); search and profile open their dedicated pages in
+ * the main stage.
  *
- * Mobile / narrow portrait: the sidebar becomes an off-canvas drawer behind
- * the same menu button (with a scrim), and everything else stacks cleanly
- * at full width.
+ * Mobile / narrow portrait: the rail (+ the panel, when open) become an
+ * off-canvas drawer behind a floating hamburger, with the brand mark sitting
+ * next to it.
  *
  * The chat column is centered in the remaining space. On ultrawide screens
  * its width is derived from the viewport height (4:3), so the visible chat
@@ -19,8 +23,8 @@
  */
 
 :root {
-  --sb-w: 18rem;
-  --topbar-h: 3.2rem;
+  --rail-w: 4.4rem;
+  --panel-w: 18rem;
 }
 
 /* The page is a fixed full-viewport shell: the chat log scrolls internally,
@@ -30,91 +34,144 @@ body { margin: 0; min-height: 0; overflow: hidden; }
 
 .app { display: flex; height: 100vh; height: 100dvh; }
 
-/* ---- sidebar (desktop: persistent, collapsible) ---- */
-.sidebar {
-  width: var(--sb-w);
+/* ---- the icon rail (always visible on desktop) ---- */
+.rail {
+  width: var(--rail-w);
   flex: none;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 0.55rem 0 0.7rem;
+  gap: 0.55rem;
+  z-index: 60;
+}
+.rail-logo {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.1rem;
+  width: 3.4rem; height: 3.4rem;
+  border-radius: 12px;
+  transition: background 0.15s;
+}
+.rail-logo:hover { background: var(--surface-2); text-decoration: none; }
+.rail-logo img { width: 26px; height: 26px; display: block; }
+/* The brand wordmark under the mark: the logo + branding stay visible even
+   with the panel closed (they ride on the always-visible rail). */
+.rail-wordmark { font-size: 0.62rem; font-weight: 800; letter-spacing: 0.02em; color: var(--text-muted); }
+
+.rail-nav { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+.rail-btn {
+  display: grid; place-items: center;
+  width: 2.9rem; height: 2.9rem;
+  border: 1px solid transparent; border-radius: 12px;
+  background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.rail-btn:hover { background: var(--surface-2); color: var(--text); }
+.rail-btn.active { background: var(--brand-soft); color: var(--brand-strong); }
+/* Stub functions (workspace, task board): visible but inert — the layout is
+   final, the functions land later. */
+.rail-btn.stub { opacity: 0.45; cursor: default; }
+.rail-btn.stub:hover { background: transparent; color: var(--text-muted); }
+
+/* The rail's theme toggle: the brand.css .theme-toggle icon swap
+   (sun/moon) still applies; this pins it into the rail grid. */
+.rail .theme-toggle {
+  position: static;
+  width: 2.9rem; height: 2.9rem; border-radius: 12px;
+  background: transparent; border: 1px solid transparent;
+  box-shadow: none; color: var(--text-muted);
+}
+.rail .theme-toggle:hover { background: var(--surface-2); color: var(--text); }
+
+.rail-bottom {
+  margin-top: auto;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+}
+.rail-user {
+  display: grid; place-items: center;
+  width: 2.9rem; height: 2.9rem;
+  border: 1px solid transparent; border-radius: 50%;
+  background: var(--brand-softer); color: var(--brand-strong);
+  cursor: pointer; transition: background 0.15s;
+  overflow: hidden;
+}
+.rail-user:hover { background: var(--brand-soft); }
+.rail-user.active { background: var(--brand-soft); border-color: var(--brand); }
+.rail-user-name { display: none; } /* the icon represents the user; the name lives in the tooltip */
+.rail-logout {
+  font-size: 0.72rem; font-weight: 700;
+  padding: 0.3rem 0; width: 3.4rem;
+  border: none; border-radius: 8px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.rail-logout:hover { background: var(--surface-2); color: var(--text); }
+
+/* Signed-out state: only the brand + theme remain (the function nav + the
+   user's profile button hide; the theme works on the login screen too). */
+.rail.signed-out .rail-nav { display: none; }
+.rail.signed-out .rail-user,
+.rail.signed-out .rail-logout { display: none; }
+
+/* ---- the nested panel (the chats function's expanded sidebar) ---- */
+.panel {
+  width: var(--panel-w);
+  flex: none;
+  display: none;
   flex-direction: column;
   min-height: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
-  transition: margin-left 0.18s ease;
-  z-index: 60;
 }
-body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
+body.panel-chats .panel { display: flex; }
 
-.sb-brand {
+.panel-head {
+  flex: none;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 1rem 1rem 0.5rem;
+  padding: 0.9rem 0.9rem 0.4rem;
 }
-.sb-brand .brand { font-size: 1.3rem; }
-.sb-close { display: none; }
+.panel-title { font-weight: 800; font-size: 1rem; letter-spacing: -0.01em; }
+.panel-close { width: 2.1rem; height: 2.1rem; border-radius: 8px; }
 
-.sb-nav { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.25rem 0.9rem 0.5rem; }
-.sb-newchat { width: 100%; }
+.panel-newchat { padding: 0.25rem 0.9rem 0.5rem; }
+.panel-newchat .btn { width: 100%; }
 
-.sb-search { display: flex; gap: 0.4rem; padding: 0 0.9rem 0.5rem; }
-.sb-search input { flex: 1; min-width: 0; padding: 0.55rem 0.75rem; }
-.sb-search-go {
-  padding: 0.55rem 0.85rem; font-size: 0.88rem;
-  border: 1px solid var(--border); background: var(--surface); color: var(--text);
-}
-
-/* Search results and the conversation history share one scroll region. */
-.sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0.9rem 0.5rem; }
-.sb-results {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 0.4rem 0.55rem 0.55rem; margin-bottom: 0.6rem;
-  background: var(--surface-2);
-}
-.sb-results-head {
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em;
-  text-transform: uppercase; color: var(--text-muted);
-  margin-bottom: 0.35rem;
-}
-.sb-clear { padding: 0.05rem 0.5rem; line-height: 1.6; font-size: 0.9rem; }
+.panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0.9rem 0.6rem; }
 .sb-section {
   font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
   font-size: 0.72rem; color: var(--text-muted);
   margin: 0.4rem 0.2rem 0.45rem;
 }
 
-/* Signed-out state: only the brand + user chip remain. */
-.sidebar.signed-out .sb-nav,
-.sidebar.signed-out .sb-search,
-.sidebar.signed-out .sb-scroll,
-.sidebar.signed-out .sb-actions { display: none; }
-
-.sb-footer {
-  flex: none;
-  display: flex; flex-direction: column; gap: 0.45rem;
-  padding: 0.7rem 0.9rem 0.9rem;
-  border-top: 1px solid var(--border);
+/* ---- mobile: the floating hamburger + brand mark (always visible) ---- */
+.mobile-menu, .mobile-brand { display: none; }
+.mobile-menu {
+  position: fixed; top: 0.7rem; left: 0.7rem; z-index: 66;
+  display: none; place-items: center;
+  width: 2.7rem; height: 2.7rem;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow-sm); cursor: pointer;
 }
-.sb-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-.sb-logout { padding: 0.35rem 0.75rem; font-size: 0.85rem; }
+.mobile-brand {
+  position: fixed; top: 0.7rem; left: 3.6rem; z-index: 66;
+  display: none; align-items: center; gap: 0.45rem;
+  height: 2.7rem; padding: 0 0.85rem 0 0.6rem;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); box-shadow: var(--shadow-sm);
+  font-weight: 800; font-size: 1.05rem; color: var(--text);
+}
+.mobile-brand img { width: 24px; height: 24px; display: block; }
+.mobile-brand:hover { text-decoration: none; }
 
 /* ---- main column ---- */
 .main {
   flex: 1; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
-}
-
-.topbar {
-  flex: none;
-  height: var(--topbar-h);
-  display: flex; align-items: center; gap: 0.55rem;
-  padding: 0 4.6rem 0 0.7rem; /* the right keeps room for the fixed theme toggle */
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-.topbar .spacer { flex: 1; }
-.topbar-brand { display: none; font-size: 1.15rem; }
-.health-line {
-  font-size: 0.78rem; color: var(--text-muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 .icon-btn {
@@ -126,22 +183,22 @@ body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
 }
 .icon-btn:hover { background: var(--surface-2); }
 
-/* The stage centers the chat column in the remaining space. */
+/* The stage centers the content column in the remaining space. */
 .stage {
   flex: 1; min-height: 0;
   display: flex; justify-content: center;
   padding: 0.9rem 1.1rem 1.1rem;
 }
 
-/* The chat column: centered. On ultrawide screens its width is derived
+/* The content column: centered. On ultrawide screens its width is derived
    from its own height (4:3): the stage's vertical padding (0.9 + 1.1 =
-   2rem) is subtracted so the ratio is against the column's actual
-   height, not the viewport's. min(100%, …) keeps the cap below the
-   available width on normal screens, where the chat simply fills it. */
+   2rem) is subtracted so the ratio is against the column's actual height,
+   not the viewport's. min(100%, …) keeps the cap below the available
+   width on normal screens, where the content simply fills it. */
 .column {
   width: 100%;
-  max-width: min(100%, calc((100vh - var(--topbar-h) - 2rem) * 4 / 3));
-  max-width: min(100%, calc((100dvh - var(--topbar-h) - 2rem) * 4 / 3));
+  max-width: min(100%, calc((100vh - 2rem) * 4 / 3));
+  max-width: min(100%, calc((100dvh - 2rem) * 4 / 3));
   display: flex; flex-direction: column;
   min-height: 0;
 }
@@ -149,17 +206,9 @@ body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
 /* Centered fixed-height cards (login, onboarding). */
 .center-card { margin: auto; width: 100%; max-width: 26rem; }
 
-/* The chat card: a full-height flex column — tools, the scrolling log, and
-   the composer pinned at the bottom. */
+/* The chat card: a full-height flex column — the scrolling log, the
+   context controls, and the composer pinned at the bottom. */
 .chat-card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.chat-tools {
-  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-  padding: 0.2rem 0.1rem 0.55rem;
-}
-.chat-tools #modelSelect {
-  width: auto; max-width: 12rem;
-  padding: 0.3rem 0.5rem; font-size: 0.9rem;
-}
 #chatLog {
   flex: 1; min-height: 0; overflow-y: auto;
   max-height: none; /* overrides brand.css's 26rem card cap */
@@ -172,23 +221,108 @@ body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
 }
 #chat #message { flex: 1; }
 
-/* The theme toggle floats above the drawer scrim so it stays clickable
-   while the mobile drawer is open. */
-.theme-toggle { z-index: 70; }
+/* The context controls: the conversation's model + reasoning effort + the
+   context-window usage bar, sitting above the composer. */
+.chat-ctx {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.45rem 0.1rem 0.55rem;
+}
+.chat-ctx select {
+  width: auto; max-width: 11rem;
+  padding: 0.3rem 0.5rem; font-size: 0.88rem;
+}
+.ctx-viz {
+  flex: 1; min-width: 11rem;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+/* The display:flex above wins over the hidden attribute's UA style — keep
+   the JS-controlled hide working (unknown window size / no conversation). */
+.ctx-viz[hidden] { display: none; }
+.ctx-bar {
+  flex: 1; min-width: 6rem; height: 0.45rem;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden;
+}
+.ctx-fill {
+  height: 100%; width: 0%;
+  background: var(--brand);
+  border-radius: 999px;
+  transition: width 0.3s ease, background 0.2s ease;
+}
+.ctx-fill.warn { background: var(--warn); }
+.ctx-fill.danger { background: var(--danger); }
+.ctx-label {
+  font-size: 0.72rem; color: var(--text-muted);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
 
+/* Performance stats under an assistant reply: a quiet one-liner (live
+   estimate while streaming, exact numbers after the done event). */
+.msg-stats {
+  margin: 0.25rem 0.2rem 0;
+  font-size: 0.72rem; color: var(--text-muted);
+  font-weight: 600; font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
+/* The dedicated pages (search, profile): centered, readable width. */
+.page-card { margin: auto; width: 100%; max-width: 46rem; padding: 0.4rem 0.2rem; }
+.search-results { margin-top: 0.9rem; display: flex; flex-direction: column; gap: 1rem; }
+.search-sec-head {
+  font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: 0.72rem; color: var(--text-muted);
+  margin-bottom: 0.45rem;
+}
+.search-hit { transition: background 0.15s; }
+
+.profile-section { margin-top: 1.3rem; }
+.profile-section h4 {
+  font-size: 0.8rem; font-weight: 800; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-muted);
+  margin: 0 0 0.5rem;
+}
+.profile-facts {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0.3rem 0.9rem;
+}
+.persona-list { margin-bottom: 0.5rem; }
+
+/* The scrim: behind the mobile drawer. */
 .scrim { display: none; }
 
-/* ---- mobile / narrow portrait: the sidebar is an off-canvas drawer ---- */
+/* ---- mobile / narrow portrait: rail + panel become an off-canvas drawer
+   behind a floating hamburger (the brand mark sits next to it). The
+   floating bar stays put while the drawer is open (it toggles), so the
+   drawer's own content clears it with top padding, and the rail's logo is
+   hidden (the floating brand already shows it). ---- */
 @media (max-width: 839px) {
-  .sidebar {
+  .mobile-menu, .mobile-brand { display: grid; }
+  .mobile-brand { display: flex; }
+
+  .rail {
     position: fixed; top: 0; bottom: 0; left: 0;
-    width: min(85vw, 19rem);
-    margin-left: 0 !important; /* the desktop collapse must not double-shift the drawer */
+    width: var(--rail-w);
     transform: translateX(-104%);
     transition: transform 0.2s ease;
     box-shadow: none;
+    padding-top: 3.6rem; /* clear the floating hamburger/brand bar */
   }
-  body.nav-open .sidebar { transform: none; box-shadow: var(--shadow); }
+  body.nav-open .rail { transform: none; box-shadow: var(--shadow); }
+  /* The floating brand already carries the logo — don't double it in the drawer. */
+  .rail-logo { display: none; }
+
+  .panel {
+    position: fixed; top: 0; bottom: 0; left: var(--rail-w);
+    width: min(78vw, var(--panel-w));
+    display: flex;
+    z-index: 60; /* above the scrim — without it the dim layer paints OVER the panel */
+    transform: translateX(-130%);
+    transition: transform 0.2s ease;
+    box-shadow: none;
+    border-right: none;
+  }
+  body.nav-open .panel { transform: none; box-shadow: var(--shadow); }
+  .panel-head { padding-top: 3.6rem; } /* clear the floating brand bar */
 
   .scrim {
     display: block;
@@ -199,16 +333,13 @@ body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
   }
   body.nav-open .scrim { opacity: 1; pointer-events: auto; }
 
-  .sb-close { display: grid; }
-  .topbar-brand { display: inline-flex; }
-  .topbar { padding-left: 0.5rem; gap: 0.45rem; }
-  .health-line { display: none; } /* diagnostic-only; the drawer is the focus on phones */
-  .stage { padding: 0.5rem 0.6rem 0.6rem; }
+  .stage { padding: 3.6rem 0.6rem 0.6rem; } /* room for the floating menu/brand */
   .column { max-width: 100%; }
   .center-card { max-width: 100%; }
   .msg { max-width: 92%; }
-  .chat-tools #modelSelect { flex: 1; max-width: none; }
+  .msg-stats { margin-left: 0.1rem; }
+  .chat-ctx select { flex: 1; max-width: none; }
+  .chat-ctx .ctx-viz { min-width: 100%; }
   #chat { padding: 0.5rem 0.05rem 0.55rem; }
-  .sb-brand { padding-top: 1.1rem; }
-  .sb-footer { padding-bottom: max(0.9rem, env(safe-area-inset-bottom, 0px)); }
+  .page-card { max-width: 100%; }
 }

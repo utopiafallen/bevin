@@ -8,7 +8,8 @@
   <link rel="stylesheet" href="/brand.css">
   <link rel="stylesheet" href="/app.css">
   <script>
-    // Apply the saved theme (or the system preference) before first paint.
+    // Apply the saved theme (or the system preference — the default) before
+    // first paint, so the shell never flashes the wrong color scheme.
     (function () {
       try {
         var t = localStorage.getItem("bevin-theme");
@@ -21,77 +22,83 @@
   </script>
 </head>
 <body>
-  <script>
-    // Restore the desktop sidebar state (collapsed / open) before first
-    // paint, so the shell never flashes open and then slides closed.
-    try {
-      if (localStorage.getItem("bevin-sidebar") === "closed") {
-        document.body.classList.add("sb-collapsed");
-      }
-    } catch (e) {}
-  </script>
-
-  <button class="theme-toggle" id="themeToggle" aria-label="Toggle color theme" title="Toggle theme">
-    <svg class="ico-sun" viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="4"></circle>
-      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
-    </svg>
-    <svg class="ico-moon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
-    </svg>
+  <!-- Mobile only: the always-visible brand mark + the hamburger that opens
+       the drawer (the icon rail). On desktop the rail is always visible, so
+       both hide. -->
+  <button class="mobile-menu" id="menuBtn" type="button" aria-label="Open navigation" title="Navigation">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
   </button>
+  <a class="mobile-brand" href="/"><img src="/logo-mark.svg" alt=""> bevin</a>
 
   <div class="app">
-    <aside class="sidebar signed-out" id="sidebar" aria-label="Navigation">
-      <div class="sb-brand">
-        <a class="brand" href="/"><img src="/logo-mark.svg" alt="bevin logo"> bevin</a>
-        <button class="icon-btn sb-close" id="sbCloseBtn" type="button" aria-label="Close navigation" title="Close navigation">
+    <!-- The icon rail: the always-visible collapsed sidebar. One icon per
+         function; the chats icon opens the nested panel (the conversation
+         list), search + profile open their dedicated pages, workspace and
+         task board are stubs for now. The brand mark sits at the top so the
+         logo is always visible; theme + the user's profile button at the
+         bottom. -->
+    <nav class="rail signed-out" id="rail" aria-label="Functions">
+      <a class="rail-logo" href="/" title="bevin">
+        <img src="/logo-mark.svg" alt="">
+        <span class="rail-wordmark">bevin</span>
+      </a>
+      <div class="rail-nav">
+        <button class="rail-btn" id="chatsBtn" type="button" title="Chats" aria-label="Chats" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+        <button class="rail-btn" id="newChatBtn" type="button" title="New chat" aria-label="New chat">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        </button>
+        <button class="rail-btn" id="searchBtn" type="button" title="Search everything" aria-label="Search">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+        </button>
+        <button class="rail-btn stub" id="workspaceBtn" type="button" title="Workspace — coming soon" aria-label="Workspace (coming soon)" aria-disabled="true">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+        <button class="rail-btn stub" id="taskboardBtn" type="button" title="Task board — coming soon" aria-label="Task board (coming soon)" aria-disabled="true">
+          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 4h4v16H4z M10 4h4v10h-4z M16 4h4v7h-4z"></path></svg>
+        </button>
+      </div>
+      <div class="rail-bottom">
+        <button class="rail-btn theme-toggle" id="themeToggle" type="button" title="Toggle theme" aria-label="Toggle color theme">
+          <svg class="ico-sun" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+          </svg>
+          <svg class="ico-moon" viewBox="0 0 24 24" width="19" height="19" fill="currentColor">
+            <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"></path>
+          </svg>
+        </button>
+        <button class="rail-user" id="profileBtn" type="button" hidden title="Your profile" aria-label="Your profile">
+          <svg class="rail-user-ico" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"></path></svg>
+          <span class="rail-user-name" id="userName"></span>
+        </button>
+        <button class="btn btn-ghost rail-logout" id="logoutBtn" type="button" hidden>Sign out</button>
+      </div>
+    </nav>
+
+    <!-- The nested panel: the chats function's expanded sidebar (the
+         conversation list + new chat). Hidden unless the chats icon is
+         active; on mobile it rides next to the rail inside the drawer. -->
+    <aside class="panel" id="panel" aria-label="Chats">
+      <div class="panel-head">
+        <span class="panel-title">Chats</span>
+        <button class="icon-btn panel-close" id="panelCloseBtn" type="button" aria-label="Close panel" title="Close">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>
         </button>
       </div>
-
-      <div class="sb-nav">
-        <button class="btn btn-primary sb-newchat" id="newChatBtn" type="button" title="Start a new conversation">New chat</button>
+      <div class="panel-newchat">
+        <button class="btn btn-primary" id="panelNewChatBtn" type="button" title="Start a new conversation">New chat</button>
       </div>
-
-      <form id="searchForm" class="sb-search">
-        <input id="searchInput" placeholder="Search conversations…" autocomplete="off">
-        <button class="btn btn-ghost sb-search-go" type="submit">Search</button>
-      </form>
-
-      <div class="sb-scroll">
-        <div id="searchResults" class="sb-results" hidden>
-          <div class="sb-results-head">
-            <span>Search results</span>
-            <button class="btn btn-ghost sb-clear" id="clearSearchBtn" type="button" title="Clear results" aria-label="Clear results">×</button>
-          </div>
-          <div id="searchResultsList"></div>
-        </div>
+      <div class="panel-scroll">
         <div class="sb-section">Conversations</div>
         <div id="historyList" class="sb-history"></div>
-      </div>
-
-      <div class="sb-footer">
-        <span class="chip"><span class="dot"></span> <span id="userChip">signed out</span></span>
-        <div class="sb-actions">
-          <a class="chip admin-setup-link" id="adminSetupLink" href="/admin/models" hidden title="Models &amp; config editors (admin)">Models</a>
-          <button class="btn btn-ghost sb-logout" id="logoutBtn" type="button" hidden>Sign out</button>
-        </div>
       </div>
     </aside>
 
     <div class="scrim" id="scrim"></div>
 
     <main class="main">
-      <header class="topbar">
-        <button class="icon-btn" id="menuBtn" type="button" aria-label="Toggle navigation" title="Toggle navigation">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
-        </button>
-        <a class="brand topbar-brand" href="/"><img src="/logo-mark.svg" alt=""> bevin</a>
-        <div class="spacer"></div>
-        <div class="health-line">bevin &middot; <span id="health">checking&hellip;</span></div>
-      </header>
-
       <div class="stage">
         <div class="column">
           <section class="card center-card" id="loginCard">
@@ -143,15 +150,68 @@
           </section>
 
           <section class="chat-card" id="chatCard" style="display:none;">
-            <div class="chat-tools">
-              <button class="btn btn-ghost" id="chatNewChatBtn" type="button" title="Start a new conversation">New chat</button>
-              <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message"></select>
-            </div>
             <div id="chatLog"></div>
+            <!-- The context controls: the conversation's active model, the
+                 per-model reasoning effort (only when the model's profile
+                 supports one), and the context-window usage bar. -->
+            <div class="chat-ctx">
+              <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message"></select>
+              <select id="effortSelect" hidden title="Reasoning effort — how hard the model thinks (this model's supported levels)"></select>
+              <div class="ctx-viz" id="ctxViz" hidden title="Context window usage for this conversation">
+                <div class="ctx-bar"><div class="ctx-fill" id="ctxFill"></div></div>
+                <span class="ctx-label" id="ctxLabel"></span>
+              </div>
+            </div>
             <form id="chat">
               <input id="message" placeholder="Say something&hellip;" autocomplete="off">
               <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
             </form>
+          </section>
+
+          <!-- The dedicated search page: searches everything bevin has on
+               the user (conversations, profile, memories), with a scope
+               selector for future advanced scopes (a specific workspace). -->
+          <section class="page-card" id="searchPage" style="display:none;">
+            <div class="eyebrow">Search</div>
+            <h3 style="margin:.3rem 0 .2rem;">Search everything</h3>
+            <p class="muted" style="margin-top:.2rem;">
+              Across all of your data — conversations, your profile, and bevin's
+              memories. Scope it to a workspace once workspaces land.
+            </p>
+            <form id="searchForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.6rem;">
+              <input id="searchInput" placeholder="What are you looking for?" autocomplete="off" style="flex:1; min-width:12rem;">
+              <select id="scopeSelect" title="Search scope" style="width:auto; max-width:12rem;">
+                <option value="">All my data</option>
+              </select>
+              <button class="btn btn-primary" type="submit">Search</button>
+            </form>
+            <div id="searchResults" class="search-results" hidden></div>
+          </section>
+
+          <!-- The profile page: the profile bevin has of the user (what it
+               knows), the user's own settings (email), and the persona list
+               (the editor ships later — the section is stubbed in). -->
+          <section class="page-card" id="profilePage" style="display:none;">
+            <div class="eyebrow">Profile</div>
+            <h3 style="margin:.3rem 0 .2rem;">Your profile</h3>
+            <div class="profile-section">
+              <h4>What bevin knows about you</h4>
+              <div id="profileFacts" class="profile-facts"></div>
+            </div>
+            <div class="profile-section">
+              <h4>Your settings</h4>
+              <label for="emailInput">Email for notifications</label>
+              <div style="display:flex; gap:.5rem; flex-wrap:wrap;">
+                <input id="emailInput" type="email" placeholder="you@example.com" style="flex:1; min-width:12rem;">
+                <button class="btn" id="emailSaveBtn" type="button">Save</button>
+              </div>
+              <span id="emailMsg" class="muted" style="font-size:.85rem;"></span>
+            </div>
+            <div class="profile-section">
+              <h4>Personas</h4>
+              <div id="personaList" class="persona-list"></div>
+              <button class="btn btn-ghost" id="addPersonaBtn" type="button" disabled title="The persona editor is on its way">+ Add persona</button>
+            </div>
           </section>
         </div>
       </div>
@@ -161,38 +221,64 @@
   <script src="/markdown.js"></script>
   <script>
     var root = document.documentElement;
-    var toggle = document.getElementById("themeToggle");
-    toggle.addEventListener("click", function () {
-      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-      try { localStorage.setItem("bevin-theme", next); } catch (e) {}
-    });
+    function $(id) { return document.getElementById(id); }
 
-    // ---- The sidebar: a persistent (collapsible) nav on desktop, an
-    // off-canvas drawer behind the same menu button on mobile / narrow
-    // portrait screens. The collapse state persists; the drawer state does
-    // not (it reopens deliberately each visit).
+    // ---- theme: the rail's toggle, defaulting to the system preference.
+    // A toggle click pins an explicit choice (persisted); until then the
+    // shell follows the OS theme, live.
+    (function () {
+      var mql = window.matchMedia("(prefers-color-scheme: dark)");
+      function followSystem() {
+        try { if (localStorage.getItem("bevin-theme")) return; } catch (e) {}
+        root.setAttribute("data-theme", mql.matches ? "dark" : "light");
+      }
+      if (mql.addEventListener) mql.addEventListener("change", followSystem);
+      else if (mql.addListener) mql.addListener(followSystem);
+      $("themeToggle").addEventListener("click", function () {
+        var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        try { localStorage.setItem("bevin-theme", next); } catch (e) {}
+      });
+    })();
+
+    // ---- shell: the rail + nested panel (desktop), the off-canvas drawer
+    // (mobile). The rail is always visible on desktop; on mobile the
+    // hamburger opens it (the panel rides next to it).
     function isMobileNav() {
       return window.matchMedia("(max-width: 839px)").matches;
     }
     function closeNav() { document.body.classList.remove("nav-open"); }
-    function setSidebarAuth(in_) {
-      // The nav (search, history, user actions) only makes sense once
-      // signed in — the signed-out state hides it (CSS).
-      $("sidebar").classList.toggle("signed-out", !in_);
+    function setRailAuth(in_) {
+      // The function nav (chats, search, profile, user actions) only makes
+      // sense once signed in — the signed-out state hides it (CSS).
+      $("rail").classList.toggle("signed-out", !in_);
+      $("profileBtn").hidden = !in_;
+      $("logoutBtn").hidden = !in_;
     }
-    document.getElementById("menuBtn").addEventListener("click", function () {
-      if (isMobileNav()) {
-        document.body.classList.toggle("nav-open");
-        return;
-      }
-      var collapsed = document.body.classList.toggle("sb-collapsed");
-      try { localStorage.setItem("bevin-sidebar", collapsed ? "closed" : "open"); } catch (e) {}
+    function setPanel(open) {
+      document.body.classList.toggle("panel-chats", !!open);
+      $("chatsBtn").setAttribute("aria-expanded", open ? "true" : "false");
+      $("chatsBtn").classList.toggle("active", !!open);
+      if (open && isMobileNav()) document.body.classList.add("nav-open");
+    }
+    var panelOpen = false;
+    function togglePanel() { setPanel(!panelOpen); panelOpen = !panelOpen; }
+
+    $("menuBtn").addEventListener("click", function () {
+      document.body.classList.toggle("nav-open");
     });
-    document.getElementById("scrim").addEventListener("click", closeNav);
-    document.getElementById("sbCloseBtn").addEventListener("click", closeNav);
+    $("scrim").addEventListener("click", closeNav);
+    // The panel's close × : on mobile it closes the whole drawer; on
+    // desktop it just collapses the nested panel.
+    $("panelCloseBtn").addEventListener("click", function () {
+      if (isMobileNav()) closeNav();
+      else if (panelOpen) { setPanel(false); panelOpen = false; }
+    });
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") closeNav();
+      if (e.key === "Escape") {
+        closeNav();
+        if (panelOpen) { setPanel(false); panelOpen = false; }
+      }
     });
     // A resize to desktop closes a stale mobile drawer.
     (function () {
@@ -201,8 +287,38 @@
       if (mq.addEventListener) mq.addEventListener("change", on);
       else if (mq.addListener) mq.addListener(on);
     })();
+    $("chatsBtn").addEventListener("click", function () {
+      if (!me) return;
+      togglePanel();
+    });
+    // Workspace + task board are stubs for now — they do nothing (the rail
+    // icon stays, so the layout is final when they land).
+    $("workspaceBtn").addEventListener("click", function () {});
+    $("taskboardBtn").addEventListener("click", function () {});
 
-    function $(id) { return document.getElementById(id); }
+    // ---- pages: the chat view, the search page, and the profile page share
+    // the stage; only one shows at a time.
+    var page = "chat";
+    function showPage(name) {
+      page = name;
+      $("chatCard").style.display = name === "chat" ? "" : "none";
+      $("searchPage").style.display = name === "search" ? "" : "none";
+      $("profilePage").style.display = name === "profile" ? "" : "none";
+      $("searchBtn").classList.toggle("active", name === "search");
+      $("profileBtn").classList.toggle("active", name === "profile");
+      if (name === "search") { loadScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
+      if (name === "profile") loadProfilePage();
+    }
+    $("searchBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("search");
+      if (isMobileNav()) closeNav();
+    });
+    $("profileBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("profile");
+      if (isMobileNav()) closeNav();
+    });
 
     // Messages are timestamped in UTC (new Date().toISOString()); the display
     // localizes to the browser's current locale.
@@ -236,15 +352,18 @@
     }
 
     // Creates the assistant message element (head + optional reasoning +
-    // bubble). The bubble is a markdown container: settled blocks (provably
-    // final, rendered once) + a live tail (re-rendered per frame). Returns
-    // the handles so the stream can fill them incrementally.
+    // bubble + the perf stats line). The bubble is a markdown container:
+    // settled blocks (provably final, rendered once) + a live tail
+    // (re-rendered per frame). Returns the handles so the stream can fill
+    // them incrementally.
     function startAssistantMsg() {
       var m = document.createElement("div");
       m.className = "msg msg-assistant";
       // The bubble starts with an animated "Thinking…" placeholder (removed
-      // on the first paint, when real content lands).
-      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><div class="bubble md-bubble"><span class="thinking">Thinking<span class="tdot">.</span><span class="tdot">.</span><span class="tdot">.</span></span><div class="md-tail"></div></div>';
+      // on the first paint, when real content lands). The stats line under
+      // the bubble is filled live while the reply streams, then finalized
+      // from the done event's timing + usage.
+      m.innerHTML = '<div class="msg-head"><span class="who">bevin</span><span class="when"></span></div><details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details><div class="bubble md-bubble"><span class="thinking">Thinking<span class="tdot">.</span><span class="tdot">.</span><span class="tdot">.</span></span><div class="md-tail"></div></div><div class="msg-stats" hidden></div>';
       var d = new Date();
       var when = m.querySelector(".when");
       when.textContent = fmtWhen(d);
@@ -256,10 +375,44 @@
         pre: m.querySelector("details.reasoning pre"),
         bubble: m.querySelector(".bubble"),
         tail: m.querySelector(".md-tail"),
+        stats: m.querySelector(".msg-stats"),
         buf: "",
         cut: 0,
-        raf: 0
+        raf: 0,
+        t0: 0, // first delta (the live tok/s estimate starts here)
+        lastEst: 0
       };
+    }
+
+    // Live perf estimate while the reply streams: the text length is a
+    // ~4-chars/token estimate of the completion so far, over the elapsed
+    // time since the first delta. The done event replaces this with the
+    // exact numbers (server timing + the API's usage report).
+    function liveStats(a) {
+      if (!a.t0 || !a.buf) return;
+      var secs = (performance.now() - a.t0) / 1000;
+      if (secs < 0.3) return; // too early to mean anything
+      var est = Math.max(1, Math.round(a.buf.length / 4));
+      a.lastEst = est;
+      var tokps = est / secs;
+      a.stats.hidden = false;
+      a.stats.textContent = "≈ " + (tokps >= 100 ? Math.round(tokps) : tokps.toFixed(1)) + " tok/s · streaming…";
+    }
+    function finalStats(a, p) {
+      // p: the done event ({elapsed_ms, ttft_ms, usage}).
+      a.stats.hidden = false;
+      var parts = [];
+      var elapsed = p.elapsed_ms;
+      var ttft = p.ttft_ms;
+      if (ttft > 0) parts.push((ttft / 1000).toFixed(1) + "s to first token");
+      if (p.usage && p.usage.completion_tokens) {
+        var gen = Math.max(1, elapsed - ttft); // generation time (excludes thinking)
+        var tokps = p.usage.completion_tokens / (gen / 1000);
+        parts.push(((tokps >= 100 ? Math.round(tokps) : tokps.toFixed(1))) + " tok/s");
+        parts.push(p.usage.completion_tokens + " tokens");
+      }
+      if (elapsed > 0) parts.unshift((elapsed / 1000).toFixed(1) + "s");
+      a.stats.textContent = parts.join(" · ");
     }
 
     // Streaming-markdown paint (the anti-flicker contract): blocks that are
@@ -280,6 +433,7 @@
       }
       while (a.tail.firstChild) a.tail.removeChild(a.tail.firstChild);
       BevinMD.render(full.slice(a.cut), a.tail, null);
+      liveStats(a);
       if (atBottom) log.scrollTop = log.scrollHeight;
     }
     function schedulePaint(a) {
@@ -327,13 +481,30 @@
       } catch (e) { /* model list is best-effort */ }
     }
 
-    function modelName(id) {
-      var n = "";
-      (models || []).some(function (m) {
-        if (m.id === id) { n = m.display_name || m.id; return true; }
+    function modelInfo(id) {
+      var m = null;
+      (models || []).some(function (x) {
+        if (x.id === id) { m = x; return true; }
         return false;
       });
-      return n;
+      return m;
+    }
+
+    // The context-window usage bar: used vs the model's total window. Seeded
+    // from the conversation's ContextUsage when it opens, then refined from
+    // each turn's API-reported prompt tokens (the done event's usage).
+    var ctxMax = 0;
+    function updateCtx(used, max) {
+      if (max > 0) ctxMax = max;
+      var viz = $("ctxViz");
+      if (!ctxMax) { viz.hidden = true; return; }
+      viz.hidden = false;
+      var pct = Math.max(0, Math.min(100, (used / ctxMax) * 100));
+      var fill = $("ctxFill");
+      fill.style.width = pct + "%";
+      fill.classList.toggle("warn", pct > 75 && pct <= 92);
+      fill.classList.toggle("danger", pct > 92);
+      $("ctxLabel").textContent = Math.round(used).toLocaleString() + " / " + ctxMax.toLocaleString() + " tokens (" + Math.round(pct) + "%)";
     }
 
     // Fills the model select: every available model, pre-selected to the
@@ -341,8 +512,10 @@
     // auto-disabled, removed — shows its stored id so nothing is hidden).
     // Disabled until the conversation exists: a brand-new conversation
     // takes its model at creation (the user's default), so there is
-    // nothing to switch yet.
-    function buildModelSelect(activeID) {
+    // nothing to switch yet. effort is the conversation's stored reasoning-
+    // effort choice ("" = the model's own default).
+    var currentModelID = null; // the active model shown in the select
+    function buildModelSelect(activeID, effort) {
       var sel = $("modelSelect");
       sel.innerHTML = "";
       models.forEach(function (m) {
@@ -360,32 +533,68 @@
       sel.value = activeID || defaultModelID || (models.length ? models[0].id : "");
       currentModelID = activeID || null; // the conversation's own model (null = not created yet)
       sel.disabled = !convID || !models.length;
+      buildEffortSelect(activeID, effort || "");
     }
 
-    // Reads the open conversation's row (title, active model) and points
-    // the model select at it. A 404 means the conversation no longer
-    // exists (deleted elsewhere) — clear the local reference and start
-    // fresh rather than posting into a dead conversation.
+    // The reasoning-effort dropdown: populated from the active model's
+    // profile (each model adapts to its own API, or takes no explicit
+    // effort at all). HIDDEN when the model's profile declares no levels —
+    // the control would be a lie otherwise. A stored level the model no
+    // longer supports shows the default (the request builder drops it).
+    var currentEffort = "";
+    function buildEffortSelect(activeID, stored) {
+      var sel = $("effortSelect");
+      var info = modelInfo(activeID);
+      var efforts = (info && info.reasoning_efforts) || [];
+      sel.innerHTML = "";
+      if (!efforts.length) {
+        sel.hidden = true;
+        currentEffort = "";
+        return;
+      }
+      sel.hidden = false;
+      var def = document.createElement("option");
+      def.value = "";
+      def.textContent = "effort: default";
+      sel.appendChild(def);
+      var supported = efforts.indexOf(stored) >= 0;
+      efforts.forEach(function (e) {
+        var o = document.createElement("option");
+        o.value = e;
+        o.textContent = "effort: " + e;
+        sel.appendChild(o);
+      });
+      sel.value = supported ? stored : "";
+      currentEffort = sel.value;
+      sel.disabled = !convID;
+    }
+
+    // Reads the open conversation's row (title, active model, stored effort,
+    // context usage) and points the controls at it. A 404 means the
+    // conversation no longer exists (deleted elsewhere) — clear the local
+    // reference and start fresh rather than posting into a dead one.
     async function loadConvMeta() {
-      if (!convID) { buildModelSelect(null); return; }
+      if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); return; }
       try {
         var r = await fetch("/api/conversations/" + convID);
         if (r.status === 404) {
           convID = null;
           try { localStorage.removeItem("bevin-conv"); } catch (e) {}
-          buildModelSelect(null);
+          buildModelSelect(null, "");
+          updateCtx(0, 0);
           return;
         }
         if (!r.ok) return;
         var j = await r.json();
-        buildModelSelect((j.conversation && j.conversation.active_model_id) || null);
+        var c = j.conversation || {};
+        buildModelSelect(c.active_model_id || null, c.reasoning_effort || "");
+        if (j.context) updateCtx(j.context.tokens || 0, j.context.max_tokens || 0);
       } catch (e) { /* best-effort — the chat itself still works */ }
     }
 
     // Model switch: PATCH the conversation's active model. Takes effect
     // from the NEXT message (an in-flight turn keeps its model). On
     // failure the select snaps back to the stored value.
-    var currentModelID = null; // the active model shown in the select
     $("modelSelect").addEventListener("change", async function () {
       var sel = this;
       if (!convID) return;
@@ -405,13 +614,62 @@
           return;
         }
         var j = await r.json();
-        currentModelID = (j.conversation && j.conversation.active_model_id) || next;
-        buildModelSelect(currentModelID);
+        var c = j.conversation || {};
+        currentModelID = c.active_model_id || next;
+        buildModelSelect(currentModelID, c.reasoning_effort || "");
+        // The old effort choice may not be valid for the new model — clear
+        // it so the stored state matches what will actually run.
+        if (c.reasoning_effort) {
+          var info = modelInfo(currentModelID);
+          var efforts = (info && info.reasoning_efforts) || [];
+          if (efforts.indexOf(c.reasoning_effort) < 0) {
+            try {
+              await fetch("/api/conversations/" + convID, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ reasoning_effort: "" })
+              });
+              buildModelSelect(currentModelID, "");
+            } catch (e) { /* the request builder drops it anyway */ }
+          }
+        }
+        loadConvMeta(); // re-sync from the server (the source of truth)
       } catch (err) {
         sel.value = before;
         addErrorMsg("⚠ Could not switch model: " + err.message);
       } finally {
-        loadConvMeta(); // re-sync from the server (the source of truth)
+        sel.disabled = !convID || !models.length;
+      }
+    });
+
+    // Reasoning-effort switch: PATCH the conversation's stored choice ("" =
+    // the model's own default). The server validates it against the model's
+    // profile levels, so a bad value can't reach the wire.
+    $("effortSelect").addEventListener("change", async function () {
+      var sel = this;
+      if (!convID) return;
+      var before = currentEffort;
+      var next = sel.value;
+      sel.disabled = true;
+      try {
+        var r = await fetch("/api/conversations/" + convID, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reasoning_effort: next })
+        });
+        if (!r.ok) {
+          var je = {}; try { je = await r.json(); } catch (e) {}
+          sel.value = before; // revert
+          addErrorMsg("⚠ Could not set reasoning effort: " + (je.error || ("HTTP " + r.status)));
+          return;
+        }
+        var j = await r.json();
+        currentEffort = (j.conversation && j.conversation.reasoning_effort) || next;
+      } catch (err) {
+        sel.value = before;
+        addErrorMsg("⚠ Could not set reasoning effort: " + err.message);
+      } finally {
+        sel.disabled = !convID;
       }
     });
 
@@ -430,6 +688,7 @@
       // while the model thinks, not on the first token. If the turn fails
       // before any content lands, the placeholder bubble is discarded.
       var asst = startAssistantMsg();
+      asst.t0 = 0;
       var reasoning = "";
       try {
         if (!convID) {
@@ -442,8 +701,8 @@
           if (!cr.ok) { var je = {}; try { je = await cr.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + cr.status)); }
           convID = (await cr.json()).id;
           try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
-          loadConvMeta(); // the conversation exists now: the switcher unlocks
-          refreshHistory(); // the sidebar list always reflects the open conversation
+          loadConvMeta(); // the conversation exists now: the controls unlock
+          refreshHistory(); // the panel list always reflects the open conversation
         }
         var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
           method: "POST",
@@ -490,6 +749,7 @@
                 if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
               }
               if (p.delta) {
+                if (!asst.t0) asst.t0 = performance.now(); // live stats start on the first content
                 asst.buf += p.delta;
                 schedulePaint(asst);
               }
@@ -518,6 +778,10 @@
                 if (asst.raf) asst.raf = 0;
                 if (asst.cut < asst.buf.length) paint(asst);
               }
+              finalStats(asst, p);
+              // Refine the context usage from the API's own report (the
+              // prompt size of the call that just ran).
+              if (p.usage && p.usage.prompt_tokens) updateCtx(p.usage.prompt_tokens, ctxMax);
             } else if (evt === "error") {
               throw new Error(p.error || "stream error");
             }
@@ -529,6 +793,7 @@
         }
       } catch (err) {
         if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
+        else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
         addErrorMsg("⚠ " + err.message);
       } finally {
         sending = false;
@@ -541,26 +806,32 @@
       $("loginCard").style.display = "";
       $("onboardCard").style.display = "none";
       $("chatCard").style.display = "none";
-      $("logoutBtn").hidden = true;
-      $("adminSetupLink").hidden = true;
-      $("userChip").textContent = "signed out";
-      setSidebarAuth(false);
+      $("searchPage").style.display = "none";
+      $("profilePage").style.display = "none";
+      setRailAuth(false);
       showOauthLogin();
+    }
+
+    function userName() {
+      return (me && (me.display_name || me.handle)) || "you";
     }
 
     function showChat() {
       $("loginCard").style.display = "none";
       $("onboardCard").style.display = "none";
+      $("searchPage").style.display = "none";
+      $("profilePage").style.display = "none";
       $("chatCard").style.display = "";
-      $("logoutBtn").hidden = false;
-      $("adminSetupLink").hidden = !(me && me.role === "admin");
-      $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
-      setSidebarAuth(true);
+      page = "chat";
+      $("searchBtn").classList.remove("active");
+      $("profileBtn").classList.remove("active");
+      $("userName").textContent = "@" + userName();
+      setRailAuth(true);
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       // The select shows the conversation's OWN model (the server default
       // only before it exists) — the model list must land first.
       loadModels().then(loadConvMeta);
-      refreshHistory(); // the sidebar always shows the conversation list
+      refreshHistory(); // the panel always shows the conversation list
       loadHistory();
     }
 
@@ -577,7 +848,7 @@
         var r = await fetch("/api/conversations/" + convID + "/messages");
         if (!r.ok) return;
         var d = await r.json();
-        if (chatLog.children.length > 0) return; // chat started meanwhile
+        if ($("chatLog").children.length > 0) return; // chat started meanwhile
         (d.messages || []).forEach(function (m) {
           if (m.role === "user") {
             addUserMsg(m.content, m.created_at);
@@ -631,10 +902,10 @@
       $("loginCard").style.display = "none";
       $("onboardCard").style.display = "";
       $("chatCard").style.display = "none";
-      $("logoutBtn").hidden = false;
-      $("adminSetupLink").hidden = !(me && me.role === "admin");
-      $("userChip").textContent = "@" + ((me && (me.display_name || me.handle)) || "you");
-      setSidebarAuth(true);
+      $("searchPage").style.display = "none";
+      $("profilePage").style.display = "none";
+      $("userName").textContent = "@" + userName();
+      setRailAuth(true);
       $("obErr").textContent = "";
       $("obName").value = (state && state.display_name) || (me && me.display_name) || "";
       // Model select: the enabled main models, pre-selected to the server
@@ -650,7 +921,6 @@
         });
         if (j.default) sel.value = j.default;
       }).catch(function () { /* select stays empty = server default */ });
-      scrollChat();
       setTimeout(function () { $("obName").focus(); }, 350);
     }
 
@@ -692,11 +962,6 @@
         $("obErr").textContent = err.message || err || "could not finish setup — try again";
       });
     }
-
-    // Boot: health line + session check (decides login vs chat).
-    fetch("/health").then(function (r) { return r.json(); })
-      .then(function (j) { $("health").textContent = "health " + (j.status || "ok") + " · " + fmtWhen(new Date(j.time || Date.now())); })
-      .catch(function () { $("health").textContent = "offline (no server)"; });
 
     // External-IdP (OAuth) sign-in: probe whether it is enabled; the button
     // appears below the password form on the login card (the server is always
@@ -753,36 +1018,33 @@
       showLogin();
     });
 
-    // New conversation: two entry points (the sidebar nav and the chat
-    // tools row, so it stays reachable when the sidebar is collapsed).
+    // New conversation: the rail's + icon (and the panel's New chat
+    // button) start one — the chat view's tools row no longer carries it.
     function startNewChat() {
       if (sending) return;
       convID = null;
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
-      buildModelSelect(null); // the (future) conversation takes the default model
+      buildModelSelect(null, "");
+      updateCtx(0, 0);
       addNote("New conversation started.");
+      showPage("chat");
       refreshHistory();
       closeNav();
+      $("message").focus();
     }
-    $("newChatBtn").addEventListener("click", startNewChat);
-    $("chatNewChatBtn").addEventListener("click", startNewChat);
-
-    // Conversation search (semantic — the per-user vector DB). The form
-    // lives in the sidebar; results render above the conversation list
-    // (with a clear ×), and clicking a hit opens that conversation (the
-    // same open path as a fresh page load).
-    $("clearSearchBtn").addEventListener("click", function () {
-      $("searchResults").hidden = true;
-      $("searchResultsList").innerHTML = "";
+    $("newChatBtn").addEventListener("click", function () {
+      if (!me) return;
+      startNewChat();
     });
+    $("panelNewChatBtn").addEventListener("click", startNewChat);
 
     // Conversation history: the per-user list (GET /api/conversations),
-    // most recently active first, always visible in the sidebar. A row
-    // opens that conversation (the same path as a search hit); its ×
-    // deletes it (message rows + indexed vectors, server-side). The
-    // store's timestamps are UTC "YYYY-MM-DD HH:MM:SS" — parseUtc
-    // normalizes them for the local display.
+    // most recently active first, rendered in the chats panel. A row opens
+    // that conversation (the same open path as a fresh page load); its ×
+    // deletes it (message rows + indexed vectors, server-side). The store's
+    // timestamps are UTC "YYYY-MM-DD HH:MM:SS" — parseUtc normalizes them
+    // for the local display.
     function parseUtc(s) {
       if (!s) return null;
       var d = new Date(String(s).replace(" ", "T") + "Z");
@@ -849,7 +1111,7 @@
           });
           row.addEventListener("click", function () {
             if (c.id !== convID) openConversation(c.id);
-            closeNav(); // picking a conversation returns to the chat (mobile drawer)
+            if (isMobileNav()) closeNav(); // picking a conversation returns to the chat (mobile drawer)
           });
           row.appendChild(title);
           row.appendChild(when);
@@ -865,29 +1127,63 @@
       }
     }
 
+    // ---- the dedicated search page. One query fans out server-side across
+    // the user's data (conversations semantically, memories + profile
+    // lexically, the selected workspace's files by name/path) and the
+    // results render grouped by source.
+    var lastWorkspaces = [];
+    function loadScopes() {
+      // Populate the scope selector with the user's workspaces (from the
+      // last search response — the default "all my data" scope needs none).
+      var keep = $("scopeSelect").value;
+      var sel = $("scopeSelect");
+      while (sel.options.length > 1) sel.remove(1);
+      (lastWorkspaces || []).forEach(function (w) {
+        var o = document.createElement("option");
+        o.value = w.id;
+        o.textContent = "workspace: " + (w.title || w.id);
+        sel.appendChild(o);
+      });
+      sel.value = (lastWorkspaces || []).some(function (w) { return w.id === keep; }) ? keep : "";
+    }
+
+    function searchSection(label, items, render) {
+      if (!items || !items.length) return;
+      var sec = document.createElement("div");
+      sec.className = "search-sec";
+      var h = document.createElement("div");
+      h.className = "search-sec-head";
+      h.textContent = label;
+      sec.appendChild(h);
+      items.forEach(function (it) { sec.appendChild(render(it)); });
+      $("searchResults").appendChild(sec);
+    }
+
     async function runSearch() {
       var q = $("searchInput").value.trim();
-      var box = $("searchResultsList");
+      var box = $("searchResults");
       if (!q) return;
-      $("searchResults").hidden = false;
+      var ws = $("scopeSelect").value;
+      box.hidden = false;
       box.innerHTML = '<p class="muted" style="font-size:.85rem;">searching…</p>';
       try {
-        var r = await fetch("/api/conversations/search?q=" + encodeURIComponent(q) + "&limit=10");
+        var r = await fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=10" + (ws ? "&workspace=" + encodeURIComponent(ws) : ""));
         if (!r.ok) { var je = {}; try { je = await r.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + r.status)); }
         var d = await r.json();
+        lastWorkspaces = d.workspaces || [];
+        loadScopes();
         box.innerHTML = "";
-        var hits = d.results || [];
-        if (!hits.length) {
-          box.innerHTML = '<p class="muted" style="font-size:.85rem;">no matches in your conversations.</p>';
-          return;
-        }
-        hits.forEach(function (h) {
+        var any = false;
+
+        searchSection("Conversations", d.conversations, function (h) {
+          any = true;
           var item = document.createElement("div");
+          item.className = "search-hit";
           item.style.cssText = "padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem; cursor:pointer;";
           item.onmouseenter = function () { item.style.background = "var(--hover, rgba(127,127,127,.08));"; };
           item.onmouseleave = function () { item.style.background = ""; };
           var head = document.createElement("div");
-          head.style.cssText = "font-size:.78rem; color:var(--muted, #666); margin-bottom:.15rem;";
+          head.style.cssText = "font-size:.78rem; color:var(--text-muted, #666); margin-bottom:.15rem;";
           var when = "";
           try { when = fmtWhen(new Date(h.created_at)); } catch (e) {}
           head.textContent = (h.role === "user" ? "you" : "bevin") + (when ? " · " + when : "") + " · " + (Math.round(h.score * 100) + "%");
@@ -898,9 +1194,53 @@
           body.textContent = text;
           item.appendChild(head);
           item.appendChild(body);
-          item.addEventListener("click", function () { openConversation(h.conversation_id); });
-          box.appendChild(item);
+          item.addEventListener("click", function () { showPage("chat"); openConversation(h.conversation_id); });
+          return item;
         });
+
+        searchSection("Memories", d.memories, function (m) {
+          any = true;
+          var item = document.createElement("div");
+          item.className = "search-hit";
+          item.style.cssText = "padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem;";
+          var head = document.createElement("div");
+          head.style.cssText = "font-size:.78rem; color:var(--text-muted, #666); margin-bottom:.15rem;";
+          head.textContent = "bevin's memory" + (m.facet ? " · " + m.facet : "");
+          var body = document.createElement("div");
+          body.style.cssText = "font-size:.9rem;";
+          body.textContent = m.statement || "";
+          item.appendChild(head);
+          item.appendChild(body);
+          return item;
+        });
+
+        searchSection("Profile", d.profile, function (kv) {
+          any = true;
+          var item = document.createElement("div");
+          item.className = "search-hit";
+          item.style.cssText = "padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem;";
+          var body = document.createElement("div");
+          body.style.cssText = "font-size:.9rem;";
+          body.textContent = kv.key + ": " + kv.value;
+          item.appendChild(body);
+          return item;
+        });
+
+        searchSection("Workspace files", d.workspace, function (f) {
+          any = true;
+          var item = document.createElement("div");
+          item.className = "search-hit";
+          item.style.cssText = "padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem;";
+          var body = document.createElement("div");
+          body.style.cssText = "font-size:.9rem;";
+          body.textContent = (f.name || f.relative_path) + (f.relative_path && f.name ? " · " + f.relative_path : "");
+          item.appendChild(body);
+          return item;
+        });
+
+        if (!any) {
+          box.innerHTML = '<p class="muted" style="font-size:.85rem;">no matches in your data.</p>';
+        }
       } catch (err) {
         box.innerHTML = "";
         var p = document.createElement("p");
@@ -911,6 +1251,89 @@
     }
     $("searchForm").addEventListener("submit", function (e) { e.preventDefault(); runSearch(); });
 
+    // ---- the profile page: the profile bevin has of the user (the durable
+    // KVs injected into its system prompt — literally what it knows), the
+    // user's own settings (email), and the persona list (stubbed: the editor
+    // ships later, the section renders its empty state).
+    async function loadProfilePage() {
+      try {
+        var r = await fetch("/api/profile");
+        if (!r.ok) return;
+        var d = await r.json();
+        $("userName").textContent = "@" + userName();
+        var facts = $("profileFacts");
+        facts.innerHTML = "";
+        var prof = d.profile || {};
+        var keys = Object.keys(prof);
+        if (!keys.length) {
+          facts.innerHTML = '<p class="muted" style="font-size:.85rem; margin:0;">bevin has no notes about you yet — it will keep them as you talk.</p>';
+        } else {
+          keys.sort().forEach(function (k) {
+            var row = document.createElement("div");
+            row.style.cssText = "display:flex; gap:.6rem; padding:.35rem .1rem; border-bottom:1px solid var(--border); font-size:.92rem;";
+            var kk = document.createElement("span");
+            kk.style.cssText = "font-weight:700; min-width:9rem;";
+            kk.textContent = k;
+            var vv = document.createElement("span");
+            vv.style.cssText = "flex:1;";
+            vv.textContent = prof[k];
+            row.appendChild(kk);
+            row.appendChild(vv);
+            facts.appendChild(row);
+          });
+        }
+        var mems = d.facts || [];
+        if (mems.length) {
+          var h2 = document.createElement("div");
+          h2.style.cssText = "font-weight:800; font-size:.8rem; letter-spacing:.05em; text-transform:uppercase; color:var(--text-muted); margin-top:.8rem;";
+          h2.textContent = "Memories";
+          facts.appendChild(h2);
+          mems.forEach(function (m) {
+            var row = document.createElement("div");
+            row.style.cssText = "padding:.3rem .1rem; font-size:.92rem; border-bottom:1px solid var(--border);";
+            row.textContent = (m.facet ? m.facet + ": " : "") + (m.statement || "");
+            facts.appendChild(row);
+          });
+        }
+        var personas = $("personaList");
+        personas.innerHTML = "";
+        var ps = d.personas || [];
+        if (!ps.length) {
+          personas.innerHTML = '<p class="muted" style="font-size:.85rem; margin:0 0 .5rem;">No personas yet — a persona is a named way bevin can talk to you. The editor is on its way.</p>';
+        } else {
+          ps.forEach(function (p) {
+            var row = document.createElement("div");
+            row.style.cssText = "padding:.4rem .5rem; border:1px solid var(--border); border-radius:8px; margin-bottom:.4rem; font-size:.92rem;";
+            row.textContent = p.name || String(p);
+            personas.appendChild(row);
+          });
+        }
+        var er = await fetch("/api/email");
+        if (er.ok) {
+          var ej = await er.json();
+          $("emailInput").value = ej.email || "";
+          if (!ej.configured) $("emailMsg").textContent = "Email notifications are not configured on this server yet.";
+          else $("emailMsg").textContent = "";
+        }
+      } catch (e) { /* the page renders its empty states */ }
+    }
+    $("emailSaveBtn").addEventListener("click", async function () {
+      var email = $("emailInput").value.trim();
+      $("emailMsg").textContent = "saving…";
+      try {
+        var r = await fetch("/api/email", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: email })
+        });
+        if (!r.ok) { var je = {}; try { je = await r.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + r.status)); }
+        $("emailMsg").textContent = "saved.";
+        setTimeout(function () { if ($("emailMsg").textContent === "saved.") $("emailMsg").textContent = ""; }, 2500);
+      } catch (err) {
+        $("emailMsg").textContent = "⚠ " + err.message;
+      }
+    });
+
     // openConversation switches the active conversation (from a history
     // row or a search hit): set the id, clear the log, and restore the
     // persisted history.
@@ -919,11 +1342,12 @@
       convID = id;
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
+      showPage("chat");
       loadHistory();
       loadModels().then(loadConvMeta);
-      refreshHistory(); // re-highlight the open row in the sidebar
+      refreshHistory(); // re-highlight the open row in the panel
       scrollChat();
-      closeNav();
+      if (isMobileNav()) closeNav();
       $("message").focus();
     }
 
