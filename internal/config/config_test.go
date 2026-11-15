@@ -164,6 +164,44 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateSandbox(t *testing.T) {
+	base := func(s Sandbox) *ServerConfig {
+		return &ServerConfig{
+			Models:  []Model{{Provider: "openai", BaseURL: "u", ModelID: "m"}},
+			Auth:    Auth{SessionSecret: "x"},
+			Sandbox: s,
+		}
+	}
+	// Enabled with the default network: no error, network filled in.
+	c := base(Sandbox{Enabled: true})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid sandbox: %v", err)
+	}
+	if c.Sandbox.Network != "veth" {
+		t.Fatalf("network = %q, want the veth default", c.Sandbox.Network)
+	}
+	// Explicit private is accepted.
+	if err := base(Sandbox{Enabled: true, Network: "private"}).Validate(); err != nil {
+		t.Fatalf("private network: %v", err)
+	}
+	// A typo in the network mode must fail loudly (not silently default).
+	if err := base(Sandbox{Enabled: true, Network: "nat"}).Validate(); err == nil {
+		t.Fatal("expected error for network mode typo")
+	}
+	// Core/memory bounds.
+	if err := base(Sandbox{Enabled: true, Cores: 129}).Validate(); err == nil {
+		t.Fatal("expected error for cores > 128")
+	}
+	if err := base(Sandbox{Enabled: true, MemoryMB: -1}).Validate(); err == nil {
+		t.Fatal("expected error for negative memory")
+	}
+	// Disabled: the values are not validated (an admin opt-out of a
+	// machine that cannot run containers keeps its file untouched).
+	if err := base(Sandbox{Enabled: false, Network: "nonsense", Cores: 999}).Validate(); err != nil {
+		t.Fatalf("disabled sandbox must not validate values: %v", err)
+	}
+}
+
 func TestCleanPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	got, err := CleanPath("~/bevin")

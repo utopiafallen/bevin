@@ -61,7 +61,32 @@ type ServerConfig struct {
 	Embedder         Embedder   `toml:"embedder" json:"embedder"`
 	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
 	Email            Email      `toml:"email" json:"email"`
+	Sandbox          Sandbox    `toml:"sandbox" json:"sandbox"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
+}
+
+// Sandbox is the per-user execution environment (server.toml [sandbox]):
+// each user gets a container from the OS's native container API (Windows:
+// HCS Hyper-V isolated containers; Linux: systemd-nspawn), mapped to the
+// user's data directory, with persistent per-user storage for installed
+// applications.
+//
+// Enabled is set by first-time setup (which checks the OS runtime and
+// prompts the user to enable it before proceeding). Pre-existing configs
+// without the section get the zero value (disabled) — the sandbox is
+// opt-in for already-running servers, enabled by a fresh setup.
+type Sandbox struct {
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// Network is the linux container networking mode: "veth" (default —
+	// a private per-container /24 with NATed outbound) or "private" (no
+	// network at all). Ignored on Windows (Hyper-V isolated containers
+	// get the host's NAT by default).
+	Network string `toml:"network" json:"network"`
+	// Cores is the per-container CPU count (0 = platform default).
+	Cores int `toml:"cores" json:"cores"`
+	// MemoryMB is the per-container memory cap in MiB (0 = platform
+	// default).
+	MemoryMB int `toml:"memory_mb" json:"memory_mb"`
 }
 
 // PublicURL derives an absolute public link for a server-relative path
@@ -330,6 +355,22 @@ func (c *ServerConfig) Validate() error {
 		}
 		if c.Email.FromAddress == "" {
 			c.Email.FromAddress = c.Email.Username
+		}
+	}
+	// Sandbox: defaults + loud validation of the values (a typo in the
+	// network mode must not silently fall back to a default).
+	if c.Sandbox.Enabled {
+		if c.Sandbox.Network == "" {
+			c.Sandbox.Network = "veth"
+		}
+		if c.Sandbox.Network != "veth" && c.Sandbox.Network != "private" {
+			return fmt.Errorf("sandbox.network: must be \"veth\" or \"private\" (got %q)", c.Sandbox.Network)
+		}
+		if c.Sandbox.Cores < 0 || c.Sandbox.Cores > 128 {
+			return fmt.Errorf("sandbox.cores: must be 0 (platform default) or 1-128 (got %d)", c.Sandbox.Cores)
+		}
+		if c.Sandbox.MemoryMB < 0 || c.Sandbox.MemoryMB > 1048576 {
+			return fmt.Errorf("sandbox.memory_mb: must be 0 (platform default) or 1-1048576 (got %d)", c.Sandbox.MemoryMB)
 		}
 	}
 	// Internal model IDs are what everything references (slot pools,

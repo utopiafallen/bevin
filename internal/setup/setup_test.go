@@ -19,6 +19,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/profile"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -102,6 +103,9 @@ func validAnswers(m *Manager) {
 	}})
 	_ = m.SetSidecars(config.Sidecars{Qdrant: "http://127.0.0.1:6333", LlamaServer: "http://127.0.0.1:8081"})
 	_ = m.SetEmail(config.Email{Enabled: true, SMTPHost: "smtp.example.com", SMTPPort: 587, Username: "bevin@example.com", Password: "pw", FromName: "Bevin"})
+	// The tests must not depend on this host's container runtime: opt
+	// out of the sandbox (the Finalize gate is covered by its own test).
+	_ = m.SetSkipSandbox(true)
 }
 
 func TestStateValidation(t *testing.T) {
@@ -287,6 +291,48 @@ func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
 		if m.ID == "m2" && m.AutoDisabled {
 			t.Fatal("new model should not be auto-disabled")
 		}
+	}
+}
+
+func TestFinalizeSandboxGate(t *testing.T) {
+	m, _, dir := newTestSetup(t)
+	validAnswers(m)
+	// The default (opt-out UNset — validAnswers sets it, so reset it): a
+	// fresh setup gates on the OS container runtime. The host's runtime
+	// state is host-dependent, so assert the matching outcome: no runtime
+	// → refused with remediation; runtime ready → the base is provisioned
+	// and [sandbox] saved enabled.
+	_ = m.SetSkipSandbox(false)
+	cfg, err := m.Finalize(context.Background())
+	rt := sandbox.Check(context.Background(), dir, sandbox.Config{Enabled: true, Network: "veth"})
+	if !rt.OK {
+		if err == nil {
+			t.Fatal("finalize succeeded on a host without a container runtime (no opt-out)")
+		}
+		if !strings.Contains(err.Error(), "container runtime is not ready") {
+			t.Fatalf("gate error = %q, want the runtime remediation", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("runtime ready, but finalize failed: %v", err)
+	}
+	if !cfg.Sandbox.Enabled {
+		t.Fatal("a gated fresh setup must save [sandbox] enabled")
+	}
+}
+
+// TestFinalizeSandboxSkip — the explicit opt-out: setup completes on ANY
+// host (runtime or not) and saves [sandbox] disabled.
+func TestFinalizeSandboxSkip(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	validAnswers(m) // sets SkipSandbox(true)
+	cfg, err := m.Finalize(context.Background())
+	if err != nil {
+		t.Fatalf("skip-sandbox finalize: %v", err)
+	}
+	if cfg.Sandbox.Enabled {
+		t.Fatal("the opt-out must save [sandbox] disabled")
 	}
 }
 

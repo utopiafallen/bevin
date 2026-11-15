@@ -23,6 +23,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
 	"github.com/utopiafallen/bevin/web"
@@ -69,6 +70,10 @@ type App struct {
 	// cfgMu guards cfg + mail: a config save (the admin config pages) swaps
 	// both in under the lock so readers never see a torn state.
 	cfgMu sync.RWMutex
+	// sandboxBk is the per-user container backend (nil = sandboxing
+	// disabled in the config, or unsupported on this platform). Guarded
+	// by cfgMu (rebuilt on a config save when the [sandbox] area changes).
+	sandboxBk sandbox.Backend
 	// oauthMu guards oauthStates: the single-use OAuth flow states.
 	oauthMu     sync.Mutex
 	oauthStates map[string]time.Time
@@ -92,6 +97,7 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	// hot-reloads the agent via applyConfig.
 	mail := email.New(cfg.Email)
 	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit, srv: srv, mail: mail}
+	a.buildSandbox(cfg)
 	a.routes()
 	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
 	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
@@ -143,6 +149,15 @@ func (a *App) routes() {
 	// The user's profile page: what bevin currently knows about them + their
 	// user-level settings (the chat UI's user-name button lands here).
 	mux.HandleFunc("GET /api/profile", a.requireAuth(a.userProfile))
+
+	// Per-user sandbox (container) API: the user's OWN environment only
+	// (the handle comes from the session). chatGate: regular users only —
+	// the admin has no environment.
+	mux.HandleFunc("GET /api/sandbox", a.chatGate(a.sandboxStatus))
+	mux.HandleFunc("POST /api/sandbox/ensure", a.chatGate(a.sandboxEnsure))
+	mux.HandleFunc("POST /api/sandbox/exec", a.chatGate(a.sandboxExec))
+	mux.HandleFunc("POST /api/sandbox/stop", a.chatGate(a.sandboxStop))
+	mux.HandleFunc("DELETE /api/sandbox", a.chatGate(a.sandboxRemove))
 	// First-time onboarding (regular users only — the admin has no user UI).
 	mux.HandleFunc("GET /api/onboarding", a.chatGate(a.onboardingStatus))
 	mux.HandleFunc("POST /api/onboarding", a.chatGate(a.onboardingComplete))
@@ -224,6 +239,9 @@ func (a *App) applyConfig(cfg *config.ServerConfig) (reloaded bool) {
 	a.cfg = cfg
 	a.mail = email.New(cfg.Email)
 	a.cfgMu.Unlock()
+	// The [sandbox] area can flip at runtime (an admin enabling it on an
+	// existing server) — rebuild the backend with the new config.
+	a.buildSandbox(cfg)
 	if err != nil {
 		log.Printf("bevin: agent reload after config save: %v", err)
 		return false

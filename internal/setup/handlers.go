@@ -62,6 +62,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/profiles", h.profiles)
 	mux.HandleFunc("/setup/sidecars/start", h.sidecarsStart)
 	mux.HandleFunc("/setup/sidecars/status", h.sidecarsStatus)
+	mux.HandleFunc("/setup/sandbox", h.sandboxStatus)
 	mux.HandleFunc("/setup/finalize", h.finalize)
 }
 
@@ -148,6 +149,9 @@ type advancePayload struct {
 	Aux      []config.AuxModel `json:"aux"`
 	Sidecars config.Sidecars   `json:"sidecars"`
 	Email    config.Email      `json:"email"`
+	// SkipSandbox is the sidecars step's explicit opt-out of per-user
+	// containers (the runtime check is shown on that step).
+	SkipSandbox bool `json:"skip_sandbox"`
 }
 
 func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +180,10 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	case "aux":
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
-		// display-only; the server auto-provisions the sidecars (no user state)
+		// display-only for the sidecars themselves (the server auto-
+		// provisions them); the step also carries the explicit container
+		// opt-out (SkipSandbox — see the Finalize gate in setup.go).
+		err = h.mgr.SetSkipSandbox(p.SkipSandbox)
 	case "email":
 		err = h.mgr.SetEmail(p.Email)
 	case "review":
@@ -408,6 +415,21 @@ func (h *Handler) sidecarsStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSidecarsStatus(w, h.mgr)
+}
+
+// sandboxStatus streams the sandbox (per-user containers) state: the OS
+// runtime readiness (the setup gate the user must clear) + the base image
+// provisioning progress. GET only; the server auto-starts the base
+// provisioning when the runtime is ready (the step is display-only).
+func (h *Handler) sandboxStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.mgr.SandboxStatus(r.Context()))
 }
 
 func (h *Handler) finalize(w http.ResponseWriter, r *http.Request) {

@@ -18,6 +18,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -38,6 +39,14 @@ type Answers struct {
 	Embedder config.Embedder   `json:"embedder"`
 	Sidecars config.Sidecars   `json:"sidecars"`
 	Email    config.Email      `json:"email"`
+	// SkipSandbox is the sidecars step's explicit opt-OUT of per-user
+	// containers: checked, setup proceeds on a machine whose container
+	// runtime is not ready (and saves [sandbox] disabled — the admin can
+	// enable it later, once the runtime is in place). Unchecked (the
+	// default), setup gates on the runtime + base image and saves the
+	// sandbox enabled. The gate is never silent: an unchecked setup on a
+	// machine without the runtime is refused with the remediation text.
+	SkipSandbox bool `json:"skip_sandbox"`
 }
 
 // ServerAnswers is the wizard's server step: the public base URI (the one
@@ -85,6 +94,11 @@ type Manager struct {
 	// provState (the in-flight / finished run). See provision.go.
 	provMu    sync.Mutex
 	provState *provisionState
+
+	// Sandbox base image provisioning (also streamed by the sidecars
+	// step): baseMu guards baseStateRun. See sandbox.go.
+	baseMu       sync.Mutex
+	baseStateRun *sandboxBaseState
 }
 
 // SetOnFinalize registers the post-edit-finalize hook (normal mode). See the
@@ -140,6 +154,12 @@ func (m *Manager) Cancel() {
 		m.provState = nil
 	}
 	m.provMu.Unlock()
+	m.baseMu.Lock()
+	if m.baseStateRun != nil && m.baseStateRun.running && !m.baseStateRun.done {
+		m.baseStateRun.cancel()
+	}
+	m.baseStateRun = nil
+	m.baseMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state = SetupState{}
@@ -358,6 +378,16 @@ func (m *Manager) SetEmail(e config.Email) error {
 	return nil
 }
 
+// SetSkipSandbox stores the sidecars step's explicit opt-out of per-user
+// containers (see Answers.SkipSandbox). No validation — it is a plain
+// boolean the wizard sends with the sidecars advance.
+func (m *Manager) SetSkipSandbox(skip bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.Answers.SkipSandbox = skip
+	return nil
+}
+
 // SetServer stores + validates the server step (the public base URI).
 func (m *Manager) SetServer(s ServerAnswers) error {
 	s.BaseURI = strings.TrimSpace(s.BaseURI)
@@ -535,6 +565,33 @@ func (m *Manager) Finalize(ctx context.Context) (*config.ServerConfig, error) {
 	// loopback endpoints into cfg.
 	if err := m.sidecars.EnsureAll(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("sidecars: %w", err)
+	}
+
+	// The per-user sandbox (containers) — the user's directive: the setup
+	// checks the OS container runtime and does NOT proceed until the user
+	// has enabled the runtime for their OS. The sidecars step showed the
+	// live status + remediation; this is the server-side enforcement. The
+	// one escape: an EXPLICIT opt-out (SkipSandbox) — a machine that
+	// cannot run containers (no root, no Hyper-V) can still install bevin,
+	// saving [sandbox] disabled; the admin can enable it later from the
+	// [sandbox] section once the runtime is in place.
+	m.mu.Lock()
+	skipSandbox := m.state.Answers.SkipSandbox
+	m.mu.Unlock()
+	if skipSandbox {
+		cfg.Sandbox = config.Sandbox{} // disabled (the zero value)
+	} else {
+		if rt := sandbox.Check(ctx, m.dataDir, sandbox.Config{Enabled: true, Network: "veth"}); !rt.OK {
+			return nil, SandboxGateError(rt)
+		}
+		// The base image (the OS the per-user containers are created from)
+		// must be provisioned before the config can point at it.
+		if err := m.WaitForSandboxBase(ctx); err != nil {
+			return nil, fmt.Errorf("sandbox: %w", err)
+		}
+		// Setup saves the sandbox ENABLED (the fresh-setup default; an
+		// admin can still switch it off later via the [sandbox] section).
+		cfg.Sandbox = config.Sandbox{Enabled: true, Network: "veth"}
 	}
 
 	// Derive the embedder from the (now provisioned) llama-server endpoint.

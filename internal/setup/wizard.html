@@ -97,7 +97,7 @@ let idx = 0;
 const PROBE_URL = "/setup/probe-model";
 const EMAIL_TEST_URL = "/setup/test-email";
 const PROFILES_URL = "/setup/profiles";
-let S = { admin: {handle:"",display_name:"",password:""}, server: {base_uri:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+let S = { admin: {handle:"",display_name:"",password:""}, server: {base_uri:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, skip_sandbox: false, sandboxStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 // ---- per-step renderers ----
 function renderServer(){ const d=el("div",{},
@@ -177,7 +177,91 @@ function renderSidecars(){
   d.append(el("div",{class:"sidecar-list", id:"sidecar_list"}));
   d.append(el("div",{class:"sidecar-banner", id:"sidecar_banner"}));
   renderSidecarList();
+  d.append(renderSandboxSection());
   return d;
+}
+// ---- the per-user containers (sandbox) on the sidecars step ----
+// The OS container runtime check (the setup gate the wizard prompts for) +
+// the base container image provisioning, streamed like the sidecars. The
+// skip checkbox is the explicit opt-out: ticked, setup proceeds on a
+// machine without the runtime and saves [sandbox] disabled (the admin can
+// enable it later from the [sandbox] section).
+function renderSandboxSection(){
+  const sbx = el("div",{id:"sbx_section", style:"margin-top:1.2rem"});
+  sbx.append(el("h4",{}, "Per-user containers"));
+  sbx.append(el("p",{class:"small"},"Each user gets their own container — a full OS with a shell, mapped to their data directory — where they can install software and run arbitrary code in their own environment. This uses the OS's native container runtime (Windows: Hyper-V isolation + the HCS service; Linux: systemd as init + systemd-nspawn, running as root)."));
+  sbx.append(el("div",{class:"sidecar-list", id:"sbx_list"}));
+  sbx.append(el("div",{class:"sidecar-banner", id:"sbx_banner"}));
+  const cb = el("input",{type:"checkbox", id:"sbx_skip"});
+  cb.checked = !!S.skip_sandbox;
+  cb.onchange = () => { S.skip_sandbox = cb.checked; renderSandboxPanel(); };
+  sbx.append(el("label",{style:"display:flex;gap:.5rem;align-items:center;margin-top:.6rem;cursor:pointer;font-size:.88rem"},
+    cb, el("span",{},"Skip per-user containers for now (the server can't run them here — I'll enable the runtime later, or not use containers)")));
+  renderSandboxPanel();
+  return sbx;
+}
+function renderSandboxPanel(){
+  const list = document.getElementById("sbx_list");
+  const banner = document.getElementById("sbx_banner");
+  if(!list || !banner) return;
+  const st = S.sandboxStatus;
+  const rt = st && st.runtime, base = st && st.base;
+  list.innerHTML = "";
+  const row = (status, name, detail, frac) => {
+    const r = el("div",{class:"sidecar-row"});
+    r.append(el("span",{class:"sidecar-icon " + status, text: statusIcon(status)}));
+    const body = el("div",{class:"sidecar-body"});
+    const head = el("div",{class:"sidecar-head"});
+    head.append(el("span",{class:"sidecar-name"}, name));
+    body.append(head);
+    if(detail) body.append(el("div",{class:"sidecar-msg"}, detail));
+    if(frac !== undefined){
+      const bar = el("div",{class:"sidecar-bar"});
+      const fill = el("div",{class:"sidecar-fill " + status});
+      fill.style.width = Math.round((frac||0) * 100) + "%";
+      bar.append(fill);
+      body.append(bar);
+    }
+    r.append(body);
+    list.append(r);
+  };
+  if(!rt){
+    row("pending", "OS container runtime", "Checking…");
+  } else if(rt.ok){
+    row("ready", "OS container runtime", rt.detail || "Ready.");
+  } else {
+    row("error", "OS container runtime", rt.detail || "Not ready.");
+  }
+  if(st && rt && (rt.ok || (base && base.status !== "pending"))){
+    const bstatus = base ? base.status : "pending";
+    if(bstatus === "ready") row("ready", "Base container image", "Provisioned — this is the OS the per-user containers are created from.");
+    else if(bstatus === "error") row("error", "Base container image", base.detail);
+    else row(bstatus === "provisioning" ? "downloading" : "pending", "Base container image", base.detail || "Downloading + extracting…", bstatus === "provisioning" ? base.progress : 0);
+  }
+  banner.className = "sidecar-banner";
+  banner.innerHTML = "";
+  if(S.skip_sandbox){
+    banner.classList.add("ok");
+    banner.append(el("span",{}, "Per-user containers are skipped — setup proceeds without them (enable them later from the [sandbox] section once the runtime is in place)."));
+  } else if(rt && !rt.ok){
+    banner.classList.add("err");
+    banner.append(el("span",{}, "The container runtime is not ready on this machine. Enable it (the instructions above) and refresh — or tick the skip box to install without containers for now. "));
+    const ref = el("button",{class:"sidecar-retry", onclick:"loadSandboxStatus()"},"Refresh check");
+    banner.append(ref);
+  } else if(st && rt && rt.ok){
+    const b = st.base;
+    if(!b || b.status === "ready" || b.status === "pending"){
+      banner.classList.add("ok");
+      banner.append(el("span",{}, b && b.status === "ready" ? "Per-user containers will be set up (base image provisioned)." : "The container runtime is ready — the base image will be provisioned as setup finishes."));
+    } else if(b.status === "error"){
+      banner.classList.add("err");
+      banner.append(el("span",{}, "The base container image failed to provision: " + (b.detail||"unknown error")));
+    } else {
+      banner.append(el("span",{}, "Provisioning the base container image… this downloads a small OS image and can take a few minutes."));
+    }
+  } else {
+    banner.append(el("span",{}, "Checking the container runtime…"));
+  }
 }
 const SIDECAR_PLACEHOLDER = [
   {kind:"qdrant", name:"Qdrant", desc:"Vector database — workspace file search", status:"pending", message:"Waiting…", percent:0},
@@ -254,10 +338,34 @@ async function pollSidecars(){
     const st = await api("GET", "/setup/sidecars/status");
     S.sidecarStatus = st;
     renderSidecarList();
-    if(st && st.done) stopSidecarPoll();
   }catch(e){ /* transient; keep polling */ }
+  loadSandboxStatus(); // the sandbox rows share the poll cadence
+  if(workDone()) stopSidecarPoll(); // stop only when BOTH the sidecars and the sandbox state are final
 }
 function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
+// workDone: the sidecars step's poll can stop only when the sidecars are
+// done AND the sandbox state is final (runtime not ready, skipped, or base
+// image ready/error — the base may still be downloading after the sidecars
+// finish, and the panel must keep streaming its progress).
+function workDone(){
+  const sc = S.sidecarStatus;
+  if(!(sc && sc.done)) return false;
+  const sb = S.sandboxStatus;
+  if(S.skip_sandbox) return true;
+  if(!sb || !sb.runtime) return false; // the check itself is still in flight
+  if(!sb.runtime.ok) return true; // gated at finalize; the skip box is the lever
+  return !!(sb.base && (sb.base.status === "ready" || sb.base.status === "error"));
+}
+// loadSandboxStatus fetches the container runtime check + base image state
+// (GET /setup/sandbox) — the server auto-starts the base provisioning when
+// the runtime is ready and the base is missing, so polling IS the driver.
+async function loadSandboxStatus(){
+  if(STEPS[idx] !== "sidecars") return;
+  try{
+    S.sandboxStatus = await api("GET", "/setup/sandbox");
+    renderSandboxPanel();
+  }catch(e){ /* transient; keep polling */ }
+}
 function renderEmail(){
   const d = el("div",{});
   d.append(el("h3",{}, "7. Email notifications (optional)"));
@@ -274,6 +382,7 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "8. Review & finish"));
   shown.modelDraft = stripUnderscore(shown.modelDraft);
   shown.aux = stripUnderscore(shown.aux);
   delete shown.sidecarStatus;
+  delete shown.sandboxStatus; // transient progress; skip_sandbox (a saved answer) stays
   d.append(el("pre",{class:"kv"}, JSON.stringify(shown, null, 2)));
   d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
   return d;
@@ -362,6 +471,8 @@ async function doNext(){
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
+  // The sidecars step also carries the explicit container opt-out
+  // (skip_sandbox) — the server gates finalize on it (or on the runtime).
   // The email step: a blank field uses its PLACEHOLDER default (port 587,
   // from name "bevin", from address = the username) — the server applies the
   // same defaults in validateEmail (source of truth). Normalize in place so
@@ -377,14 +488,14 @@ async function doNext(){
   // _detecting) so only the saved config crosses the wire.
   const auxPayload = (S.aux||[]).map(m => { const c = JSON.parse(JSON.stringify(m)); for(const k of Object.keys(c)) if(k.startsWith("_")) delete c[k]; return c; });
   try{
-    await api("POST","/setup/advance",{step, admin:S.admin, server:S.server, oauth:S.oauth, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload});
+    await api("POST","/setup/advance",{step, admin:S.admin, server:S.server, oauth:S.oauth, models:S.models, aux:auxPayload, sidecars:S.sidecars, email:emailPayload, skip_sandbox:!!S.skip_sandbox});
     msg("");
     if(step==="review") return;
     idx=Math.min(idx+1, STEPS.length-1); render();
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},server:{base_uri:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},server:{base_uri:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,skip_sandbox:false,sandboxStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
   msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go
