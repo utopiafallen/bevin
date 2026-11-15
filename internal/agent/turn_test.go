@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
 )
@@ -198,7 +199,7 @@ func TestBuildRequest(t *testing.T) {
 		{Role: roleUser, Content: "how are you", Seq: 3},
 		{Role: roleAssistant, Content: "fine", Seq: 4},
 	}
-	req, tokens := buildRequest(conv, msgs)
+	req, tokens := buildRequest(conv, msgs, profile.Default())
 	if len(req.System) != 2 {
 		t.Fatalf("System = %d parts, want 2 (frozen prompt + summary)", len(req.System))
 	}
@@ -231,7 +232,7 @@ func TestBuildRequestNoSummary(t *testing.T) {
 		{Role: roleUser, Content: "hello", Seq: 0},
 		{Role: roleAssistant, Content: "hi", Seq: 1},
 	}
-	req, _ := buildRequest(conv, msgs)
+	req, _ := buildRequest(conv, msgs, profile.Default())
 	if len(req.System) != 1 {
 		t.Fatalf("System = %d parts, want 1 (no summary yet)", len(req.System))
 	}
@@ -377,7 +378,7 @@ func TestBuildRequestWithTimestamp(t *testing.T) {
 		{Role: roleUser, Content: "hello", Seq: 0, CreatedAt: "2026-11-12T10:30:00.123456789Z"},
 		{Role: roleAssistant, Content: "hi", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
 	}
-	req, _ := buildRequest(conv, msgs)
+	req, _ := buildRequest(conv, msgs, profile.Default())
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
@@ -402,7 +403,7 @@ func TestBuildRequestWithReasoning(t *testing.T) {
 		{Role: roleUser, Content: "solve it", Seq: 0, CreatedAt: "2026-11-12T10:30:00Z"},
 		{Role: roleAssistant, Content: "the answer is 42", Reasoning: "step one: read the problem\nstep two: compute", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
 	}
-	req, _ := buildRequest(conv, msgs)
+	req, _ := buildRequest(conv, msgs, profile.Default())
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
@@ -423,9 +424,9 @@ func TestBuildRequestWithReasoning(t *testing.T) {
 }
 
 // TestAssistantFacingNoReasoningWhenDisabled verifies the override path: with
-// includeReasoning=false (a future ModelProfile policy) the Reasoning field is
-// left empty even when the message carries a stored trace, and a no-trace
-// message is identical either way.
+// includeReasoning=false (a profile whose ReasoningInTranscript is off) the
+// Reasoning field is left empty even when the message carries a stored
+// trace, and a no-trace message is identical either way.
 func TestAssistantFacingNoReasoningWhenDisabled(t *testing.T) {
 	m := store.Message{Role: roleAssistant, Content: "hi", Reasoning: "internal thought", CreatedAt: "2026-11-12T10:30:05Z"}
 	got := assistantFacing(m, false)
@@ -540,7 +541,7 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 		}
 	}
 	// Force a compaction (the prompt is well over the budget).
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default()); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	// The request builder now sends the summary + the last keepLastTurns
@@ -560,12 +561,12 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	if summaries == 0 {
 		t.Fatal("no summary produced — the compaction did not fire")
 	}
-	req, _ := buildRequest(conv, msgs)
+	req, _ := buildRequest(conv, msgs, profile.Default())
 	if len(req.System) < 2 {
 		t.Fatalf("request System = %d parts, want >= 2 (frozen prompt + summary)", len(req.System))
 	}
-	if len(req.Messages) != keepLastTurns {
-		t.Fatalf("request sent %d messages, want %d (the last keepLastTurns verbatim)", len(req.Messages), keepLastTurns)
+	if len(req.Messages) != profile.Default().KeepLastTurns {
+		t.Fatalf("request sent %d messages, want %d (the last KeepLastTurns verbatim)", len(req.Messages), profile.Default().KeepLastTurns)
 	}
 }
 

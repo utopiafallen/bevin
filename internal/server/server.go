@@ -164,6 +164,7 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /admin/users", a.adminUsersPage)
 	mux.HandleFunc("GET /admin/api/config", a.requireAdmin(a.adminConfig))
 	mux.HandleFunc("POST /admin/api/config", a.requireAdmin(a.adminConfigSave))
+	mux.HandleFunc("GET /admin/api/profiles", a.requireAdmin(a.adminProfiles))
 	mux.HandleFunc("POST /admin/api/probe-model", a.requireAdmin(a.adminProbeModel))
 	// Users panel: the full registry (both IdPs) + admin user management
 	// (add an internal account; enable/disable any account).

@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/prompt"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/qdrant"
@@ -126,6 +127,34 @@ func (a *Agent) providerFor(modelID string) (provider.Provider, bool) {
 	defer a.mu.Unlock()
 	p, ok := a.providers[modelID]
 	return p, ok
+}
+
+// profileFor resolves a model's MODEL PROFILE (its harness behavior bundle —
+// what it gets back of its own reasoning, how its context is framed and
+// compacted, how its prompt size is estimated) from live config: the model's
+// assigned profile name -> the registry (internal/profile). A profile
+// reassignment applies to the model's NEXT turn without a restart (same
+// liveness as slot edits). Config validation guarantees the name is known
+// (a blank self-heals to general at load/save; a set unknown name fails the
+// config load loudly), so the fallback is defensive only — a turn must not
+// crash on a config anomaly.
+func (a *Agent) profileFor(modelID string) profile.Profile {
+	a.cfgMu.Lock()
+	name := ""
+	for _, m := range a.cfg.Models {
+		if m.ID == modelID {
+			name = m.Profile
+			break
+		}
+	}
+	a.cfgMu.Unlock()
+	if name == "" {
+		return profile.Default()
+	}
+	if p, err := profile.Get(name); err == nil {
+		return p
+	}
+	return profile.Default()
 }
 
 // Reload swaps in a freshly saved config (the admin edit wizard's finalize):
@@ -586,19 +615,23 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if err != nil {
 		return conv.ID, "", err
 	}
-	req, tokens := buildRequest(conv, hist)
-	if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID)) {
+	// The conversation's active model's profile drives the request builder
+	// (its model-facing decisions — see buildRequest); it is resolved once
+	// per turn from live config.
+	prof := a.profileFor(conv.ActiveModelID)
+	req, tokens := buildRequest(conv, hist, prof)
+	if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 		// Pre-compact: the prompt is over budget before the call. Fold the
 		// older turns (incl. this message) into a summary so the call fits.
 		// No API usage yet for this call — fall back to the char/4 estimate.
-		if cerr := a.compactIfNeeded(ctx, us, conv, p, 0); cerr != nil {
+		if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof); cerr != nil {
 			return conv.ID, "", cerr
 		}
 		hist, err = us.ListMessages(convID)
 		if err != nil {
 			return conv.ID, "", err
 		}
-		req, _ = buildRequest(conv, hist)
+		req, _ = buildRequest(conv, hist, prof)
 	}
 	// Call the model (non-streaming or streaming). The wire request carries
 	// the provider-side model name, not the internal ID (they differ whenever
@@ -645,7 +678,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if res.Usage != nil {
 		actualTokens = res.Usage.TotalTokens
 	}
-	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens); cerr != nil {
+	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof); cerr != nil {
 		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil

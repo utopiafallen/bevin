@@ -14,6 +14,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/email"
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/provider"
 )
 
@@ -58,6 +59,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup/test-sidecar", h.testSidecar)
 	mux.HandleFunc("/setup/probe-model", h.probeModel)
 	mux.HandleFunc("/setup/test-email", h.testEmail)
+	mux.HandleFunc("/setup/profiles", h.profiles)
 	mux.HandleFunc("/setup/sidecars/start", h.sidecarsStart)
 	mux.HandleFunc("/setup/sidecars/status", h.sidecarsStatus)
 	mux.HandleFunc("/setup/finalize", h.finalize)
@@ -286,6 +288,22 @@ func (h *Handler) probeModel(w http.ResponseWriter, r *http.Request) {
 	// base_url is the RESOLVED variant (scheme + /v1 as tried) — the form
 	// adopts it so the saved config is the URL that actually answered.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models, "base_url": res.BaseURL})
+}
+
+// profiles lists the model profiles this build knows (name + description) —
+// the wizard's model forms' profile selects render from it, so the UI always
+// lists exactly what the binary's registry contains (a new profile ships in
+// the binary and appears in the forms automatically). Like the other /setup
+// routes, it is gated on the one-time setup token.
+func (h *Handler) profiles(w http.ResponseWriter, r *http.Request) {
+	if !h.gate(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": profile.List()})
 }
 
 // TestEmail sends a test email. When smtp carries a host, it sends through

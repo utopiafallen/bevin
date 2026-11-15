@@ -459,6 +459,85 @@ func TestAdminConfigEndpoints(t *testing.T) {
 	}
 }
 
+// TestAdminProfilesEndpoint — GET /admin/api/profiles lists this build's
+// registry (the admin models page's profile selects render from it): admin
+// gated, and the response is the single source of truth the UI renders.
+func TestAdminProfilesEndpoint(t *testing.T) {
+	a, _ := configApp(t)
+
+	// No session -> 403 (the admin gate).
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/api/profiles", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated profiles code = %d, want 403", w.Code)
+	}
+
+	// Admin -> the registry: general present, with a description, and every
+	// name resolvable (the UI builds its selects from this list).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/profiles", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("profiles code = %d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Profiles []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) == 0 {
+		t.Fatal("no profiles listed")
+	}
+	var sawGeneral bool
+	for _, p := range got.Profiles {
+		if p.Name == "general" {
+			sawGeneral = true
+		}
+		if p.Description == "" {
+			t.Fatalf("profile %q has no description (the forms show it under the select)", p.Name)
+		}
+	}
+	if !sawGeneral {
+		t.Fatalf("general missing from the registry listing: %+v", got.Profiles)
+	}
+
+	// The admin model read carries the profile field (general after the
+	// blank self-heal), so the forms preselect it.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("config read code = %d", w.Code)
+	}
+	var gotCfg struct {
+		Models []config.Model `json:"models"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &gotCfg)
+	if gotCfg.Models[0].Profile != "general" {
+		t.Fatalf("model profile = %q, want general (blank self-heals at load)", gotCfg.Models[0].Profile)
+	}
+
+	// A model save with an UNKNOWN profile is rejected (loud, at save) and
+	// does not clobber the saved config.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"models": []config.Model{{
+		ID: "m1", Provider: "openai", BaseURL: "http://127.0.0.1:1/v1", ModelID: "gpt-4o",
+		DisplayName: "GPT-4o", MaxContext: 128000, Slots: 1, Enabled: true, Profile: "no-such-profile",
+	}}}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-profile save code = %d, want 400", w.Code)
+	}
+	onDisk, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Models[0].Profile != "general" {
+		t.Fatalf("a rejected save clobbered the saved profile: %q", onDisk.Models[0].Profile)
+	}
+}
+
 // twoModelApp builds an App with two available models (the model-switch
 // tests need a second one to switch to) + a regular user "bob" with a live
 // session.

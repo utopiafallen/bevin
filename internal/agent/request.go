@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
 )
@@ -20,40 +21,42 @@ const (
 )
 
 // estimateTokens is a rough prompt-size estimate. There is no local tokenizer
-// (the models are external); ~4 chars/token is a reasonable rule of thumb for
-// English. It undercounts code/JSON, so the summarization budget (a fraction of
-// the model's max context) carries the headroom.
-func estimateTokens(s string) int {
+// (the models are external); the profile's CharsPerToken factor (general:
+// ~4 chars/token, a reasonable rule of thumb for English) undercounts
+// code/JSON, so the compaction budget (a fraction of the model's max context)
+// carries the headroom.
+func estimateTokens(s string, prof profile.Profile) int {
 	if s == "" {
 		return 0
 	}
-	t := len(s) / 4
+	t := len(s) / prof.CharsPerToken
 	if t < 1 {
 		t = 1
 	}
 	return t
 }
 
-// summarizeBudget is the prompt token count that triggers a compaction: 80% of
-// the model's max context (leaving room for the reply). A zero / unknown max
-// context falls back to a conservative default; the floor keeps a tiny context
-// from triggering on every message.
-func summarizeBudget(maxContext int) int {
+// budgetFloor is the minimum compaction budget: below it a prompt would
+// trigger a compaction on every message (a degenerate context config). A
+// universal guard, not model behavior — profiles set the FRACTION, the floor
+// is the harness refusing to run in a broken state.
+const budgetFloor = 512
+
+// summarizeBudget is the prompt token count that triggers a compaction: the
+// profile's trigger fraction of the model's max context (general: 80%,
+// leaving room for the reply). A zero / unknown max context falls back to a
+// conservative default; the floor keeps a tiny context from triggering on
+// every message.
+func summarizeBudget(maxContext int, prof profile.Profile) int {
 	if maxContext <= 0 {
 		maxContext = 8192
 	}
-	b := maxContext * 4 / 5
-	if b < 512 {
-		b = 512
+	b := int(float64(maxContext) * prof.CompactionTriggerFraction)
+	if b < budgetFloor {
+		b = budgetFloor
 	}
 	return b
 }
-
-// keepLastTurns is the number of the most recent turns (messages) that a
-// compaction preserves VERBATIM — it folds everything older into the summary
-// but leaves the last keepLastTurns as raw turns, so the chat resumes exactly
-// where it left off.
-const keepLastTurns = 5
 
 // timestampMarker returns the bracket-ready UTC timestamp for a message
 // (RFC3339; the raw CreatedAt when it doesn't parse). Empty when the message
@@ -114,30 +117,31 @@ func stripLeadingTranscriptTimestamp(s string) string {
 	return leadingTranscriptTimestamp.ReplaceAllString(s, "")
 }
 
-// reasoningInTranscript reports whether an assistant's stored reasoning
-// (thinking trace) is sent back to the model for this model — in the API's
-// native reasoning field for the turn (OAI wire: reasoning_content). Default:
-// YES — the model sees its own earlier reasoning for continuity. This is the
-// override point for the ModelProfile revision (tier 3, per-model harness
-// behavior): a profile that should not receive prior reasoning implements it
-// here.
-func reasoningInTranscript(modelID string) bool { return true }
+// (The per-model "does this model receive earlier reasoning traces" decision
+// was the free function reasoningInTranscript; it is now the profile's
+// ReasoningInTranscript — the model's assigned profile is the harness's ONE
+// source of per-model behavior.)
 
-// summaryFraming wraps a context summary so the model treats it as a record of
-// the conversation (for continuity), not a new instruction to follow.
-func summaryFraming(summaryText string) string {
-	return "The following is a summary of the conversation so far, provided for continuity. It records what has been discussed; it is not a new instruction. Continue from this context:\n\n" + summaryText
-}
+// summaryFraming moved to the model profile (Profile.SummaryFraming): the
+// text the model is given around its context summary is harness MODEL behavior
+// (a model-specific profile may frame it differently), so the general
+// profile owns the standard wording — see internal/profile.
 
 // buildRequest assembles the provider request for a conversation: the frozen
 // system prompt + the latest context summary (if any, as a second system part)
 // + the raw turns to send. When there's a summary, it covers the older turns
-// and the last keepLastTurns messages are sent verbatim (the chat resumes
-// exactly where it left off); when there's no summary, all the raw turns are
-// sent (up to the compaction budget). It returns the request + an estimated
-// token count of the prompt (for the compaction trigger). Full history is
-// retained in the store; this selects what each model call sees.
-func buildRequest(conv *store.Conversation, msgs []store.Message) (provider.ChatRequest, int) {
+// and the last KeepLastTurns messages (the profile's) are sent verbatim (the
+// chat resumes exactly where it left off); when there's no summary, all the
+// raw turns are sent (up to the compaction budget). It returns the request +
+// an estimated token count of the prompt (for the compaction trigger). Full
+// history is retained in the store; this selects what each model call sees.
+//
+// prof is the conversation's active model's model profile — the request
+// builder's model-facing decisions (what the model gets back of its own
+// reasoning, how the summary is framed, the estimate factor, the verbatim
+// tail) all come from it, so a model-specific profile changes the request
+// without the harness special-casing the model.
+func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.Profile) (provider.ChatRequest, int) {
 	// Latest summary (role=summary) — the last one in seq order (summaries are
 	// chained; the builder uses only the latest, which already folds in the rest).
 	latestSummarySeq := -1
@@ -172,32 +176,32 @@ func buildRequest(conv *store.Conversation, msgs []store.Message) (provider.Chat
 			}
 			turns = append(turns, m)
 		}
-		if len(turns) > keepLastTurns {
-			turns = turns[len(turns)-keepLastTurns:]
+		if len(turns) > prof.KeepLastTurns {
+			turns = turns[len(turns)-prof.KeepLastTurns:]
 		}
 	}
 
 	var sysParts []provider.ContentPart
-	tokens := estimateTokens(conv.FrozenSystemPrompt)
+	tokens := estimateTokens(conv.FrozenSystemPrompt, prof)
 	if conv.FrozenSystemPrompt != "" {
 		sysParts = append(sysParts, provider.ContentPart{Text: conv.FrozenSystemPrompt})
 	}
 	if latestSummary != nil {
-		fr := summaryFraming(latestSummary.Content)
+		fr := prof.SummaryFraming(latestSummary.Content)
 		sysParts = append(sysParts, provider.ContentPart{Text: fr})
-		tokens += estimateTokens(fr)
+		tokens += estimateTokens(fr, prof)
 	}
 	reqMsgs := make([]provider.Message, 0, len(turns))
-	// Whether this model receives earlier assistant reasoning traces (default
-	// yes — see reasoningInTranscript; the ModelProfile revision owns
-	// per-model overrides).
-	includeReasoning := reasoningInTranscript(conv.ActiveModelID)
+	// Whether this model receives earlier assistant reasoning traces — the
+	// profile's decision (general: yes — the model sees its own earlier
+	// reasoning for continuity).
+	includeReasoning := prof.ReasoningInTranscript
 	for _, m := range turns {
 		// Prepend the message's UTC timestamp (and replay the assistant's
 		// stored reasoning, when sent back) — the stored content is untouched.
 		pm := assistantFacing(m, includeReasoning)
 		reqMsgs = append(reqMsgs, pm)
-		tokens += estimateTokens(pm.Text + pm.Reasoning)
+		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 	}
 	return provider.ChatRequest{System: sysParts, Messages: reqMsgs}, tokens
 }

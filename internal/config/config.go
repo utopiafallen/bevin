@@ -18,6 +18,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/utopiafallen/bevin/internal/profile"
 )
 
 const (
@@ -127,7 +129,15 @@ type Model struct {
 	DisplayName string `toml:"display_name" json:"display_name"`
 	MaxContext  int    `toml:"max_context" json:"max_context"`
 	Slots       int    `toml:"slots" json:"slots"`
-	Enabled     bool   `toml:"enabled" json:"enabled"`
+	// Profile is the model's MODEL PROFILE (internal/profile): the named
+	// bundle of harness behavior applied while this model runs (what it gets
+	// back of its own reasoning, how its context is framed/compacted, ...).
+	// Blank = general (Validate self-heals — pre-existing configs have no
+	// profile field; the flat-v1 rule, no migrations). A SET unknown name is
+	// a loud config error (a typo silently changing harness behavior must
+	// never happen).
+	Profile string `toml:"profile" json:"profile"`
+	Enabled bool   `toml:"enabled" json:"enabled"`
 	// AutoDisabled is set by the agent when the provider reports this model is
 	// unavailable (e.g. the model was deleted/renamed upstream) and cleared when
 	// a later attempt succeeds. It is independent of the admin's Enabled flag:
@@ -160,6 +170,12 @@ type AuxModel struct {
 	BaseURL  string   `toml:"base_url" json:"base_url"`
 	APIKey   string   `toml:"api_key" json:"api_key"`
 	ModelID  string   `toml:"model_id" json:"model_id"`
+	// Profile is the model's MODEL PROFILE (internal/profile) — the same
+	// assignable surface as the main models (blank self-heals to general, a
+	// set unknown name is a loud config error). The perception calls consume
+	// it when the aux-model perception loop lands; the assignment exists now
+	// so the surface is uniform across both model kinds.
+	Profile string `toml:"profile" json:"profile"`
 }
 
 // Embedder is the local llama-server serving /v1/embeddings (embeddinggemma-2).
@@ -316,6 +332,15 @@ func (c *ServerConfig) Validate() error {
 		if c.Models[i].DisplayName == "" {
 			c.Models[i].DisplayName = c.Models[i].ModelID
 		}
+		// The model profile (internal/profile): blank self-heals to general
+		// (pre-existing configs have no profile field — the flat-v1 rule), a
+		// SET unknown name is a loud config error (a typo silently changing
+		// harness behavior must never happen).
+		if p, err := ResolveProfileName(fmt.Sprintf("models[%d]", i), c.Models[i].Profile); err != nil {
+			return err
+		} else {
+			c.Models[i].Profile = p
+		}
 		// Canonicalize the base URL (also repairs pre-existing files with a
 		// schemeless "host:port" — such a value made the provider client
 		// fail at request time with "unsupported protocol scheme").
@@ -323,6 +348,13 @@ func (c *ServerConfig) Validate() error {
 	}
 	for i := range c.Aux {
 		c.Aux[i].BaseURL = NormalizeBaseURL(c.Aux[i].BaseURL)
+		// The same profile resolution as the main models (uniform surface —
+		// see the models loop above).
+		if p, err := ResolveProfileName(fmt.Sprintf("aux[%d]", i), c.Aux[i].Profile); err != nil {
+			return err
+		} else {
+			c.Aux[i].Profile = p
+		}
 	}
 	// Required.
 	if len(c.Models) == 0 {
@@ -415,6 +447,22 @@ func ModelIDSlug(modelID string) string {
 		s = s[:40]
 	}
 	return s
+}
+
+// ResolveProfileName resolves a model's profile name: a blank becomes the
+// default profile (general — pre-existing configs have no profile field, the
+// flat-v1 rule: no migrations), and a set name must be known to the registry
+// (internal/profile) — an unknown name is a loud config error, so a typo can
+// never silently change the harness behavior a model runs under.
+func ResolveProfileName(where, name string) (string, error) {
+	n := strings.TrimSpace(name)
+	if n == "" {
+		return profile.General, nil
+	}
+	if _, err := profile.Get(n); err != nil {
+		return "", fmt.Errorf("server.toml: %s: %w", where, err)
+	}
+	return n, nil
 }
 
 // assignModelIDs fills any missing internal model IDs, deterministically

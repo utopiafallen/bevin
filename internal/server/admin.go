@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
 )
@@ -243,6 +244,14 @@ func (a *App) adminProbeModel(w http.ResponseWriter, r *http.Request) {
 	// base_url is the RESOLVED variant (scheme + /v1 as tried) — the form
 	// adopts it so the saved config is the URL that actually answered.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "provider": res.Provider, "models": res.Models, "base_url": res.BaseURL})
+}
+
+// adminProfiles lists the model profiles this build knows (name +
+// description) — the admin models page's profile selects (main + aux forms)
+// render from it, so the UI always lists exactly what the binary's registry
+// contains.
+func (a *App) adminProfiles(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"profiles": profile.List()})
 }
 
 // adminModelsPage / adminEmailPage are the gated entry points to the admin

@@ -293,7 +293,9 @@ func (m *Manager) SetModels(models []config.Model) error {
 
 // SetAux stores the aux perception models step. Base URLs are canonicalized
 // the same way as main models (the aux models dial the same provider
-// clients) and must be absolute http(s) URLs when present.
+// clients) and must be absolute http(s) URLs when present; each aux model's
+// profile gets the same resolution as the main models' (blank -> general,
+// unknown -> error) so the assignment surface is uniform.
 func (m *Manager) SetAux(aux []config.AuxModel) error {
 	for i := range aux {
 		if strings.TrimSpace(aux[i].BaseURL) != "" {
@@ -301,6 +303,11 @@ func (m *Manager) SetAux(aux []config.AuxModel) error {
 			if err := config.CheckBaseURL(fmt.Sprintf("aux[%d]", i), aux[i].BaseURL); err != nil {
 				return err
 			}
+		}
+		if p, err := config.ResolveProfileName(fmt.Sprintf("aux[%d]", i), aux[i].Profile); err != nil {
+			return err
+		} else {
+			aux[i].Profile = p
 		}
 	}
 	m.mu.Lock()
@@ -628,6 +635,15 @@ func validateModels(models []config.Model) error {
 		seen[m.ID] = true
 		if m.Slots < 1 {
 			m.Slots = 1
+		}
+		// The model profile (internal/profile): blank self-heals to general
+		// (the config file gains the field with this revision; pre-existing
+		// files have none), a set unknown name is rejected here (early, with
+		// a good error) and again by config.Validate on load.
+		if p, err := config.ResolveProfileName(fmt.Sprintf("models[%d]", i), m.Profile); err != nil {
+			return err
+		} else {
+			m.Profile = p
 		}
 		if m.Enabled {
 			enabled++

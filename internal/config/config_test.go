@@ -111,7 +111,7 @@ func TestValidateBaseURLSelfHeal(t *testing.T) {
 	}
 	// Aux bases are healed the same way.
 	a := &ServerConfig{
-		Auth: Auth{Mode: "internal", SessionSecret: "x"},
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
 		Models: []Model{{Provider: "llama", BaseURL: "http://h:1/v1", ModelID: "m"}},
 		Aux:    []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "127.0.0.1:8081", ModelID: "v"}},
 	}
@@ -142,6 +142,11 @@ func TestValidate(t *testing.T) {
 	}
 	if c.Bind != "0.0.0.0" {
 		t.Fatalf("bind defaulted = %q", c.Bind)
+	}
+	// A model with no profile (pre-existing configs have no profile field)
+	// self-heals to general on validate (the flat-v1 rule).
+	if c.Models[0].Profile != "general" {
+		t.Fatalf("profile = %q, want the general default (blank self-heals)", c.Models[0].Profile)
 	}
 
 	bad := &ServerConfig{Models: []Model{{Provider: "openai", BaseURL: "u", ModelID: "m"}}}
@@ -442,5 +447,80 @@ func TestResolveDisplayNameAutoDisabled(t *testing.T) {
 	// A display name with only auto-disabled models -> not found.
 	if _, ok := ResolveDisplayName([]Model{{ID: "z", DisplayName: "Off", Enabled: true, AutoDisabled: true}}, "Off", nil); ok {
 		t.Fatal("auto-disabled-only display name should not resolve")
+	}
+}
+
+// TestResolveProfileName pins the profile resolution contract: blank
+// self-heals to general (no migration), a known name passes through
+// (whitespace trimmed), and an UNKNOWN name is a loud error (a typo'd
+// profile silently changing a model's harness behavior must never happen).
+func TestResolveProfileName(t *testing.T) {
+	got, err := ResolveProfileName("models[0]", "")
+	if err != nil {
+		t.Fatalf("blank: %v", err)
+	}
+	if got != "general" {
+		t.Fatalf("blank = %q, want general (self-heal)", got)
+	}
+	got, err = ResolveProfileName("models[0]", "  general  ")
+	if err != nil {
+		t.Fatalf("known: %v", err)
+	}
+	if got != "general" {
+		t.Fatalf("whitespace-trimmed = %q, want general", got)
+	}
+	if _, err := ResolveProfileName("models[0]", "no-such-profile"); err == nil {
+		t.Fatal("unknown profile accepted (must fail loudly)")
+	}
+}
+
+// TestProfileRoundTrip pins that the profile field survives save+load (the
+// toml + json tags) and that an unknown profile in a saved file is refused at
+// LOAD (not just at save) — the config file is the commit of record.
+func TestProfileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{testModel()},
+	}
+	cfg.Models[0].Profile = "general"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Models[0].Profile != "general" {
+		t.Fatalf("round-trip profile = %q, want general", got.Models[0].Profile)
+	}
+	// An aux model's profile round-trips too (the assignment surface is
+	// uniform between main + aux).
+	cfg.Aux = []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v"}}
+	cfg.Aux[0].Profile = "general"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Aux[0].Profile != "general" {
+		t.Fatalf("aux round-trip profile = %q, want general", got.Aux[0].Profile)
+	}
+	// A hand-edited config with an unknown profile must be refused at load.
+	bad, _ := os.ReadFile(Path(dir))
+	bad = []byte(strings.Replace(string(bad), "profile = \"general\"", "profile = \"bogus\"", 1))
+	if err := os.WriteFile(Path(dir), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Fatal("load accepted an unknown profile (must fail loudly)")
 	}
 }

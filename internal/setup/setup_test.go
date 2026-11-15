@@ -18,6 +18,7 @@ import (
 
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -715,5 +716,104 @@ func TestSetAuxCanonicalizes(t *testing.T) {
 	// A rejected aux does not clobber the stored one.
 	if got := m.Answers().Aux[0].BaseURL; got != "http://127.0.0.1:8081/v1" {
 		t.Fatalf("a rejected aux clobbered the stored one: %q", got)
+	}
+}
+
+// TestSetModelsProfileSelfHeal — a model saved without a profile gets general
+// (pre-existing configs have no profile field — the flat-v1 rule), a known
+// name passes (whitespace trimmed), and an UNKNOWN profile is rejected before
+// it is stored (a typo'd profile silently changing a model's harness behavior
+// must fail loudly, not self-heal).
+func TestSetModelsProfileSelfHeal(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	mk := func(profile string) config.Model {
+		return config.Model{ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1",
+			APIKey: "test", ModelID: "gpt-4o", DisplayName: "GPT", Profile: profile, Enabled: true}
+	}
+	// Blank -> general.
+	if err := m.SetModels([]config.Model{mk("")}); err != nil {
+		t.Fatalf("set models (blank): %v", err)
+	}
+	if got := m.Answers().Models[0].Profile; got != "general" {
+		t.Fatalf("blank profile = %q, want general (self-heal)", got)
+	}
+	// Known (whitespace-trimmed) passes as-is.
+	if err := m.SetModels([]config.Model{mk("  general  ")}); err != nil {
+		t.Fatalf("set models (known): %v", err)
+	}
+	if got := m.Answers().Models[0].Profile; got != "general" {
+		t.Fatalf("known profile = %q, want the trimmed general", got)
+	}
+	// Unknown -> rejected, the stored answer is untouched.
+	if err := m.SetModels([]config.Model{mk("no-such-profile")}); err == nil {
+		t.Fatal("an unknown profile was accepted (must fail loudly)")
+	}
+	if got := m.Answers().Models[0].Profile; got != "general" {
+		t.Fatalf("a rejected profile clobbered the stored answer: %q", got)
+	}
+}
+
+// TestSetAuxProfileSelfHeal — the aux models get the same profile resolution
+// as the main models (the assignment surface is uniform across both kinds).
+func TestSetAuxProfileSelfHeal(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	if err := m.SetAux([]config.AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v"}}); err != nil {
+		t.Fatalf("set aux (blank profile): %v", err)
+	}
+	if got := m.Answers().Aux[0].Profile; got != "general" {
+		t.Fatalf("aux blank profile = %q, want general (self-heal)", got)
+	}
+	if err := m.SetAux([]config.AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v", Profile: "no-such-profile"}}); err == nil {
+		t.Fatal("an unknown aux profile was accepted (must fail loudly)")
+	}
+	if got := m.Answers().Aux[0].Profile; got != "general" {
+		t.Fatalf("a rejected aux profile clobbered the stored one: %q", got)
+	}
+}
+
+// TestProfilesEndpoint — /setup/profiles lists this build's registry (the
+// wizard's profile selects render from it), gated on the one-time setup
+// token like the other /setup routes.
+func TestProfilesEndpoint(t *testing.T) {
+	m, _, _ := newTestSetup(t)
+	h := NewHandler(m, "tok123", func() {})
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	// No token -> 401.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/setup/profiles", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("no-token code = %d, want 401", w.Code)
+	}
+	// With token -> the registry: general present, with a description.
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/setup/profiles?token=tok123", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("profiles code = %d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Profiles []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "general" {
+		t.Fatalf("profiles = %+v, want exactly general", got.Profiles)
+	}
+	if got.Profiles[0].Description == "" {
+		t.Fatal("general has no description (the forms show it under the select)")
+	}
+	// The response matches the registry exactly (single source of truth).
+	if len(got.Profiles) != len(profile.Names()) {
+		t.Fatalf("endpoint listed %d profiles, the registry has %d", len(got.Profiles), len(profile.Names()))
+	}
+	for _, p := range got.Profiles {
+		if _, err := profile.Get(p.Name); err != nil {
+			t.Fatalf("endpoint listed profile %q not in the registry: %v", p.Name, err)
+		}
 	}
 }
