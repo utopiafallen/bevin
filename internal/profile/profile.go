@@ -84,7 +84,7 @@ func generalFraming(summary string) string {
 var registry = map[string]Profile{
 	General: {
 		Name:                      General,
-		Description:               "The default harness behavior: the model gets its earlier reasoning traces back, the context compacts at 80% of its window (the last 5 turns stay verbatim), and the prompt size is estimated at ~4 chars/token.",
+		Description:               "The harness behavior the agent applies while this model runs: how its context is managed (when it compacts, and what stays verbatim), whether the model's own earlier reasoning comes back to it, and how its prompt size is estimated. A model with particular quirks can run under a model-specific profile tuned to it; general is the default, tuned for no model in particular.",
 		ReasoningInTranscript:     true,
 		SummaryFraming:            generalFraming,
 		CompactionTriggerFraction: 0.8,

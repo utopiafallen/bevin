@@ -222,13 +222,11 @@ function renderSidecarList(){
     if(s.status !== "ready") allReady = false;
     if(s.status === "error") anyError = true;
   }
-  const next = document.getElementById("next");
   banner.className = "sidecar-banner";
   banner.innerHTML = "";
   if(st && st.done && allReady && !anyError){
     banner.classList.add("ok");
     banner.append(el("span",{}, "All sidecars are ready."));
-    if(next) next.disabled = false;
   } else {
     if(anyError){
       banner.classList.add("err");
@@ -240,8 +238,8 @@ function renderSidecarList(){
     } else {
       banner.append(el("span",{}, "Preparing to set up the sidecars…"));
     }
-    if(next) next.disabled = true;
   }
+  refreshNav(); // the work-gate: Next stays disabled until every sidecar reports ready
 }
 async function startSidecars(){
   if(_sidecarTimer) return; // already polling
@@ -282,6 +280,58 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "8. Review & finish"));
 }
 const RENDER = { server:renderServer, admin:renderAdmin, oauth:renderOAuth, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
 
+// ---- nav gating: Next is disabled until the step's required info / work is done ----
+// The checks mirror what /setup/advance validates server-side (same rules, so
+// a disabled button is exactly the state the server would reject); the
+// sidecars step is the one that gates on WORK (the provisioning finishes), not
+// just on fields.
+function stepReady(){
+  const step=STEPS[idx];
+  switch(step){
+    case "server": return true; // everything here is optional (local-only setups leave the base URI blank)
+    case "admin": { // read the DOM (the fields sync to S only at advance) with the same placeholder fallbacks doNext uses
+      const g=(s)=>{ const e=q(s); return e ? (e.value.trim() || e.placeholder) : ""; };
+      const pw=q("#ad_pw"), pw2=q("#ad_pw2");
+      if(!pw||!pw2) return false;
+      return g("#ad_handle") && g("#ad_name") && pw.value.length>=8 && pw.value===pw2.value;
+    }
+    case "oauth": { // optional: off = ready; on = every field the server's normalizeOAuth requires + the base URI the redirect derives from
+      if(!S.oauth.enabled) return true;
+      const g=(s)=>{ const e=q(s); return e ? e.value.trim() : ""; };
+      const url=(s)=>/^https?:\/\//i.test(g(s));
+      return g("#oa_name") && g("#oa_clientid") && g("#oa_clientsecret") && url("#oa_authurl") && url("#oa_tokenurl") && url("#oa_userinfourl") && (S.server.base_uri||"").trim();
+    }
+    case "models": return S.models.length>0; // at least one main model
+    case "aux": { // optional: empty = ready; each added model needs what the server's SetAux requires
+      if(!S.aux.length) return true;
+      return S.aux.every(m=>(m.kinds&&m.kinds.length) && (m.base_url||"").trim() && (m.model_id||"").trim());
+    }
+    case "sidecars": { // the work-gate: all sidecars must report ready
+      const st=S.sidecarStatus;
+      return !!(st && st.sidecars && st.sidecars.length && st.sidecars.every(s=>s.status==="ready"));
+    }
+    case "email": { // optional: off = ready; on = host + a valid port (blank port = the 587 placeholder default, same as the server's validateEmail)
+      if(!S.email.enabled) return true;
+      const port = S.email.smtp_port ? parseInt(S.email.smtp_port, 10) : 587;
+      return (S.email.smtp_host||"").trim() && port>=1 && port<=65535;
+    }
+    case "review": return true; // the Next button is hidden here (Finish & start) — every prior step was gated
+  }
+  return true;
+}
+function refreshNav(){
+  const next=document.getElementById("next");
+  if(!next || STEPS[idx]==="review") return;
+  next.disabled = !stepReady();
+}
+// Input fields that don't re-render on change (admin, oauth, email fields) are
+// covered by ONE delegated listener on the stable #body container — it
+// survives every render(). refreshNav is deliberately synchronous (a few DOM
+// reads + one attribute write): requestAnimationFrame never fires in a
+// backgrounded/occluded tab, so a rAF throttle would leave the button stale
+// exactly when the admin has switched to a terminal to copy credentials.
+document.getElementById("body").addEventListener("input", refreshNav);
+
 // ---- nav ----
 function sync(id, v){ /* handled by per-field listeners */ }
 function render(){
@@ -292,6 +342,7 @@ function render(){
   STEPS.forEach((s,i)=>{ const e=el("span",{class:"step"+(i===idx?" active":""), text:s}); if(i<idx)e.classList.add("done"); st.append(e); });
   document.getElementById("finalize").classList.toggle("hidden", STEPS[idx]!=="review");
   document.getElementById("next").classList.toggle("hidden", STEPS[idx]==="review");
+  refreshNav();
   refreshScoreFills();
   // Sidecars step: start the (idempotent) provisioning + stream progress when
   // the admin lands on it (startSidecars guards against re-starting the poll).

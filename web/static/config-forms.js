@@ -262,7 +262,11 @@ function renderModelForm(){
   return f;
 }
 function renderModelList(){
-  const w=el("div",{});
+  // The table sits in an overflow-x:auto wrapper: a very wide table (long
+  // names, a narrow screen) scrolls INSIDE the frame instead of widening the
+  // page's scrollable canvas (which made the centered setup frame read as
+  // "narrower" and the table render past the frame).
+  const w=el("div",{class:"model-table-wrap"});
   if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
   const t=el("table",{class:"model-table"});
   t.append(el("thead",{}, el("tr",{},

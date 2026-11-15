@@ -5,6 +5,7 @@
 .row { display:flex; gap:.6rem; } .row > div { flex:1; }
   .btns { display:flex; gap:.5rem; margin-top:1.2rem; flex-wrap:wrap; }
   .btns button { font:inherit; font-weight:700; cursor:pointer; padding:.55rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); transition:background .15s; }
+  .btns button:disabled { opacity:.45; cursor:not-allowed; }
   .btns button:hover { background:var(--surface-2); }
   .btns button.primary { background:var(--brand); color:var(--brand-contrast); border-color:transparent; box-shadow:var(--shadow-sm); }
   .btns button.primary:hover { background:var(--brand-hover); }
@@ -49,8 +50,9 @@
   .scores-header { margin:.9rem 0 .1rem; font-size:.78rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
   input.ctx-disabled { opacity:.65; cursor:not-allowed; }
   /* model list table */
+  .model-table-wrap { overflow-x:auto; } /* a too-wide table scrolls INSIDE the frame — it must never widen the page (the body is a centered fixed-width frame; an overflowing child widens the scrollable canvas and the frame reads as "narrower") */
   .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
-  .model-table th, .model-table td { text-align:left; padding:.36rem .45rem; border-bottom:1px solid var(--border); }
+  .model-table th, .model-table td { text-align:left; padding:.36rem .4rem; border-bottom:1px solid var(--border); }
   .model-table th { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
   .model-table .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
   .model-table .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
@@ -58,8 +60,8 @@
   .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
   .model-table .row-btn:hover { background:var(--surface-2); }
   .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
-  .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px; }
-  .model-table .baseurl { max-width:160px; }
+  .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:125px; }
+  .model-table .baseurl { max-width:140px; }
   .model-table .badge-unavail { display:inline-block; font-size:.7rem; font-weight:700; color:var(--danger); background:color-mix(in srgb, var(--danger) 14%, transparent); padding:.08rem .42rem; border-radius:999px; }
   .form-notice { font-size:.82rem; color:var(--text); background:color-mix(in srgb, var(--warn) 14%, transparent); border:1px solid var(--warn); padding:.5rem .7rem; border-radius:var(--radius); margin:.6rem 0; }
   /* aux step — each aux model is a stacked pair of config-halves (provider + perception) */
