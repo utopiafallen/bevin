@@ -90,11 +90,14 @@ const STEPS = {{.Steps | jsonify}};
 const SERVER = {{.Server | jsonify}};
 let idx = 0;
 // Endpoint constants for the shared form components (config-forms.js): the
-// model Detect probe + the draft test-email send. The admin config pages
-// define the same names pointing at their own /admin/api/* endpoints.
+// model Detect probe + the draft test-email send + the model profile
+// catalog (the build's registry, the profile selects' options). The admin
+// config pages define the same names pointing at their own /admin/api/*
+// endpoints.
 const PROBE_URL = "/setup/probe-model";
 const EMAIL_TEST_URL = "/setup/test-email";
-let S = { admin: {handle:"",display_name:"",password:""}, server: {base_uri:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+const PROFILES_URL = "/setup/profiles";
+let S = { admin: {handle:"",display_name:"",password:""}, server: {base_uri:""}, oauth: {enabled:false, name:"", client_id:"", client_secret:"", auth_url:"", token_url:"", userinfo_url:"", scopes:""}, models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], sidecars: {qdrant:"",llama_server:"",ffmpeg:""}, auxError: {}, sidecarStatus: null, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 // ---- per-step renderers ----
 function renderServer(){ const d=el("div",{},
@@ -363,6 +366,9 @@ document.getElementById("themeToggle").addEventListener("click", function(){
   try{localStorage.setItem("bevin-theme",next);}catch(e){}
 });
 render();
+// The model forms' profile selects render from the build's profile registry
+// (fetched once, then re-render so the selects show its options).
+loadProfiles().then(render);
 </script>
 </body>
 </html>

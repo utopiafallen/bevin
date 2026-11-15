@@ -536,6 +536,24 @@ func TestAdminProfilesEndpoint(t *testing.T) {
 	if onDisk.Models[0].Profile != "general" {
 		t.Fatalf("a rejected save clobbered the saved profile: %q", onDisk.Models[0].Profile)
 	}
+
+	// A model save with a KNOWN profile is accepted + persisted (the
+	// round-trip the form's select depends on).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"models": []config.Model{{
+		ID: "m1", Provider: "openai", BaseURL: "http://127.0.0.1:1/v1", ModelID: "gpt-4o",
+		DisplayName: "GPT-4o", MaxContext: 128000, Slots: 1, Enabled: true, Profile: "general",
+	}}}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("known-profile save code = %d, want 200", w.Code)
+	}
+	after, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Models[0].Profile != "general" {
+		t.Fatalf("saved profile = %q, want general", after.Models[0].Profile)
+	}
 }
 
 // twoModelApp builds an App with two available models (the model-switch

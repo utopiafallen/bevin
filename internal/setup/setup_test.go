@@ -45,6 +45,15 @@ func TestWizardTemplateRenders(t *testing.T) {
 	if !strings.Contains(out, `q("#ad_handle").placeholder`) {
 		t.Fatalf("page missing admin handle placeholder fallback; head: %.200s", out)
 	}
+	// The model forms' profile selects render from the build's registry: the
+	// wizard points the shared catalog loader at its own token-gated endpoint
+	// and loads it on init (the shared form component does the fetching).
+	if !strings.Contains(out, `const PROFILES_URL = "/setup/profiles"`) {
+		t.Fatalf("page missing the profiles endpoint constant")
+	}
+	if !strings.Contains(out, "loadProfiles().then(render)") {
+		t.Fatalf("page missing the profile catalog load")
+	}
 }
 
 type fakeSidecars struct {

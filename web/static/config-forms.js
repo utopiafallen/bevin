@@ -13,7 +13,7 @@ function pwfield(label, id, val, ph){ const i=el("input",{id, type:"password", v
 
 
 // ---- model form helpers ----
-function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}; }
+function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}; }
 // base-URL normalization for "is this the same provider?" comparisons — match the
 // server probe, which treats scheme/host variants and a trailing /v1 as the same
 // endpoint (it tries /models and /v1/models). Trim, drop trailing slashes, drop /v1.
@@ -30,18 +30,48 @@ function allKnownBases(){ const s=new Set(); const add=x=>{ const u=(x.base_url|
 function isKnownBase(base){ return allKnownBases().some(u => normBase(u)===normBase(base)); }
 function resetDraft(){ S.modelDraft=freshModel(); S.editingIndex=-1; S.editOriginal=null; S.formError=null; }
 function deepCopy(x){ return JSON.parse(JSON.stringify(x)); }
-// lock the R/K/S + enabled to a display name's pre-existing values (so every model
-// sharing a display name stays consistent); unlock when the name is new (keeps the
-// current R/K/S + enabled)
+// lock the R/K/S + enabled + profile to a display name's pre-existing values
+// (so every model sharing a display name stays consistent — same model, same
+// behavior); unlock when the name is new (keeps the current values)
 function syncDispLock(){
   const m=S.modelDraft;
   const name=(m.display_name||"").trim();
   const match=S.models.find(x=>(x.display_name||"").trim()===name);
   if(match){
-    if(m.lockedTo!==name){ m.metadata=deepCopy(match.metadata); m.enabled=match.enabled; m.lockedTo=name; }
+    if(m.lockedTo!==name){ m.metadata=deepCopy(match.metadata); m.enabled=match.enabled; m.profile=match.profile; m.lockedTo=name; }
   } else if(m.lockedTo!==null && m.lockedTo!==undefined){
-    m.lockedTo=null; // unlock — keep the current R/K/S + enabled
+    m.lockedTo=null; // unlock — keep the current R/K/S + enabled + profile
   }
+}
+
+// ---- model profile catalog ----
+// The build's model profile registry (name + description), fetched ONCE per
+// page load from PROFILES_URL (the page points it at its own endpoint:
+// /setup/profiles in the wizard, /admin/api/profiles on the admin page) and
+// cached. The model forms' profile selects render from it — the single
+// source of truth is the binary's registry (internal/profile), never a list
+// hardcoded in the UI. A failed fetch degrades to "general" only (the
+// default always exists in the registry; the server rejects unknown names).
+let _profiles = null;
+async function loadProfiles(){ if(_profiles) return _profiles; try{ _profiles = (await api("GET", PROFILES_URL)).profiles || []; }catch(e){ _profiles = []; } return _profiles; }
+function profileOptions(draft){
+  let list = (_profiles && _profiles.length) ? _profiles : [{name:"general", description:""}];
+  const cur = draft.profile || "general";
+  if(!list.some(p=>p.name===cur)) list = list.concat([{name:cur, description:""}]); // a stored value the fetched list lacks stays selectable
+  return list;
+}
+// profileField — the "Model profile" select (the options are this build's
+// registry) + the selected profile's description as the help text. The
+// profile is the named bundle of harness behavior the agent applies while
+// the model runs; disabled when the display-name lock is on.
+function profileField(id, draft, disabled, onClear){
+  const sel = el("select", {id});
+  profileOptions(draft).forEach(p => { const o = el("option", {value:p.name}, p.name); if((draft.profile||"general")===p.name) o.selected = true; sel.append(o); });
+  if(disabled) sel.setAttribute("disabled","");
+  sel.addEventListener("change", () => { draft.profile = sel.value; if(onClear) onClear(); render(); });
+  const desc = profileOptions(draft).find(p => p.name === (draft.profile||"general"));
+  const help = (desc && desc.description) ? desc.description : "The named bundle of harness behavior the agent applies while this model runs (this build's registry).";
+  return el("div", {}, el("label", {}, "Model profile"), el("p", {class:"field-help"}, help), sel);
 }
 function suggestedFix(err){
   const e=String(err).toLowerCase();
@@ -125,7 +155,7 @@ async function detectModel(){ const m=S.modelDraft; if(m._detecting) return; if(
   catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
   finally{ m._detecting=false; render(); }
 }
-function freshAux(){ return {kinds:[], provider:"", base_url:"", api_key:"", model_id:""}; }
+function freshAux(){ return {kinds:[], provider:"", base_url:"", api_key:"", model_id:"", profile:"general"}; }
 function addAux(){ S.aux.push(freshAux()); render(); notifyConfigChanged("aux"); }
 function removeAux(i){ S.aux.splice(i,1); if(S.auxError) delete S.auxError[i]; render(); notifyConfigChanged("aux"); }
 // modalitiesFromModel — the input modalities a detected model exposes (one or
@@ -194,6 +224,9 @@ function renderModelForm(){
   // also lives in the server's config.Validate.
   const slotsInp = el("input", {id:"mf_slots", type:"number", min:"1", step:"1", value:String(m.slots||1), style:"max-width:6rem"});
   slotsInp.addEventListener("input", ()=>{ m.slots = slotsInp.value; S.formError=null; });
+  // Model profile — the harness behavior bundle this model runs under (the
+  // select's options are this build's registry, fetched from the profiles
+  // endpoint). Locked with the display name (same model, same behavior).
   halfB.append(
     field("Model", sel),
     // Max context — the help text sits under the label (above the input)
@@ -204,11 +237,13 @@ function renderModelForm(){
     el("div",{class:"row"},
       field("Display name", el("div",{}, disp, dl)),
       field("Enable for users", en)),
-    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state are inherited and locked so every model sharing a name stays consistent."),
-    el("div",{},
-      el("label",{},"Execution slots"),
-      el("p",{class:"field-help"},"How many turns of this model may run at the same time (1 = strictly one at a time). Extra concurrent turns wait their turn in a queue."),
-      slotsInp)
+    el("p",{class:"field-help"},"Shown to users to help them pick a model — informational only. Pick an existing name to reuse it: its scores + enabled state + profile are inherited and locked so every model sharing a name stays consistent."),
+    el("div",{class:"row"},
+      el("div",{},
+        el("label",{},"Execution slots"),
+        el("p",{class:"field-help"},"How many turns of this model may run at the same time (1 = strictly one at a time). Extra concurrent turns wait their turn in a queue."),
+        slotsInp),
+      profileField("mf_profile", m, locked, ()=>{ S.formError=null; }))
   );
   if(m.auto_disabled){ halfB.append(el("p",{class:"form-notice"},"This model is currently <strong>unavailable</strong> — the provider reported it missing, so it was auto-disabled and hidden from users. It re-enables automatically once a later attempt succeeds; you do not need to change anything.")); }
   halfB.append(
@@ -231,7 +266,7 @@ function renderModelList(){
   if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
   const t=el("table",{class:"model-table"});
   t.append(el("thead",{}, el("tr",{},
-    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
+    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "Profile"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
   const tb=el("tbody",{});
   S.models.forEach((m,i)=>{
     const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
@@ -244,6 +279,7 @@ function renderModelList(){
       el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
       el("td",{}, m.max_context?m.max_context:"auto"),
       el("td",{}, String(m.slots||1)),
+      el("td",{}, m.profile||"general"),
       el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
       el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
       el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
@@ -349,7 +385,9 @@ function renderAuxPerception(i){
   ph.append(
     field("Model", sel),
     field("Modalities (input)", modWrap),
-    el("p",{class:"field-help"},"Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."));
+    el("p",{class:"field-help"},"Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."),
+    el("div",{class:"row"}, profileField("a_prof_"+i, m, false, null))
+  );
   return ph;
 }
 

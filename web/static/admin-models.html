@@ -44,7 +44,8 @@
 // the endpoint constants).
 const PROBE_URL = "/admin/api/probe-model";
 const EMAIL_TEST_URL = "/admin/api/email/test"; // unused here; the shared email form references it
-let S = { models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], auxError: {}, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
+const PROFILES_URL = "/admin/api/profiles"; // the build's model profile registry (the profile selects' options)
+let S = { models: [], modelDraft: {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}, editingIndex: -1, editOriginal: null, formError: null, aux: [], auxError: {}, email: {enabled:false, smtp_host:"", smtp_port:"", username:"", password:"", from_address:"", from_name:"", use_starttls:true} };
 
 async function api(method, path, body){ const url = path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 function msg(text, cls){ const m=document.getElementById("msg"); m.textContent=text||""; m.className="msg"+(cls?" "+cls:""); }
@@ -94,7 +95,9 @@ document.getElementById("themeToggle").addEventListener("click", function(){
   try{localStorage.setItem("bevin-theme",next);}catch(e){}
 });
 
-// Load the current config, then render.
+// Load the current config, then render. The model profile catalog is
+// fetched too (the profile selects' options — the build's registry), then
+// a re-render so the selects show its options.
 (async function(){
   try{
     const d = await api("GET", "/admin/api/config");
@@ -102,6 +105,7 @@ document.getElementById("themeToggle").addEventListener("click", function(){
     S.aux = d.aux || [];
   }catch(e){ msg("Could not load the config: " + e.message, "err"); }
   render();
+  loadProfiles().then(render);
 })();
 </script>
 </body>
