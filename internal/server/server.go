@@ -158,6 +158,18 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/sandbox/exec", a.chatGate(a.sandboxExec))
 	mux.HandleFunc("POST /api/sandbox/stop", a.chatGate(a.sandboxStop))
 	mux.HandleFunc("DELETE /api/sandbox", a.chatGate(a.sandboxRemove))
+
+	// Workspace management: the user's working folders (created under
+	// their data dir, mapped into their container, runnable in it).
+	// chatGate: regular users only (same as everything above).
+	mux.HandleFunc("GET /api/workspaces", a.chatGate(a.listWorkspaces))
+	mux.HandleFunc("POST /api/workspaces", a.chatGate(a.createWorkspace))
+	mux.HandleFunc("DELETE /api/workspaces/{id}", a.chatGate(a.deleteWorkspace))
+	mux.HandleFunc("GET /api/workspaces/{id}/files", a.chatGate(a.workspaceFiles))
+	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.uploadWorkspaceFile))
+	mux.HandleFunc("GET /api/workspaces/{id}/files/raw", a.chatGate(a.workspaceFileRaw))
+	mux.HandleFunc("DELETE /api/workspaces/{id}/files", a.chatGate(a.deleteWorkspaceFile))
+	mux.HandleFunc("POST /api/workspaces/{id}/run", a.chatGate(a.workspaceRun))
 	// First-time onboarding (regular users only — the admin has no user UI).
 	mux.HandleFunc("GET /api/onboarding", a.chatGate(a.onboardingStatus))
 	mux.HandleFunc("POST /api/onboarding", a.chatGate(a.onboardingComplete))

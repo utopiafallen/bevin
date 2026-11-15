@@ -277,12 +277,25 @@ func (b *windowsBackend) buildConfig(handle string) (*hcsshim.ContainerConfig, e
 	return cc, nil
 }
 
-// Exec runs a command string in the user's container. The command is
-// interpreted by the container's cmd.exe (arbitrary code is the point —
-// bevin does not sanitize it).
+// ContainerDataDir is where the user's data dir is mapped in.
+func (b *windowsBackend) ContainerDataDir() string { return dataMount }
+
+// Exec runs a command string in the user's container, with the working
+// directory at the mapped user data dir.
 func (b *windowsBackend) Exec(ctx context.Context, handle, command string, timeout time.Duration) (Result, error) {
+	return b.ExecIn(ctx, handle, command, "", timeout)
+}
+
+// ExecIn runs a command string in the user's container with an explicit
+// working directory (an empty cwd = the data dir). The command is
+// interpreted by cmd.exe (arbitrary code is the point — bevin does not
+// sanitize it).
+func (b *windowsBackend) ExecIn(ctx context.Context, handle, command, cwd string, timeout time.Duration) (Result, error) {
 	if strings.TrimSpace(command) == "" {
 		return Result{}, errors.New("empty command")
+	}
+	if cwd == "" {
+		cwd = dataMount
 	}
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -300,7 +313,7 @@ func (b *windowsBackend) Exec(ctx context.Context, handle, command string, timeo
 	// (with the outer pair of quotes stripped) — no quote mangling.
 	pc := &hcsshim.ProcessConfig{
 		CommandLine:      `C:\Windows\System32\cmd.exe /d /s /c "` + command + `"`,
-		WorkingDirectory: dataMount,
+		WorkingDirectory: cwd,
 		CreateStdOutPipe: true,
 		CreateStdErrPipe: true,
 	}

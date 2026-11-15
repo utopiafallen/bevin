@@ -386,7 +386,18 @@ func (b *linuxBackend) currentState(handle string) State {
 	return StateAbsent
 }
 
-// Exec runs a command string in the user's container. The command is
+// ContainerDataDir is where the user's data dir is mapped in (the
+// nspawn Bind= target).
+func (b *linuxBackend) ContainerDataDir() string { return "/data" }
+
+// Exec runs a command string in the user's container, with the working
+// directory at the mapped user data dir.
+func (b *linuxBackend) Exec(ctx context.Context, handle, command string, timeout time.Duration) (Result, error) {
+	return b.ExecIn(ctx, handle, command, "", timeout)
+}
+
+// ExecIn runs a command string in the user's container with an explicit
+// working directory (an empty cwd = the data dir). The command is
 // interpreted by the container's /bin/sh (arbitrary code is the point —
 // bevin does not sanitize it).
 //
@@ -395,9 +406,12 @@ func (b *linuxBackend) currentState(handle string) State {
 // exec path) and propagates the exit status. The wrapper subshell
 // captures the output into /run/ files, which are fetched with
 // `machinectl copy-from`.
-func (b *linuxBackend) Exec(ctx context.Context, handle, command string, timeout time.Duration) (Result, error) {
+func (b *linuxBackend) ExecIn(ctx context.Context, handle, command, cwd string, timeout time.Duration) (Result, error) {
 	if strings.TrimSpace(command) == "" {
 		return Result{}, errors.New("empty command")
+	}
+	if cwd != "" && !filepath.IsAbs(cwd) {
+		return Result{}, errors.New("working directory must be an absolute container path")
 	}
 	if ok, err := b.running(ctx, handle); err != nil {
 		return Result{}, err
@@ -423,7 +437,12 @@ func (b *linuxBackend) Exec(ctx context.Context, handle, command string, timeout
 	errPath := "/run/bevin-exec-" + suffix + ".err"
 	wrapper := fmt.Sprintf("( %s ) > %s 2> %s", command, outPath, errPath)
 
-	_, errb, code, err := b.run(execCtx, "", "systemd-run", "-M", m, "--wait", "--unit", unit, "/bin/sh", "-c", wrapper)
+	args := []string{"-M", m, "--wait", "--unit", unit}
+	if cwd != "" {
+		args = append(args, "--working-directory", cwd)
+	}
+	args = append(args, "/bin/sh", "-c", wrapper)
+	_, errb, code, err := b.run(execCtx, "", "systemd-run", args...)
 	if err != nil {
 		b.cleanupExec(ctx, m, unit, outPath, errPath)
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {

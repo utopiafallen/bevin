@@ -613,3 +613,44 @@ func TestServerStoreUserCredSession(t *testing.T) {
 }
 
 func ptrStr(s string) *string { return &s }
+
+// TestWorkspaceDeleteCascade — workspace + file metadata lifecycle:
+// DeleteWorkspaceFilesAt prunes the file at a path (and everything
+// beneath a directory); DeleteWorkspace removes the row and its file
+// rows cascade.
+func TestWorkspaceDeleteCascade(t *testing.T) {
+	s, err := OpenUser(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := s.CreateWorkspace("Notes", "d", "/tmp/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"a.txt", "docs/one.txt", "docs/two.txt"} {
+		if _, err := s.AddWorkspaceFile(ws.ID, p, p, "text/plain", 10, "", "user", "doc"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Deleting the "docs" directory prunes both files beneath it.
+	if err := s.DeleteWorkspaceFilesAt(ws.ID, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	files, err := s.ListWorkspaceFiles(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].RelativePath != "a.txt" {
+		t.Fatalf("files = %+v, want only a.txt", files)
+	}
+	// Deleting the workspace removes the row + the rest cascades.
+	if err := s.DeleteWorkspace(ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetWorkspace(ws.ID); err != ErrNotFound {
+		t.Fatalf("GetWorkspace after delete = %v, want ErrNotFound", err)
+	}
+	if files, err := s.ListWorkspaceFiles(ws.ID); err != nil || len(files) != 0 {
+		t.Fatalf("files after workspace delete = %+v (err %v), want none", files, err)
+	}
+}

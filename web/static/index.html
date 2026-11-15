@@ -52,7 +52,7 @@
         <button class="rail-btn" id="searchBtn" type="button" title="Search everything" aria-label="Search">
           <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
         </button>
-        <button class="rail-btn stub" id="workspaceBtn" type="button" title="Workspace — coming soon" aria-label="Workspace (coming soon)" aria-disabled="true">
+        <button class="rail-btn" id="workspaceBtn" type="button" title="Workspaces" aria-label="Workspaces">
           <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
         </button>
         <button class="rail-btn stub" id="taskboardBtn" type="button" title="Task board — coming soon" aria-label="Task board (coming soon)" aria-disabled="true">
@@ -188,6 +188,59 @@
             <div id="searchResults" class="search-results" hidden></div>
           </section>
 
+          <!-- The workspaces page: the user's working folders on the
+               server — each is mapped into the user's container and can
+               run code there. Browse, upload, download, delete, run. -->
+          <section class="page-card" id="workspacePage" style="display:none;">
+            <div class="eyebrow">Workspaces</div>
+            <h3 style="margin:.3rem 0 .2rem;">Your workspaces</h3>
+            <p class="muted" style="margin-top:.2rem;">
+              A workspace is a folder on bevin's server, mapped into your
+              own container — upload files, and run code against them in
+              your environment.
+            </p>
+            <div id="wsList" class="ws-list"></div>
+            <form id="wsCreateForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.8rem;">
+              <input id="wsTitle" placeholder="Workspace title" autocomplete="off" maxlength="120" style="flex:1; min-width:10rem;">
+              <input id="wsDesc" placeholder="What is it for? (optional)" autocomplete="off" maxlength="500" style="flex:1; min-width:10rem;">
+              <button class="btn btn-primary" type="submit">Create</button>
+            </form>
+            <span id="wsMsg" class="muted" style="font-size:.85rem;"></span>
+
+            <div id="wsDetail" hidden>
+              <div class="profile-section">
+                <h4 id="wsDetailTitle"></h4>
+                <div style="display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:.5rem;">
+                  <input id="wsFilter" placeholder="Filter files&hellip;" autocomplete="off" style="flex:1; min-width:10rem;">
+                  <input id="wsUploadPath" placeholder="Subfolder (e.g. docs)" style="width:11rem;" title="Optional subfolder for the upload">
+                  <input type="file" id="wsUploadFile" hidden>
+                  <button class="btn" id="wsUploadBtn" type="button">Upload</button>
+                  <button class="btn btn-ghost" id="wsDeleteWsBtn" type="button">Delete workspace</button>
+                </div>
+                <div id="wsFiles" class="ws-files"></div>
+              </div>
+              <div class="profile-section">
+                <h4>Run in workspace</h4>
+                <p class="muted" id="wsRunHint" style="font-size:.85rem; margin-top:.2rem;">
+                  Runs inside your own container (created on first use),
+                  with the workspace as the working directory.
+                </p>
+                <textarea id="wsCmd" rows="2" placeholder="e.g. python3 analyze.py &gt; report.txt" style="width:100%; box-sizing:border-box; font:inherit; font-size:.9rem;"></textarea>
+                <div style="display:flex; gap:.5rem; align-items:center; margin-top:.5rem; flex-wrap:wrap;">
+                  <select id="wsTimeout" title="Command timeout" style="width:auto;">
+                    <option value="30000">30 s</option>
+                    <option value="60000" selected>60 s</option>
+                    <option value="120000">2 min</option>
+                    <option value="300000">5 min</option>
+                  </select>
+                  <button class="btn btn-primary" id="wsRunBtn" type="button">Run</button>
+                  <span id="wsRunMsg" class="muted" style="font-size:.85rem;"></span>
+                </div>
+                <pre id="wsRunOut" class="ws-run-out" hidden></pre>
+              </div>
+            </div>
+          </section>
+
           <!-- The profile page: the profile bevin has of the user (what it
                knows), the user's own settings (email), and the persona list
                (the editor ships later — the section is stubbed in). -->
@@ -291,22 +344,29 @@
       if (!me) return;
       togglePanel();
     });
-    // Workspace + task board are stubs for now — they do nothing (the rail
-    // icon stays, so the layout is final when they land).
-    $("workspaceBtn").addEventListener("click", function () {});
+    // The task board is a stub for now (the rail icon stays, so the
+    // layout is final when it lands).
+    $("workspaceBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("workspace");
+      if (isMobileNav()) closeNav();
+    });
     $("taskboardBtn").addEventListener("click", function () {});
 
-    // ---- pages: the chat view, the search page, and the profile page share
-    // the stage; only one shows at a time.
+    // ---- pages: the chat view, the search page, the workspaces page, and
+    // the profile page share the stage; only one shows at a time.
     var page = "chat";
     function showPage(name) {
       page = name;
       $("chatCard").style.display = name === "chat" ? "" : "none";
       $("searchPage").style.display = name === "search" ? "" : "none";
+      $("workspacePage").style.display = name === "workspace" ? "" : "none";
       $("profilePage").style.display = name === "profile" ? "" : "none";
       $("searchBtn").classList.toggle("active", name === "search");
+      $("workspaceBtn").classList.toggle("active", name === "workspace");
       $("profileBtn").classList.toggle("active", name === "profile");
       if (name === "search") { loadScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
+      if (name === "workspace") loadWorkspaces();
       if (name === "profile") loadProfilePage();
     }
     $("searchBtn").addEventListener("click", function () {
@@ -1354,6 +1414,221 @@
     $("chat").addEventListener("submit", function (e) {
       e.preventDefault();
       sendChat();
+    });
+
+    // ---- workspaces: the user's folders on the server (mapped into
+    // their container, runnable in it). The disk is the source of truth
+    // for the file listing; the API tracks metadata for what it sees.
+    var ws = { current: null, files: [], sandbox: null };
+
+    function wsEsc(s) {
+      var d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+    function wsSize(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      if (n < 1024 * 1024 * 1024) return (n / 1048576).toFixed(1) + " MB";
+      return (n / 1073741824).toFixed(1) + " GB";
+    }
+    function wsMsg(text, isError) {
+      var el = $("wsMsg");
+      el.textContent = text;
+      el.style.color = isError ? "var(--danger, #c0392b)" : "";
+      if (text) setTimeout(function () { if (el.textContent === text) el.textContent = ""; }, 4000);
+    }
+
+    async function loadWorkspaces() {
+      var d;
+      try {
+        d = await (await fetch("/api/workspaces")).json();
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+        return;
+      }
+      var list = $("wsList");
+      list.innerHTML = "";
+      (d.workspaces || []).forEach(function (w) {
+        var card = document.createElement("div");
+        card.className = "ws-card" + (ws.current === w.id ? " active" : "");
+        card.innerHTML =
+          "<div class=\"ws-card-title\">" + wsEsc(w.title) + "</div>" +
+          (w.description ? "<div class=\"ws-card-desc\">" + wsEsc(w.description) + "</div>" : "") +
+          "<div class=\"ws-card-meta\">" + (w.files || 0) + " files · " + wsSize(w.size || 0) + "</div>";
+        card.addEventListener("click", function () { openWorkspace(w.id, w.title); });
+        list.appendChild(card);
+      });
+    }
+
+    async function openWorkspace(id, title) {
+      ws.current = id;
+      $("wsDetail").hidden = false;
+      $("wsDetailTitle").textContent = title || "Workspace";
+      $("wsRunOut").hidden = true;
+      $("wsRunMsg").textContent = "";
+      loadWorkspaces(); // refresh the active card
+      await loadWsFiles();
+      // The container state decides what the run box can do (the server
+      // answers 503 with the runtime detail when sandboxing is off).
+      fetch("/api/sandbox").then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+      }).then(function (res) {
+        ws.sandbox = res.d;
+        var hint = $("wsRunHint");
+        if (!res.ok) {
+          hint.textContent = "Containers are not enabled on this server — file management works, but running code in your workspace does not.";
+        } else if (res.d.runtime && !res.d.runtime.ok) {
+          hint.textContent = "The container runtime is not ready on this server: " + (res.d.runtime.detail || "") +
+            " File management works; running code in your workspace does not until the runtime is enabled.";
+        } else {
+          hint.textContent = "Runs inside your own container (created on first use), with the workspace as the working directory.";
+        }
+      }).catch(function () {});
+    }
+
+    function renderWsFiles() {
+      var box = $("wsFiles");
+      box.innerHTML = "";
+      var filter = $("wsFilter").value.trim().toLowerCase();
+      var files = ws.files.filter(function (f) {
+        return !filter || f.path.toLowerCase().indexOf(filter) !== -1;
+      });
+      if (files.length === 0) {
+        box.innerHTML = "<div class=\"muted\" style=\"font-size:.85rem; padding:.4rem 0;\">" +
+          (filter ? "No files match the filter." : "No files yet — upload one, or run a command that creates some.") + "</div>";
+        return;
+      }
+      files.forEach(function (f) {
+        var row = document.createElement("div");
+        row.className = "ws-file-row" + (f.dir ? " dir" : "");
+        var actions = "";
+        if (!f.dir) {
+          var dl = '<a class="ws-file-dl" href="/api/workspaces/' + ws.current + '/files/raw?path=' + encodeURIComponent(f.path) + '">download</a>';
+          actions = '<span class="ws-file-actions">' + dl +
+            '<button class="ws-file-del" type="button" title="Delete ' + wsEsc(f.path) + '">&#215;</button></span>';
+        }
+        var size = f.dir ? "" : '<span class="ws-file-size">' + wsSize(f.size) + (f.modified_at ? " · " + new Date(f.modified_at).toLocaleDateString() : "") + "</span>";
+        row.innerHTML =
+          '<span class="ws-file-path">' + (f.dir ? "📁 " : "") + wsEsc(f.path) + "</span>" + size + actions;
+        if (!f.dir) {
+          row.querySelector(".ws-file-del").addEventListener("click", function () { deleteWsFile(f.path); });
+        }
+        box.appendChild(row);
+      });
+    }
+
+    async function loadWsFiles() {
+      if (!ws.current) return;
+      try {
+        var d = await (await fetch("/api/workspaces/" + ws.current + "/files")).json();
+        ws.files = d.files || [];
+        renderWsFiles();
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    }
+
+    async function deleteWsFile(path) {
+      if (!confirm("Delete " + path + " from the workspace?")) return;
+      try {
+        var r = await fetch("/api/workspaces/" + ws.current + "/files?path=" + encodeURIComponent(path), { method: "DELETE" });
+        if (!r.ok) throw new Error((await r.json()).error || ("HTTP " + r.status));
+        await loadWsFiles();
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    }
+
+    $("wsFilter").addEventListener("input", renderWsFiles);
+
+    $("wsCreateForm").addEventListener("submit", async function (e) {
+      e.preventDefault();
+      var title = $("wsTitle").value.trim();
+      var desc = $("wsDesc").value.trim();
+      if (!title) return;
+      try {
+        var r = await fetch("/api/workspaces", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: title, description: desc })
+        });
+        var d = await r.json();
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        $("wsTitle").value = "";
+        $("wsDesc").value = "";
+        await loadWorkspaces();
+        openWorkspace(d.workspace.id, d.workspace.title);
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    });
+
+    $("wsUploadBtn").addEventListener("click", function () { $("wsUploadFile").click(); });
+    $("wsUploadFile").addEventListener("change", async function () {
+      var f = this.files[0];
+      this.value = "";
+      if (!f || !ws.current) return;
+      var fd = new FormData();
+      fd.append("path", $("wsUploadPath").value.trim());
+      fd.append("file", f);
+      $("wsMsg").textContent = "Uploading " + f.name + "…";
+      try {
+        var r = await fetch("/api/workspaces/" + ws.current + "/files", { method: "POST", body: fd });
+        var d = await r.json();
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        $("wsMsg").textContent = "";
+        await loadWsFiles();
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    });
+
+    $("wsDeleteWsBtn").addEventListener("click", async function () {
+      if (!ws.current) return;
+      if (!confirm("Delete this workspace and everything in it?")) return;
+      try {
+        var r = await fetch("/api/workspaces/" + ws.current, { method: "DELETE" });
+        if (!r.ok) throw new Error((await r.json()).error || ("HTTP " + r.status));
+        ws.current = null;
+        ws.files = [];
+        $("wsDetail").hidden = true;
+        await loadWorkspaces();
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    });
+
+    $("wsRunBtn").addEventListener("click", async function () {
+      if (!ws.current) return;
+      var cmd = $("wsCmd").value.trim();
+      if (!cmd) return;
+      var btn = this;
+      btn.disabled = true;
+      $("wsRunMsg").textContent = "Running… (first run creates + boots the container, it can take minutes)";
+      $("wsRunOut").hidden = true;
+      try {
+        var r = await fetch("/api/workspaces/" + ws.current + "/run", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: cmd, timeout_ms: parseInt($("wsTimeout").value, 10) })
+        });
+        var d = await r.json();
+        if (!r.ok) {
+          var detail = d.runtime && d.runtime.detail ? " — " + d.runtime.detail : "";
+          throw new Error(d.error + detail);
+        }
+        var out = d.stdout || "";
+        var err = d.stderr || "";
+        $("wsRunOut").textContent = (out ? out : "(no output)") +
+          (err ? "\n[stderr]\n" + err : "") +
+          "\n[exit " + d.exit_code + "]";
+        $("wsRunOut").hidden = false;
+        $("wsRunMsg").textContent = "Done (exit " + d.exit_code + ").";
+        // The command may have created/changed files: refresh the list.
+        await loadWsFiles();
+      } catch (err) {
+        $("wsRunMsg").textContent = "⚠ " + err.message;
+      }
+      btn.disabled = false;
     });
   </script>
 </body>

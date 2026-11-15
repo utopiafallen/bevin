@@ -310,6 +310,13 @@ func (a *Agent) userStore(handle string) (*store.UserStore, error) {
 	return us, nil
 }
 
+// UserStoreFor returns the user's per-user store (the same cached
+// connection the agent uses — so server handlers that touch the user's
+// data see it through one pool).
+func (a *Agent) UserStoreFor(handle string) (*store.UserStore, error) {
+	return a.userStore(handle)
+}
+
 // newUserConversation creates a conversation with the user's preferred model:
 // their per-user default from agent.toml (set in first-time onboarding) when
 // it is still configured + available, else the server default. The frozen

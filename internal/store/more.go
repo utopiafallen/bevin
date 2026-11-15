@@ -183,6 +183,12 @@ func scanWS(rs interface{ Scan(...any) error }, w *Workspace) error {
 
 func (s *UserStore) CreateWorkspace(title, description, folderPath string) (*Workspace, error) {
 	id := newID()
+	return s.CreateWorkspaceWithID(id, title, description, folderPath)
+}
+
+// CreateWorkspaceWithID is CreateWorkspace with a caller-chosen id (the
+// workspace folder is named after it).
+func (s *UserStore) CreateWorkspaceWithID(id, title, description, folderPath string) (*Workspace, error) {
 	now := nowUTC()
 	_, err := s.db.Exec(`INSERT INTO workspaces (id, title, description, agent_notes, created_at, size, status, folder_path) VALUES (?,?,?,?,?,0,'active',?)`,
 		id, title, description, "", now, folderPath)
@@ -240,6 +246,14 @@ func (s *UserStore) SetWorkspaceEmbedding(id string, emb []float32) error {
 		col = embedBlob(emb)
 	}
 	_, err := s.db.Exec(`UPDATE workspaces SET embedding = ? WHERE id = ?`, col, id)
+	return err
+}
+
+// DeleteWorkspace removes the workspace (its file metadata rows cascade
+// via the FK). The on-disk folder is the server's job (it owns the
+// filesystem); this is the database half of a delete.
+func (s *UserStore) DeleteWorkspace(id string) error {
+	_, err := s.db.Exec(`DELETE FROM workspaces WHERE id = ?`, id)
 	return err
 }
 
@@ -345,6 +359,24 @@ func (s *UserStore) SetWorkspaceFileIngested(id int64, ingested bool) error {
 func (s *UserStore) DeleteWorkspaceFile(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM workspace_files WHERE id = ?`, id)
 	return err
+}
+
+// DeleteWorkspaceFilesAt removes the metadata rows for the file at
+// relPath, or — when relPath names a directory — everything beneath it.
+// Called when the server deletes the file(s) from disk.
+func (s *UserStore) DeleteWorkspaceFilesAt(wsid, relPath string) error {
+	files, err := s.ListWorkspaceFiles(wsid)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if f.RelativePath == relPath || strings.HasPrefix(f.RelativePath, relPath+"/") {
+			if _, err := s.db.Exec(`DELETE FROM workspace_files WHERE id = ?`, f.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ---- P1 profile (durable, small, injected) ----

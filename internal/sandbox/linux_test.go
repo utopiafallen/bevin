@@ -355,6 +355,47 @@ func TestLinuxExecNotRunning(t *testing.T) {
 	}
 }
 
+func TestLinuxExecIn(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	ctx := context.Background()
+	if _, err := b.Ensure(ctx, "alice"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	const cwd = "/data/workspaces/abc123"
+	res, err := b.ExecIn(ctx, "alice", "pwd", cwd, 10*time.Second)
+	if err != nil {
+		t.Fatalf("ExecIn: %v", err)
+	}
+	if res.Stdout != "stdout-line\n" || res.ExitCode != 0 {
+		t.Fatalf("result = %+v, want the captured output", res)
+	}
+	// The systemd-run invocation carried --working-directory <cwd>.
+	fake.mu.Lock()
+	found := false
+	for _, c := range fake.calls {
+		if c[0] != "systemd-run" {
+			continue
+		}
+		for i, a := range c {
+			if a == "--working-directory" && i+1 < len(c) && c[i+1] == cwd {
+				found = true
+			}
+		}
+	}
+	fake.mu.Unlock()
+	if !found {
+		t.Fatalf("no systemd-run call with --working-directory %s: %v", cwd, fake.calls)
+	}
+	// A relative working directory is rejected (container paths are
+	// absolute).
+	if _, err := b.ExecIn(ctx, "alice", "pwd", "relative/path", 10*time.Second); err == nil {
+		t.Fatal("relative cwd accepted, want an error")
+	}
+	if got := b.ContainerDataDir(); got != "/data" {
+		t.Fatalf("ContainerDataDir = %q, want /data", got)
+	}
+}
+
 func TestLinuxStopAndRemove(t *testing.T) {
 	b, fake, dataDir := newTestBackend(t)
 	ctx := context.Background()

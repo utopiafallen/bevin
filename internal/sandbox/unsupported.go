@@ -25,6 +25,12 @@ func (b *unsupportedBackend) Exec(context.Context, string, string, time.Duration
 	return Result{}, ErrDisabled
 }
 
+func (b *unsupportedBackend) ExecIn(context.Context, string, string, string, time.Duration) (Result, error) {
+	return Result{}, ErrDisabled
+}
+
+func (b *unsupportedBackend) ContainerDataDir() string { return "" }
+
 func (b *unsupportedBackend) Status(_ context.Context, _ string) (Info, error) {
 	return Info{}, ErrDisabled
 }

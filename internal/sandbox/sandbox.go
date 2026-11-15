@@ -98,8 +98,20 @@ type Backend interface {
 
 	// Exec runs a command string in the user's container (the
 	// container's shell interprets it — arbitrary code is the point).
-	// The container must be running.
+	// The container must be running. The working directory is the
+	// mapped user data dir (ExecIn with an empty cwd).
 	Exec(ctx context.Context, handle, command string, timeout time.Duration) (Result, error)
+
+	// ExecIn is Exec with an explicit working directory INSIDE the
+	// container (e.g. a workspace folder under the mapped data dir —
+	// see ContainerDataDir). An empty cwd = the data dir.
+	ExecIn(ctx context.Context, handle, command, cwd string, timeout time.Duration) (Result, error)
+
+	// ContainerDataDir is where the user's data directory is mapped in
+	// inside the container ("/data" on linux, C:\data on windows).
+	// The server uses it to compute container-side paths for exec
+	// working directories (e.g. a workspace's folder).
+	ContainerDataDir() string
 
 	// Status reports the current state of the user's container.
 	Status(ctx context.Context, handle string) (Info, error)

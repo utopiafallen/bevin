@@ -90,6 +90,11 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// NewID is a random 24-hex-char ID (the same scheme as the internal
+// newID) for callers that must create the ID before the row (e.g. the
+// workspace server, which names the folder after the id).
+func NewID() string { return newID() }
+
 // ---- embedding helpers (512-dim MRL stored as little-endian float32) ----
 
 func embedBlob(v []float32) []byte {

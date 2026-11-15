@@ -343,3 +343,50 @@ body.panel-chats .panel { display: flex; }
   #chat { padding: 0.5rem 0.05rem 0.55rem; }
   .page-card { max-width: 100%; }
 }
+
+/* ---- the workspaces page ---- */
+.ws-list { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.7rem; }
+.ws-card {
+  flex: 1 1 12rem; max-width: 16rem;
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.6rem 0.7rem; cursor: pointer;
+  background: var(--surface);
+  transition: background 0.15s, border-color 0.15s;
+}
+.ws-card:hover { background: var(--surface-2); }
+.ws-card.active { border-color: var(--accent); }
+.ws-card-title { font-weight: 600; font-size: 0.95rem; color: var(--text); }
+.ws-card-desc { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.15rem; }
+.ws-card-meta { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.4rem; }
+
+.ws-files { margin-top: 0.7rem; display: flex; flex-direction: column; }
+.ws-file-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.3rem 0.4rem; border-radius: 6px;
+  font-size: 0.85rem; color: var(--text);
+}
+.ws-file-row:hover { background: var(--surface-2); }
+.ws-file-row.dir { color: var(--text-muted); }
+.ws-file-path {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
+}
+.ws-file-size { flex: none; font-size: 0.75rem; color: var(--text-muted); }
+.ws-file-actions { flex: none; display: flex; gap: 0.5rem; align-items: center; }
+.ws-file-dl { font-size: 0.78rem; color: var(--text); text-decoration: none; opacity: 0.75; }
+.ws-file-dl:hover { opacity: 1; text-decoration: underline; }
+.ws-file-del {
+  border: none; background: transparent; color: var(--text-muted);
+  font-size: 1rem; line-height: 1; cursor: pointer; padding: 0.1rem 0.3rem; border-radius: 4px;
+}
+.ws-file-del:hover { background: var(--border); color: var(--danger); }
+
+.ws-run-out {
+  margin-top: 0.7rem; padding: 0.7rem; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 20rem; overflow: auto;
+}
