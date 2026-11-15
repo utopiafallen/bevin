@@ -68,13 +68,13 @@ func (s *UserStore) RecordAudit(kind, detail string) error {
 // ---- P10 skill (user-global) ----
 
 type Skill struct {
-	ID           int64   `json:"id"`
-	Name         string  `json:"name"`
-	Description  string  `json:"description"`
-	Content      string  `json:"content"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-	MemoryRefs   []int64 `json:"memory_refs,omitempty"`
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Content     string  `json:"content"`
+	CreatedAt   string  `json:"created_at"`
+	UpdatedAt   string  `json:"updated_at"`
+	MemoryRefs  []int64 `json:"memory_refs,omitempty"`
 }
 
 func (s *UserStore) CreateSkill(name, description, content string, memoryRefs []int64) (*Skill, error) {
@@ -295,7 +295,7 @@ func (s *UserStore) AddWorkspaceFile(wsid, name, relPath, mime string, size int6
 }
 
 func (s *UserStore) ListWorkspaceFiles(wsid string) ([]WorkspaceFile, error) {
-	rows, err := s.db.Query(`SELECT ` + wfCols + ` FROM workspace_files WHERE workspace_id = ? ORDER BY relative_path`, wsid)
+	rows, err := s.db.Query(`SELECT `+wfCols+` FROM workspace_files WHERE workspace_id = ? ORDER BY relative_path`, wsid)
 	if err != nil {
 		return nil, err
 	}

@@ -86,9 +86,9 @@ func TestLoopbackPort(t *testing.T) {
 		{"http://127.0.0.1:8081/v1", 8081},
 		{"http://localhost:6333", 6333},
 		{"http://[::1]:8081", 8081},
-		{"http://127.0.0.1", 0},          // no port
-		{"http://example.com:8081", 0},   // not loopback
-		{"http://remote:1234/v1", 0},     // not loopback
+		{"http://127.0.0.1", 0},        // no port
+		{"http://example.com:8081", 0}, // not loopback
+		{"http://remote:1234/v1", 0},   // not loopback
 		{"", 0},
 	}
 	for _, c := range cases {

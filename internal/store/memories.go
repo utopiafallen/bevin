@@ -92,7 +92,7 @@ func (s *UserStore) SearchMemories(query string, limit int) ([]Memory, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`
-		SELECT ` + memCols + `
+		SELECT `+memCols+`
 		FROM memories
 		WHERE status = 'active'
 		  AND EXISTS (SELECT 1 FROM memories_fts WHERE memories_fts.rowid = memories.id AND memories_fts MATCH ?)

@@ -21,9 +21,9 @@ import (
 
 // Sidecar kind names.
 const (
-	KindQdrant       = "qdrant"
-	KindLlamaServer  = "llama-server"
-	KindFFmpeg       = "ffmpeg"
+	KindQdrant        = "qdrant"
+	KindLlamaServer   = "llama-server"
+	KindFFmpeg        = "ffmpeg"
 	KindEmbeddingGGUF = "embedding-gguf"
 )
 

@@ -61,7 +61,7 @@ type job struct {
 	run      func(context.Context) error
 	ctx      context.Context
 	cancel   context.CancelFunc
-	started  bool // a slot was granted, or it was canceled while queued — exactly one handling
+	started  bool          // a slot was granted, or it was canceled while queued — exactly one handling
 	start    chan struct{} // closed when a slot is granted
 	queuedAt time.Time
 }

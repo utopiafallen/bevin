@@ -32,10 +32,10 @@ const (
 	qdrantVersion = "1.20.0"
 	llamaBuild    = "b12230"
 
-	embedGGUFRepo = "unsloth"
+	embedGGUFRepo     = "unsloth"
 	embedGGUFRepoPath = "embeddinggemma-2-GGUF"
-	embedGGUFName   = "embeddinggemma-2-Q8_0.gguf"
-	embedMMProjName = "mmproj-Q8_0.gguf"
+	embedGGUFName     = "embeddinggemma-2-Q8_0.gguf"
+	embedMMProjName   = "mmproj-Q8_0.gguf"
 )
 
 // sidecar endpoints (loopback) used when auto-provisioning.

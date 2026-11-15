@@ -100,7 +100,7 @@ type User struct {
 	Role        string `json:"role"` // admin | user
 	Status      string `json:"status"`
 	Email       string `json:"email"`
-	IDP         string `json:"idp"` // "" (the server's own IdP) | "oauth"
+	IDP         string `json:"idp"`         // "" (the server's own IdP) | "oauth"
 	IDPSubject  string `json:"idp_subject"` // stable external subject (provider "sub")
 	CreatedAt   string `json:"created_at"`
 }

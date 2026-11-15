@@ -26,17 +26,17 @@ import (
 // SMTP client path (optional AUTH; optional STARTTLS with a real TLS
 // handshake when startTLS is set + a loopback certificate is provided).
 type fakeSMTP struct {
-	ln           net.Listener
-	addr         string
-	mu           sync.Mutex
-	from         string
-	to           string
-	data         string
-	authUser     string
-	expectAuth   bool
-	startTLS     bool // advertise STARTTLS in EHLO + perform the handshake
-	cert         *tls.Certificate
-	tlsUpgraded  bool
+	ln          net.Listener
+	addr        string
+	mu          sync.Mutex
+	from        string
+	to          string
+	data        string
+	authUser    string
+	expectAuth  bool
+	startTLS    bool // advertise STARTTLS in EHLO + perform the handshake
+	cert        *tls.Certificate
+	tlsUpgraded bool
 }
 
 func startFakeSMTP(t *testing.T, expectAuth bool) *fakeSMTP {

@@ -13,8 +13,8 @@ import (
 // argon2id parameters (OWASP-recommended floor).
 const (
 	argonVersion   = argon2.Version // 19
-	argonTime      = 2             // iterations
-	argonMemoryKiB = 64 * 1024     // 64 MiB
+	argonTime      = 2              // iterations
+	argonMemoryKiB = 64 * 1024      // 64 MiB
 	argonThreads   = 4
 	argonKeyLen    = 32
 	argonSaltLen   = 16

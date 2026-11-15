@@ -111,7 +111,9 @@ func TestSchedulerCancelWhileQueued(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	queued := make(chan error, 1)
-	go func() { queued <- s.Submit(ctx, JobInfo{Handle: "u1", ConvID: "c1", ModelID: "m"}, func(context.Context) error { return nil }) }()
+	go func() {
+		queued <- s.Submit(ctx, JobInfo{Handle: "u1", ConvID: "c1", ModelID: "m"}, func(context.Context) error { return nil })
+	}()
 	time.Sleep(50 * time.Millisecond) // let it queue
 	cancel()
 	select {
@@ -128,7 +130,9 @@ func TestSchedulerCancelWhileQueued(t *testing.T) {
 	// The next job must run once the holder releases its slot.
 	close(releaseHolder)
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.Submit(context.Background(), JobInfo{Handle: "u2", ConvID: "c2", ModelID: "m"}, func(context.Context) error { return nil }) }()
+	go func() {
+		errCh <- s.Submit(context.Background(), JobInfo{Handle: "u2", ConvID: "c2", ModelID: "m"}, func(context.Context) error { return nil })
+	}()
 	select {
 	case err := <-errCh:
 		if err != nil {
