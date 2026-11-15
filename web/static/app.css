@@ -9,10 +9,10 @@
  * at full width.
  *
  * The chat column is centered in the remaining space. On ultrawide screens
- * its width is derived from the viewport height (×1.6), so the visible chat
- * stays roughly 16:10 and the screen's extra width becomes margin; on
- * normal screens the width cap hits first, so the chat uses the full
- * available width.
+ * its width is derived from the viewport height (4:3), so the visible chat
+ * keeps a comfortable reading ratio and the screen's extra width becomes
+ * margin; on normal screens the width cap hits first, so the chat uses the
+ * full available width.
  *
  * Loaded only by index.html — the admin and setup pages keep their own
  * layouts.
@@ -134,14 +134,14 @@ body.sb-collapsed .sidebar { margin-left: calc(-1 * var(--sb-w)); }
 }
 
 /* The chat column: centered. On ultrawide screens its width is derived
-   from its own height (1.6× → roughly 16:10): the stage's vertical padding
-   (0.9 + 1.1 = 2rem) is subtracted so the ratio is against the column's
-   actual height, not the viewport's. min(100%, …) keeps the cap below the
+   from its own height (4:3): the stage's vertical padding (0.9 + 1.1 =
+   2rem) is subtracted so the ratio is against the column's actual
+   height, not the viewport's. min(100%, …) keeps the cap below the
    available width on normal screens, where the chat simply fills it. */
 .column {
   width: 100%;
-  max-width: min(100%, calc((100vh - var(--topbar-h) - 2rem) * 1.6));
-  max-width: min(100%, calc((100dvh - var(--topbar-h) - 2rem) * 1.6));
+  max-width: min(100%, calc((100vh - var(--topbar-h) - 2rem) * 4 / 3));
+  max-width: min(100%, calc((100dvh - var(--topbar-h) - 2rem) * 4 / 3));
   display: flex; flex-direction: column;
   min-height: 0;
 }
