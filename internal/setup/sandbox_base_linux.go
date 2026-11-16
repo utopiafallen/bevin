@@ -15,11 +15,13 @@ import (
 )
 
 // linuxBaseURL is the OS the per-user containers are created from: the
-// Ubuntu 22.04 (jammy) LTS cloud rootfs — a minimal full OS WITH systemd
-// (systemd-nspawn --boot needs an init inside) — ~40 MB compressed.
-// Pinned to the LTS "current" alias: a stable URL Canonical keeps updated
-// within the jammy series (point releases).
-const linuxBaseURL = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64-root.tar.xz"
+// Ubuntu 26.04 LTS (resolute) cloud rootfs — the latest LTS server
+// release (user directive: track the latest Ubuntu LTS; a new bevin
+// release bumps this pin when Canonical cuts a new one) — a minimal full
+// OS WITH systemd (systemd-nspawn --boot needs an init inside) — ~40 MB
+// compressed. The "current" alias is pinned: a stable URL Canonical keeps
+// updated within the resolute series (point releases).
+const linuxBaseURL = "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64-root.tar.xz"
 
 // sandboxBaseReady reports whether the linux base rootfs is provisioned.
 func sandboxBaseReady(dataDir string) bool {

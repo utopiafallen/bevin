@@ -150,14 +150,15 @@ func (a *App) routes() {
 	// user-level settings (the chat UI's user-name button lands here).
 	mux.HandleFunc("GET /api/profile", a.requireAuth(a.userProfile))
 
-	// Per-user sandbox (container) API: the user's OWN environment only
-	// (the handle comes from the session). chatGate: regular users only —
-	// the admin has no environment.
-	mux.HandleFunc("GET /api/sandbox", a.chatGate(a.sandboxStatus))
-	mux.HandleFunc("POST /api/sandbox/ensure", a.chatGate(a.sandboxEnsure))
-	mux.HandleFunc("POST /api/sandbox/exec", a.chatGate(a.sandboxExec))
-	mux.HandleFunc("POST /api/sandbox/stop", a.chatGate(a.sandboxStop))
-	mux.HandleFunc("DELETE /api/sandbox", a.chatGate(a.sandboxRemove))
+	// Per-user sandbox (environment) API: the user's OWN environment
+	// (the admin may also use it — the only role that sees the runtime
+	// detail, needed to diagnose a lost runtime). envGate: any
+	// authenticated role (the handle comes from the session).
+	mux.HandleFunc("GET /api/sandbox", a.envGate(a.sandboxStatus))
+	mux.HandleFunc("POST /api/sandbox/ensure", a.envGate(a.sandboxEnsure))
+	mux.HandleFunc("POST /api/sandbox/exec", a.envGate(a.sandboxExec))
+	mux.HandleFunc("POST /api/sandbox/stop", a.envGate(a.sandboxStop))
+	mux.HandleFunc("DELETE /api/sandbox", a.envGate(a.sandboxRemove))
 
 	// Workspace management: the user's working folders (created under
 	// their data dir, mapped into their container, runnable in it).
@@ -251,8 +252,8 @@ func (a *App) applyConfig(cfg *config.ServerConfig) (reloaded bool) {
 	a.cfg = cfg
 	a.mail = email.New(cfg.Email)
 	a.cfgMu.Unlock()
-	// The [sandbox] area can flip at runtime (an admin enabling it on an
-	// existing server) — rebuild the backend with the new config.
+	// Rebuild the sandbox backend with the new config (the sandbox is
+	// always enabled — its values, if changed, apply here).
 	a.buildSandbox(cfg)
 	if err != nil {
 		log.Printf("bevin: agent reload after config save: %v", err)

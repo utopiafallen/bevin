@@ -189,15 +189,16 @@
           </section>
 
           <!-- The workspaces page: the user's working folders on the
-               server — each is mapped into the user's container and can
-               run code there. Browse, upload, download, delete, run. -->
+               server — each can run code in the user's own environment
+               (a container under the hood — a hidden detail from the
+               user; the UI says "environment", never "container").
+               Browse, upload, download, delete, run. -->
           <section class="page-card" id="workspacePage" style="display:none;">
             <div class="eyebrow">Workspaces</div>
             <h3 style="margin:.3rem 0 .2rem;">Your workspaces</h3>
             <p class="muted" style="margin-top:.2rem;">
-              A workspace is a folder on bevin's server, mapped into your
-              own container — upload files, and run code against them in
-              your environment.
+              A workspace is a folder on bevin's server — upload files,
+              and run code against them in your own environment.
             </p>
             <div id="wsList" class="ws-list"></div>
             <form id="wsCreateForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.8rem;">
@@ -222,7 +223,7 @@
               <div class="profile-section">
                 <h4>Run in workspace</h4>
                 <p class="muted" id="wsRunHint" style="font-size:.85rem; margin-top:.2rem;">
-                  Runs inside your own container (created on first use),
+                  Runs in your own environment (created on first use),
                   with the workspace as the working directory.
                 </p>
                 <textarea id="wsCmd" rows="2" placeholder="e.g. python3 analyze.py &gt; report.txt" style="width:100%; box-sizing:border-box; font:inherit; font-size:.9rem;"></textarea>
@@ -1469,20 +1470,19 @@
       $("wsRunMsg").textContent = "";
       loadWorkspaces(); // refresh the active card
       await loadWsFiles();
-      // The container state decides what the run box can do (the server
-      // answers 503 with the runtime detail when sandboxing is off).
+      // The environment state decides what the run box can do (the
+      // server answers 503 when this platform has no execution
+      // environment — containerization is a hidden detail, so the
+      // wording stays neutral).
       fetch("/api/sandbox").then(function (r) {
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
         ws.sandbox = res.d;
         var hint = $("wsRunHint");
         if (!res.ok) {
-          hint.textContent = "Containers are not enabled on this server — file management works, but running code in your workspace does not.";
-        } else if (res.d.runtime && !res.d.runtime.ok) {
-          hint.textContent = "The container runtime is not ready on this server: " + (res.d.runtime.detail || "") +
-            " File management works; running code in your workspace does not until the runtime is enabled.";
+          hint.textContent = "Running code is not available on this server yet — file management works.";
         } else {
-          hint.textContent = "Runs inside your own container (created on first use), with the workspace as the working directory.";
+          hint.textContent = "Runs in your own environment (created on first use), with the workspace as the working directory.";
         }
       }).catch(function () {});
     }
@@ -1604,7 +1604,7 @@
       if (!cmd) return;
       var btn = this;
       btn.disabled = true;
-      $("wsRunMsg").textContent = "Running… (first run creates + boots the container, it can take minutes)";
+      $("wsRunMsg").textContent = "Running… (the first run prepares your environment, it can take minutes)";
       $("wsRunOut").hidden = true;
       try {
         var r = await fetch("/api/workspaces/" + ws.current + "/run", {
@@ -1613,8 +1613,7 @@
         });
         var d = await r.json();
         if (!r.ok) {
-          var detail = d.runtime && d.runtime.detail ? " — " + d.runtime.detail : "";
-          throw new Error(d.error + detail);
+          throw new Error(d.error);
         }
         var out = d.stdout || "";
         var err = d.stderr || "";

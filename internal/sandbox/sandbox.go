@@ -30,8 +30,9 @@ import (
 	"time"
 )
 
-// ErrDisabled is returned when sandboxing is disabled in the server config.
-var ErrDisabled = errors.New("sandbox: disabled in the server config")
+// ErrDisabled is returned by New on platforms with no container backend
+// (darwin, ...) — the sandbox API then answers 503.
+var ErrDisabled = errors.New("sandbox: not supported on this platform")
 
 // ErrNotRunning is returned by Exec when the user's container is not up.
 var ErrNotRunning = errors.New("sandbox: the user's container is not running")
@@ -68,9 +69,10 @@ type Result struct {
 // Config is the server-level sandbox configuration (server.toml
 // [sandbox]). Zero values mean the platform default.
 type Config struct {
-	// Enabled is the master switch. When false the sandbox API answers
-	// 503 and the setup check is skipped (an explicit admin opt-out for
-	// machines that cannot run containers).
+	// Enabled is always true for a loaded server config (per-user
+	// containers are not optional — the config layer canonicalizes it;
+	// see config.Sandbox). The backend is nil on platforms with no
+	// container API, where the API answers 503.
 	Enabled bool `toml:"enabled" json:"enabled"`
 	// Network is the linux container networking mode: "veth" (default —
 	// a private per-container /24 with NATed outbound) or "private"

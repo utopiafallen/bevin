@@ -111,8 +111,9 @@ func TestValidHandle(t *testing.T) {
 // secret replacement is the caller's job (CommitEdit stores what it is
 // given; the admin endpoint preserves a blank secret).
 func TestCommitEditOAuth(t *testing.T) {
-	m, _, _ := newTestSetup(t)
+	m, _, dir := newTestSetup(t)
 	validAnswers(m)
+	finalizePrep(t, dir, true)
 	cfg, err := m.Finalize(context.Background())
 	if err != nil {
 		t.Fatal(err)

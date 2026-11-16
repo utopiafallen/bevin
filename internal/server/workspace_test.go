@@ -224,19 +224,16 @@ func TestWorkspaceLifecycle(t *testing.T) {
 		t.Fatal("docs/ survived the directory delete")
 	}
 
-	// 10. Run: sandboxing is off in the test config -> 503 with the
-	//     runtime detail (the command never leaves the host).
+	// 10. Run: the test app has no sandbox backend (testApp skips
+	//     buildSandbox — in production the backend is only missing on
+	//     platforms without a container backend) -> 503 for the regular
+	//     user with the neutral wording (the command never leaves the
+	//     host; the container internals stay hidden).
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/workspaces/"+wsID+"/run", bob, map[string]string{"command": "echo hi"}))
 	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("run code = %d body=%s, want 503 (sandbox off)", w.Code, w.Body.String())
+		t.Fatalf("run code = %d body=%s, want 503 (no execution environment)", w.Code, w.Body.String())
 	}
-	var runRes struct {
-		Runtime struct {
-			OK bool `json:"ok"`
-		} `json:"runtime"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &runRes)
 
 	// 11. Delete the workspace: folder + rows go.
 	w = httptest.NewRecorder()

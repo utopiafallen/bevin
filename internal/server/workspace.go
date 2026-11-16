@@ -532,15 +532,19 @@ func (a *App) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
-// POST /api/workspaces/{id}/run — run a command in the user's container
-// with the working directory set to the workspace folder (the container
-// is created + started on first use). This is the container-runtime half
-// of the workspace: the user's files in the user's environment. Body:
+// POST /api/workspaces/{id}/run — run a command in the user's
+// environment with the working directory set to the workspace folder (the
+// environment is created + started on first use). This is the
+// execution half of the workspace: the user's files in the user's
+// environment. Containerization is a hidden detail from the user — the
+// error wording below never names it (the runtime internals are
+// admin-only, see envError). Body:
 // {"command": "...", "timeout_ms": 120000} (timeout optional, default 60
 // s, capped at 5 min by the sandbox backend).
 //
-// 503 = sandboxing is disabled server-side (with the runtime detail);
-// 412 = the runtime is not ready / the container could not be started;
+// 503 = the platform has no container backend (bevin targets Linux +
+// Windows);
+// 412 = the environment is not ready / not running;
 // 502 = the exec itself failed.
 func (a *App) workspaceRun(w http.ResponseWriter, r *http.Request) {
 	_, us, ok := a.workspaceStore(w, r)
@@ -572,17 +576,19 @@ func (a *App) workspaceRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rt := a.sandboxRuntime(r.Context()); !rt.OK {
-		writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": "the container runtime is not ready", "runtime": rt})
+		envError(w, http.StatusPreconditionFailed, u,
+			"your environment is not ready yet — try again in a moment", &rt, nil)
 		return
 	}
-	// The container must exist before the exec (first run: rootfs from
+	// The environment must exist before the exec (first run: rootfs from
 	// the base image + boot — can take minutes; the server has no HTTP
 	// timeouts).
 	if _, err := bk.Ensure(r.Context(), u.Handle); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "starting the container failed: " + err.Error()})
+		envError(w, http.StatusBadGateway, u,
+			"your environment could not be started — try again", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
-	// The workspace folder inside the container: the data dir is mapped
+	// The workspace folder inside the environment: the data dir is mapped
 	// to ContainerDataDir(), so the folder is <data>/workspaces/<id>.
 	cwd := filepath.Join(bk.ContainerDataDir(), "workspaces", ws.ID)
 	res, err := bk.ExecIn(r.Context(), u.Handle, req.Command, cwd, timeout)
@@ -591,7 +597,7 @@ func (a *App) workspaceRun(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, sandbox.ErrNotRunning) {
 			code = http.StatusPreconditionFailed
 		}
-		writeJSON(w, code, map[string]any{"error": err.Error()})
+		envError(w, code, u, "your environment could not run the command", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

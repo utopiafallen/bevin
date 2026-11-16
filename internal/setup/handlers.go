@@ -149,9 +149,6 @@ type advancePayload struct {
 	Aux      []config.AuxModel `json:"aux"`
 	Sidecars config.Sidecars   `json:"sidecars"`
 	Email    config.Email      `json:"email"`
-	// SkipSandbox is the sidecars step's explicit opt-out of per-user
-	// containers (the runtime check is shown on that step).
-	SkipSandbox bool `json:"skip_sandbox"`
 }
 
 func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
@@ -181,9 +178,9 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 		err = h.mgr.SetAux(p.Aux)
 	case "sidecars":
 		// display-only for the sidecars themselves (the server auto-
-		// provisions them); the step also carries the explicit container
-		// opt-out (SkipSandbox — see the Finalize gate in setup.go).
-		err = h.mgr.SetSkipSandbox(p.SkipSandbox)
+		// provisions them); the per-user container runtime check + base
+		// image are shown on the step and enforced by the Finalize gate.
+		err = nil
 	case "email":
 		err = h.mgr.SetEmail(p.Email)
 	case "review":

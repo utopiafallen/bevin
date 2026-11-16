@@ -16,18 +16,26 @@ import (
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
-// buildSandbox (re)builds the per-user container backend from the config:
-// nil when sandboxing is disabled in the config or unsupported on this
-// platform. Called at boot and on every config save (the [sandbox] area
-// can flip at runtime — an admin enabling it on an existing server).
+// The user's per-user execution environment is a container under the
+// hood, but containerization is a HIDDEN detail from the user (user
+// directive): the user-facing surface says "your environment" and never
+// leaks the runtime internals (nspawn/HCS, service names, remediation
+// text). The full detail (the runtime check's diagnosis + the raw
+// backend error) is still returned — to the ADMIN only, for server
+// maintenance; the admin is the one who enables the OS runtime.
+
+// buildSandbox (re)builds the per-user container backend from the config.
+// Per-user containers are mandatory (there is no config off switch — the
+// config layer canonicalizes [sandbox] enabled to true), so the backend
+// is built whenever the platform has a container API; it is nil on
+// unsupported platforms (the API then answers 503). Called at boot and on
+// every config save.
 func (a *App) buildSandbox(cfg *config.ServerConfig) {
 	var bk sandbox.Backend
-	if cfg.Sandbox.Enabled {
-		if b, err := sandbox.New(a.dataDir, sandboxConfigFrom(cfg.Sandbox)); err == nil {
-			bk = b
-		} else if !errors.Is(err, sandbox.ErrDisabled) {
-			log.Printf("bevin: sandbox backend unavailable: %v", err)
-		}
+	if b, err := sandbox.New(a.dataDir, sandboxConfigFrom(cfg.Sandbox)); err == nil {
+		bk = b
+	} else if !errors.Is(err, sandbox.ErrDisabled) {
+		log.Printf("bevin: sandbox backend unavailable: %v", err)
 	}
 	a.cfgMu.Lock()
 	a.sandboxBk = bk
@@ -38,7 +46,7 @@ func sandboxConfigFrom(c config.Sandbox) sandbox.Config {
 	return sandbox.Config{Enabled: c.Enabled, Network: c.Network, Cores: c.Cores, MemoryMB: c.MemoryMB}
 }
 
-// sandboxBackend returns the live backend (nil = disabled/unsupported).
+// sandboxBackend returns the live backend (nil = unsupported platform).
 func (a *App) sandboxBackend() sandbox.Backend {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
@@ -51,8 +59,7 @@ func (a *App) sandboxConfig() sandbox.Config {
 }
 
 // sandboxRuntime reports the OS container runtime's readiness — from the
-// live backend when there is one, from a direct check otherwise (so a
-// disabled server can still tell the user what the runtime looks like).
+// live backend when there is one, from a direct check otherwise.
 func (a *App) sandboxRuntime(ctx context.Context) sandbox.Runtime {
 	if bk := a.sandboxBackend(); bk != nil {
 		return bk.Runtime(ctx)
@@ -60,71 +67,122 @@ func (a *App) sandboxRuntime(ctx context.Context) sandbox.Runtime {
 	return sandbox.Check(ctx, a.dataDir, a.sandboxConfig())
 }
 
-// sandboxGate writes the 503 when sandboxing is off and returns the
-// request's backend + user otherwise (the handle ALWAYS comes from the
-// session — never from the request body).
+func (a *App) sandboxRuntimePtr(ctx context.Context) *sandbox.Runtime {
+	rt := a.sandboxRuntime(ctx)
+	return &rt
+}
+
+// isAdmin reports whether the session user is an admin (the admin sees
+// the runtime internals; the regular user sees the neutral wording).
+func isAdmin(u *store.User) bool { return u != nil && u.Role == "admin" }
+
+// envError writes the user-facing error for the environment state: the
+// neutral wording for regular users (the container internals are hidden
+// from them), the runtime detail + the raw error for the admin (who is
+// the one who enables the OS runtime).
+func envError(w http.ResponseWriter, code int, u *store.User, neutral string, rt *sandbox.Runtime, raw error) {
+	resp := map[string]any{"error": neutral}
+	if isAdmin(u) {
+		if rt != nil {
+			resp["runtime"] = *rt
+		}
+		if raw != nil {
+			resp["detail"] = raw.Error()
+		}
+	}
+	writeJSON(w, code, resp)
+}
+
+// envGate authenticates the request and admits ANY role (the sandbox API
+// is user-facing — a user's OWN environment — but the admin may also use
+// it: it is the admin who must diagnose a lost runtime, and only the
+// admin sees the runtime detail in the responses). The handle ALWAYS
+// comes from the session — never from the request body.
+func (a *App) envGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok, err := auth.SessionToken(r)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+			return
+		}
+		u, err := a.prov.UserFromToken(r.Context(), tok)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
+			return
+		}
+		next(w, r.WithContext(auth.ContextWithUser(r.Context(), u)))
+	}
+}
+
+// sandboxGate writes the 503 when the platform has no container backend
+// and returns the request's backend + user otherwise (the handle ALWAYS
+// comes from the session — never from the request body).
 func (a *App) sandboxGate(w http.ResponseWriter, r *http.Request) (sandbox.Backend, *store.User, bool) {
 	u := auth.UserFromContext(r.Context())
 	bk := a.sandboxBackend()
 	if bk == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error":   "sandboxing is not enabled on this server (server.toml [sandbox])",
-			"runtime": a.sandboxRuntime(r.Context()),
-		})
+		envError(w, http.StatusServiceUnavailable, u,
+			"your environment is not available on this server", a.sandboxRuntimePtr(r.Context()), nil)
 		return nil, nil, false
 	}
 	return bk, u, true
 }
 
-// GET /api/sandbox — the OS runtime readiness + the user's container
-// state.
+// GET /api/sandbox — the user's environment state (the runtime detail
+// is admin-only — the container internals are hidden from the user).
+// A missing runtime is a STATE, not a gateway failure: 412 (nothing can
+// be running without it), the same precondition as ensure.
 func (a *App) sandboxStatus(w http.ResponseWriter, r *http.Request) {
 	bk, u, ok := a.sandboxGate(w, r)
 	if !ok {
 		return
 	}
-	info, err := bk.Status(r.Context(), u.Handle)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error":   err.Error(),
-			"runtime": a.sandboxRuntime(r.Context()),
-		})
+	if rt := a.sandboxRuntime(r.Context()); !rt.OK {
+		envError(w, http.StatusPreconditionFailed, u,
+			"your environment is not ready yet — try again in a moment", &rt, nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"runtime":   a.sandboxRuntime(r.Context()),
-		"container": info,
-	})
+	info, err := bk.Status(r.Context(), u.Handle)
+	if err != nil {
+		envError(w, http.StatusBadGateway, u,
+			"your environment could not be reached", a.sandboxRuntimePtr(r.Context()), err)
+		return
+	}
+	resp := map[string]any{"environment": info}
+	if isAdmin(u) {
+		resp["runtime"] = a.sandboxRuntime(r.Context())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // POST /api/sandbox/ensure — create (when needed) and start the user's
-// container. Idempotent. Can take a while on first run (rootfs copy from
-// the base image + container boot) — the client should allow minutes.
+// environment. Idempotent. Can take a while on first run (rootfs copy
+// from the base image + boot) — the client should allow minutes.
 func (a *App) sandboxEnsure(w http.ResponseWriter, r *http.Request) {
 	bk, u, ok := a.sandboxGate(w, r)
 	if !ok {
 		return
 	}
-	// The runtime must be ready NOW (the setup check gates this at install
-	// time; this guards a runtime lost mid-flight, e.g. the service
-	// stopped). 412 = the precondition (the enabled runtime) is not met.
+	// The runtime must be ready NOW (the setup check gates this at
+	// install time; this guards a runtime lost mid-flight, e.g. the
+	// service stopped). 412 = the precondition (the ready runtime) is
+	// not met.
 	if rt := a.sandboxRuntime(r.Context()); !rt.OK {
-		writeJSON(w, http.StatusPreconditionFailed, map[string]any{
-			"error":   "the container runtime is not ready",
-			"runtime": rt,
-		})
+		envError(w, http.StatusPreconditionFailed, u,
+			"your environment is not ready yet — try again in a moment", &rt, nil)
 		return
 	}
 	info, err := bk.Ensure(r.Context(), u.Handle)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		envError(w, http.StatusBadGateway, u,
+			"your environment could not be started — try again", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
 }
 
-// POST /api/sandbox/exec — run a command string in the user's container
-// (the container's shell interprets it — arbitrary code is the point).
+// POST /api/sandbox/exec — run a command string in the user's
+// environment (its shell interprets it — arbitrary code is the point).
 // Body: {"command": "...", "timeout_ms": 120000} (timeout optional,
 // default 60 s, capped at 5 min).
 func (a *App) sandboxExec(w http.ResponseWriter, r *http.Request) {
@@ -150,17 +208,22 @@ func (a *App) sandboxExec(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := bk.Exec(r.Context(), u.Handle, req.Command, timeout)
 	if err != nil {
+		// A non-zero command EXIT is a Result, not an error — everything
+		// that errors here is infrastructure (the environment not
+		// running, the exec plumbing), so it gets the neutral wording
+		// for the user.
 		code := http.StatusBadGateway
 		if errors.Is(err, sandbox.ErrNotRunning) {
 			code = http.StatusPreconditionFailed
 		}
-		writeJSON(w, code, map[string]any{"error": err.Error()})
+		envError(w, code, u, "your environment could not run the command", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
 
-// POST /api/sandbox/stop — stop the user's container (storage preserved).
+// POST /api/sandbox/stop — stop the user's environment (storage
+// preserved).
 func (a *App) sandboxStop(w http.ResponseWriter, r *http.Request) {
 	bk, u, ok := a.sandboxGate(w, r)
 	if !ok {
@@ -168,13 +231,14 @@ func (a *App) sandboxStop(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := bk.Stop(r.Context(), u.Handle)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		envError(w, http.StatusBadGateway, u,
+			"your environment could not be stopped", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
 }
 
-// DELETE /api/sandbox — stop the user's container and delete its
+// DELETE /api/sandbox — stop the user's environment and delete its
 // persistent storage (the user's data directory is untouched).
 func (a *App) sandboxRemove(w http.ResponseWriter, r *http.Request) {
 	bk, u, ok := a.sandboxGate(w, r)
@@ -182,7 +246,8 @@ func (a *App) sandboxRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := bk.Remove(r.Context(), u.Handle); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		envError(w, http.StatusBadGateway, u,
+			"your environment could not be removed", a.sandboxRuntimePtr(r.Context()), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"removed": true})

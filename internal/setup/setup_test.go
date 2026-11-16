@@ -25,6 +25,31 @@ import (
 
 func jsonReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
+// finalizePrep pins the mandatory sandbox prerequisites for a Finalize
+// test: the OS runtime check (host-dependent, so it is replaced) and a
+// pre-provisioned base image (the real one is a multi-hundred-MB
+// download — the fake marker makes sandboxBaseReady true without it).
+func finalizePrep(t *testing.T, dir string, runtimeOK bool) {
+	t.Helper()
+	orig := sandboxCheckRuntime
+	sandboxCheckRuntime = func(context.Context, string, sandbox.Config) sandbox.Runtime {
+		return sandbox.Runtime{OK: runtimeOK}
+	}
+	t.Cleanup(func() { sandboxCheckRuntime = orig })
+	if err := os.MkdirAll(filepath.Join(sandbox.BaseRoot(dir), "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox.BaseRoot(dir), "etc", "os-release"), []byte("ID=fake\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sandbox.BaseDir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox.BaseDir(dir), "base.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWizardTemplateRenders(t *testing.T) {
 	var buf bytes.Buffer
 	if err := wizardTmpl.Execute(&buf, map[string]any{"DataDir": "/tmp/x", "Server": map[string]any{"bind": "0.0.0.0", "port": 5656, "dataDir": "/tmp/x"}, "Steps": stepOrder}); err != nil {
@@ -103,9 +128,6 @@ func validAnswers(m *Manager) {
 	}})
 	_ = m.SetSidecars(config.Sidecars{Qdrant: "http://127.0.0.1:6333", LlamaServer: "http://127.0.0.1:8081"})
 	_ = m.SetEmail(config.Email{Enabled: true, SMTPHost: "smtp.example.com", SMTPPort: 587, Username: "bevin@example.com", Password: "pw", FromName: "Bevin"})
-	// The tests must not depend on this host's container runtime: opt
-	// out of the sandbox (the Finalize gate is covered by its own test).
-	_ = m.SetSkipSandbox(true)
 }
 
 func TestStateValidation(t *testing.T) {
@@ -127,6 +149,7 @@ func TestStateValidation(t *testing.T) {
 func TestFinalize(t *testing.T) {
 	m, fs, dir := newTestSetup(t)
 	validAnswers(m)
+	finalizePrep(t, dir, true)
 
 	cfg, err := m.Finalize(context.Background())
 	if err != nil {
@@ -247,8 +270,9 @@ func TestDownloadResumable(t *testing.T) {
 }
 
 func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
-	m, _, _ := newTestSetup(t)
+	m, _, dir := newTestSetup(t)
 	validAnswers(m)
+	finalizePrep(t, dir, true)
 	cfg, err := m.Finalize(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -294,46 +318,33 @@ func TestLoadFromConfigAndFinalizeEdit(t *testing.T) {
 	}
 }
 
+// TestFinalizeSandboxGate — the mandatory per-user container gate (no
+// opt-out — user directive): without a ready OS container runtime,
+// finalize is refused with the remediation; with one (pinned), it
+// completes and saves [sandbox] enabled.
 func TestFinalizeSandboxGate(t *testing.T) {
-	m, _, dir := newTestSetup(t)
-	validAnswers(m)
-	// The default (opt-out UNset — validAnswers sets it, so reset it): a
-	// fresh setup gates on the OS container runtime. The host's runtime
-	// state is host-dependent, so assert the matching outcome: no runtime
-	// → refused with remediation; runtime ready → the base is provisioned
-	// and [sandbox] saved enabled.
-	_ = m.SetSkipSandbox(false)
-	cfg, err := m.Finalize(context.Background())
-	rt := sandbox.Check(context.Background(), dir, sandbox.Config{Enabled: true, Network: "veth"})
-	if !rt.OK {
-		if err == nil {
-			t.Fatal("finalize succeeded on a host without a container runtime (no opt-out)")
-		}
-		if !strings.Contains(err.Error(), "container runtime is not ready") {
+	t.Run("refused when the runtime is not ready", func(t *testing.T) {
+		m, _, dir := newTestSetup(t)
+		validAnswers(m)
+		finalizePrep(t, dir, false)
+		if _, err := m.Finalize(context.Background()); err == nil {
+			t.Fatal("finalize succeeded on a host without a container runtime")
+		} else if !strings.Contains(err.Error(), "the OS container runtime is not ready") {
 			t.Fatalf("gate error = %q, want the runtime remediation", err)
 		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("runtime ready, but finalize failed: %v", err)
-	}
-	if !cfg.Sandbox.Enabled {
-		t.Fatal("a gated fresh setup must save [sandbox] enabled")
-	}
-}
-
-// TestFinalizeSandboxSkip — the explicit opt-out: setup completes on ANY
-// host (runtime or not) and saves [sandbox] disabled.
-func TestFinalizeSandboxSkip(t *testing.T) {
-	m, _, _ := newTestSetup(t)
-	validAnswers(m) // sets SkipSandbox(true)
-	cfg, err := m.Finalize(context.Background())
-	if err != nil {
-		t.Fatalf("skip-sandbox finalize: %v", err)
-	}
-	if cfg.Sandbox.Enabled {
-		t.Fatal("the opt-out must save [sandbox] disabled")
-	}
+	})
+	t.Run("proceeds when the runtime is ready", func(t *testing.T) {
+		m, _, dir := newTestSetup(t)
+		validAnswers(m)
+		finalizePrep(t, dir, true)
+		cfg, err := m.Finalize(context.Background())
+		if err != nil {
+			t.Fatalf("runtime ready, but finalize failed: %v", err)
+		}
+		if !cfg.Sandbox.Enabled {
+			t.Fatal("a gated fresh setup must save [sandbox] enabled")
+		}
+	})
 }
 
 // TestCommitEdit — the admin config pages save a subset of the config areas
@@ -341,8 +352,9 @@ func TestFinalizeSandboxSkip(t *testing.T) {
 // sidecar provisioning: the session secret, sidecar endpoints, and the
 // derived embedder are preserved as-is, and the un-saved areas are untouched.
 func TestCommitEdit(t *testing.T) {
-	m, _, _ := newTestSetup(t)
+	m, _, dir := newTestSetup(t)
 	validAnswers(m)
+	finalizePrep(t, dir, true)
 	cfg, err := m.Finalize(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -605,11 +617,12 @@ func TestSetEmailPlaceholderDefaults(t *testing.T) {
 }
 
 func TestSetupHandler(t *testing.T) {
-	m, _, _ := newTestSetup(t)
+	m, _, dir := newTestSetup(t)
 	transitioned := false
 	h := NewHandler(m, "tok123", func() { transitioned = true })
 	mux := http.NewServeMux()
 	h.Routes(mux)
+	finalizePrep(t, dir, true) // the mandatory sandbox gate (pinned runtime + fake base)
 
 	// No token → 401.
 	r := httptest.NewRequest(http.MethodGet, "/setup/state", nil)

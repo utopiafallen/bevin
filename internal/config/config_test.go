@@ -195,10 +195,15 @@ func TestValidateSandbox(t *testing.T) {
 	if err := base(Sandbox{Enabled: true, MemoryMB: -1}).Validate(); err == nil {
 		t.Fatal("expected error for negative memory")
 	}
-	// Disabled: the values are not validated (an admin opt-out of a
-	// machine that cannot run containers keeps its file untouched).
-	if err := base(Sandbox{Enabled: false, Network: "nonsense", Cores: 999}).Validate(); err != nil {
-		t.Fatalf("disabled sandbox must not validate values: %v", err)
+	// Per-user containers are not optional: Validate canonicalizes
+	// Enabled to true (a legacy enabled=false is turned on) and the
+	// values are ALWAYS validated — a typo fails loudly either way.
+	c2 := base(Sandbox{Enabled: false, Network: "nonsense"})
+	if err := c2.Validate(); err == nil {
+		t.Fatal("expected error for a network mode typo (the values are validated even when a legacy file carries enabled=false)")
+	}
+	if !c2.Sandbox.Enabled {
+		t.Fatal("Validate must canonicalize Sandbox.Enabled to true (per-user containers are not optional)")
 	}
 }
 

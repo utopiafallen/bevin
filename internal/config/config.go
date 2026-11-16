@@ -71,12 +71,15 @@ type ServerConfig struct {
 // user's data directory, with persistent per-user storage for installed
 // applications.
 //
-// Enabled is set by first-time setup (which checks the OS runtime and
-// prompts the user to enable it before proceeding). Pre-existing configs
-// without the section get the zero value (disabled) — the sandbox is
-// opt-in for already-running servers, enabled by a fresh setup.
+// Per-user containers are a CORE part of bevin, not an option (user
+// directive): first-time setup gates on the OS runtime + base image and
+// saves this section enabled. Enabled is CANONICALIZED to true at load
+// (like the model profile names — canonicalization, not a migration): a
+// pre-mandatory config carrying enabled=false (the old setup opt-out) is
+// turned on at the next load — the admin's remedy for a machine without
+// the runtime is to enable the runtime, not to keep the feature off.
 type Sandbox struct {
-	Enabled bool `toml:"enabled" json:"enabled"`
+	Enabled bool `toml:"enabled" json:"enabled"` // always true (canonicalized at load)
 	// Network is the linux container networking mode: "veth" (default —
 	// a private per-container /24 with NATed outbound) or "private" (no
 	// network at all). Ignored on Windows (Hyper-V isolated containers
@@ -357,9 +360,13 @@ func (c *ServerConfig) Validate() error {
 			c.Email.FromAddress = c.Email.Username
 		}
 	}
-	// Sandbox: defaults + loud validation of the values (a typo in the
-	// network mode must not silently fall back to a default).
-	if c.Sandbox.Enabled {
+	// Sandbox: per-user containers are not optional (user directive) —
+	// canonicalize Enabled to true at load (a pre-mandatory config's
+	// enabled=false, the old setup opt-out, is turned on), then loud
+	// validation of the values (a typo in the network mode must not
+	// silently fall back to a default).
+	c.Sandbox.Enabled = true
+	{
 		if c.Sandbox.Network == "" {
 			c.Sandbox.Network = "veth"
 		}

@@ -8,9 +8,9 @@ import (
 )
 
 // On platforms with no container backend (darwin, ...), the base image is
-// meaningless: sandbox.Check reports the runtime unsupported, the setup
-// gate refuses a non-opted-out finalize with that message, and the admin
-// proceeds by ticking the skip box (saving [sandbox] disabled).
+// meaningless: sandbox.Check reports the runtime unsupported and the
+// mandatory setup gate refuses finalize with that message — bevin targets
+// Linux + Windows, where the container runtime is a requirement.
 func sandboxBaseReady(dataDir string) bool { return false }
 
 func provisionSandboxBase(ctx context.Context, dataDir string, progress func(frac float64, detail string)) error {

@@ -31,7 +31,10 @@ import (
 const (
 	winBaseRegistry = "https://mcr.microsoft.com"
 	winBaseImage    = "windows/servercore"
-	winBaseTag      = "ltsc2022" // the current LTSC servercore line
+	// winBaseTag is the latest Windows Server LTSC line (user directive:
+	// track the latest LTSC; a new bevin release bumps this when
+	// Microsoft cuts a new one). ltsc2025 = Windows Server 2025.
+	winBaseTag = "ltsc2025"
 )
 
 var manifestAccepts = []string{

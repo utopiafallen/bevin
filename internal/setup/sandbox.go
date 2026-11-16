@@ -11,9 +11,10 @@ package setup
 //     servercore image), streamed by the display-only sidecars step like
 //     the other sidecars.
 //
-// Finalize gates on BOTH (server-side enforcement of the wizard prompt):
-// a setup cannot complete until the runtime is ready and the base image
-// is provisioned.
+// Finalize gates on the sandbox (server-side enforcement of the wizard
+// prompt): per-user containers are MANDATORY (no opt-out — user
+// directive), so a setup cannot complete until the runtime is ready and
+// the base image is provisioned.
 
 import (
 	"context"
@@ -57,15 +58,15 @@ type sandboxBaseState struct {
 // server drives the work like it does for the sidecars).
 func (m *Manager) SandboxStatus(ctx context.Context) SandboxStatus {
 	// What setup will save: the [sandbox] section of the existing config
-	// when there is one (edit mode), else the fresh-setup default
-	// (enabled — setup gates on the runtime and saves it enabled).
+	// when there is one (edit mode), else the fresh-setup default —
+	// always enabled (per-user containers are mandatory).
 	cfg := sandbox.Config{Enabled: true, Network: "veth"}
 	if c, err := config.Load(m.dataDir); err == nil {
-		cfg = sandbox.Config{Enabled: c.Sandbox.Enabled, Network: c.Sandbox.Network, Cores: c.Sandbox.Cores, MemoryMB: c.Sandbox.MemoryMB}
+		cfg = sandbox.Config{Enabled: true, Network: c.Sandbox.Network, Cores: c.Sandbox.Cores, MemoryMB: c.Sandbox.MemoryMB}
 	}
 	rt := sandbox.Check(ctx, m.dataDir, cfg)
 	base := m.baseState()
-	if cfg.Enabled && rt.OK && base.Status == "pending" {
+	if rt.OK && base.Status == "pending" {
 		m.StartSandboxBaseProvision()
 		base = m.baseState()
 	}
