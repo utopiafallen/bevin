@@ -20,7 +20,6 @@ import (
 
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
-	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -31,20 +30,23 @@ import (
 //
 // created with a .SKILLS/ subfolder (per-workspace agent skills) and a
 // .dni/ (Do Not Index — the opt-out from search/ingestion). Because the
-// user's container maps their data dir into it (/data on linux, C:\data
-// on windows), the workspace shows up inside the user's container at
-// <data dir>/workspaces/<id>: it is the user's persistent environment,
-// and the workspace "run" command executes in it (arbitrary code is the
-// point).
+// user's environment maps their data dir into it (/data on linux,
+// C:\data on windows), the workspace shows up inside the user's
+// environment at <data dir>/workspaces/<id>: it is the user's persistent
+// working state. There is deliberately NO user-facing execution
+// surface (user directive): the AGENT manages the user's environment —
+// ensuring it and running commands in workspaces via the sandbox
+// backend's ExecIn — and the user focuses on workspace state.
 //
 // File management is host-side (bevin writes the user's own data dir
-// directly — no container needed); only running code goes through the
-// container, so a server without the container runtime can still manage
-// workspace files. Files are tracked in the workspace_files table
-// (metadata: name, path, size, hash, source, kind) when they arrive
-// through the API — files that appear on disk some other way (e.g. the
-// user ran a git clone in their own container) are visible in the
-// listing (it walks the disk) but gain no metadata row.
+// directly — no container needed); execution goes through the
+// environment (the agent's path), so a server without the container
+// runtime can still manage workspace files. Files are tracked in the
+// workspace_files table (metadata: name, path, size, hash, source,
+// kind) when they arrive through the API — files that appear on disk
+// some other way (e.g. the agent ran a git clone in the user's
+// environment) are visible in the listing (it walks the disk) but gain
+// no metadata row.
 
 // wsMaxUploadBytes caps a single upload (the per-workspace global cap is
 // the server config's MaxWorkspaceSize; this keeps one request bounded).
@@ -532,73 +534,11 @@ func (a *App) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
-// POST /api/workspaces/{id}/run — run a command in the user's
-// environment with the working directory set to the workspace folder (the
-// environment is created + started on first use). This is the
-// execution half of the workspace: the user's files in the user's
-// environment. Containerization is a hidden detail from the user — the
-// error wording below never names it (the runtime internals are
-// admin-only, see envError). Body:
-// {"command": "...", "timeout_ms": 120000} (timeout optional, default 60
-// s, capped at 5 min by the sandbox backend).
-//
-// 503 = the platform has no container backend (bevin targets Linux +
-// Windows);
-// 412 = the environment is not ready / not running;
-// 502 = the exec itself failed.
-func (a *App) workspaceRun(w http.ResponseWriter, r *http.Request) {
-	_, us, ok := a.workspaceStore(w, r)
-	if !ok {
-		return
-	}
-	ws, ok := a.workspaceFor(w, r, us)
-	if !ok {
-		return
-	}
-	var req struct {
-		Command   string `json:"command"`
-		TimeoutMs int    `json:"timeout_ms"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if strings.TrimSpace(req.Command) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
-		return
-	}
-	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-	bk, u, ok := a.sandboxGate(w, r)
-	if !ok {
-		return
-	}
-	if rt := a.sandboxRuntime(r.Context()); !rt.OK {
-		envError(w, http.StatusPreconditionFailed, u,
-			"your environment is not ready yet — try again in a moment", &rt, nil)
-		return
-	}
-	// The environment must exist before the exec (first run: rootfs from
-	// the base image + boot — can take minutes; the server has no HTTP
-	// timeouts).
-	if _, err := bk.Ensure(r.Context(), u.Handle); err != nil {
-		envError(w, http.StatusBadGateway, u,
-			"your environment could not be started — try again", a.sandboxRuntimePtr(r.Context()), err)
-		return
-	}
-	// The workspace folder inside the environment: the data dir is mapped
-	// to ContainerDataDir(), so the folder is <data>/workspaces/<id>.
-	cwd := filepath.Join(bk.ContainerDataDir(), "workspaces", ws.ID)
-	res, err := bk.ExecIn(r.Context(), u.Handle, req.Command, cwd, timeout)
-	if err != nil {
-		code := http.StatusBadGateway
-		if errors.Is(err, sandbox.ErrNotRunning) {
-			code = http.StatusPreconditionFailed
-		}
-		envError(w, code, u, "your environment could not run the command", a.sandboxRuntimePtr(r.Context()), err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
-}
+// Note: there is deliberately NO user-facing "run a command in the
+// workspace" endpoint (user directive): the AGENT is the one that
+// manages the user's environment (ensuring it + running commands in a
+// workspace via the sandbox backend's ExecIn) — the user focuses on
+// workspace STATE (the files here), not on execution details. The
+// sandbox API (internal/server/sandbox.go) stays as the admin-diagnostic
+// surface; the agent sandbox tool (a later revision) is the execution
+// path.

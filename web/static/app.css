@@ -380,13 +380,3 @@ body.panel-chats .panel { display: flex; }
   font-size: 1rem; line-height: 1; cursor: pointer; padding: 0.1rem 0.3rem; border-radius: 4px;
 }
 .ws-file-del:hover { background: var(--border); color: var(--danger); }
-
-.ws-run-out {
-  margin-top: 0.7rem; padding: 0.7rem; border-radius: 8px;
-  background: var(--surface-2); border: 1px solid var(--border);
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.78rem; line-height: 1.45;
-  white-space: pre-wrap; word-break: break-word;
-  max-height: 20rem; overflow: auto;
-}

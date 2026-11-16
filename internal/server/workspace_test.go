@@ -224,15 +224,16 @@ func TestWorkspaceLifecycle(t *testing.T) {
 		t.Fatal("docs/ survived the directory delete")
 	}
 
-	// 10. Run: the test app has no sandbox backend (testApp skips
-	//     buildSandbox — in production the backend is only missing on
-	//     platforms without a container backend) -> 503 for the regular
-	//     user with the neutral wording (the command never leaves the
-	//     host; the container internals stay hidden).
+	// 10. Run: the user-facing "run in workspace" endpoint is GONE (user
+	//     directive — the agent manages the user's environment, the user
+	//     focuses on workspace state): the route no longer exists. The
+	//     mux answers 405 (the path is claimed by the GET / SPA
+	//     catch-all, the method is not) or 404 — either proves the
+	//     endpoint is gone.
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/workspaces/"+wsID+"/run", bob, map[string]string{"command": "echo hi"}))
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("run code = %d body=%s, want 503 (no execution environment)", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("run code = %d body=%s, want 404/405 (the endpoint was removed)", w.Code, w.Body.String())
 	}
 
 	// 11. Delete the workspace: folder + rows go.

@@ -189,16 +189,17 @@
           </section>
 
           <!-- The workspaces page: the user's working folders on the
-               server — each can run code in the user's own environment
-               (a container under the hood — a hidden detail from the
-               user; the UI says "environment", never "container").
-               Browse, upload, download, delete, run. -->
+               server — the user's persistent working STATE (browse,
+               upload, download, delete). Execution is NOT a user
+               surface: the agent manages the user's environment (a
+               container under the hood — a hidden detail from the
+               user; the UI says "environment", never "container"). -->
           <section class="page-card" id="workspacePage" style="display:none;">
             <div class="eyebrow">Workspaces</div>
             <h3 style="margin:.3rem 0 .2rem;">Your workspaces</h3>
             <p class="muted" style="margin-top:.2rem;">
-              A workspace is a folder on bevin's server — upload files,
-              and run code against them in your own environment.
+              A workspace is a folder on bevin's server — upload files
+              and bevin works with them for you.
             </p>
             <div id="wsList" class="ws-list"></div>
             <form id="wsCreateForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.8rem;">
@@ -219,25 +220,6 @@
                   <button class="btn btn-ghost" id="wsDeleteWsBtn" type="button">Delete workspace</button>
                 </div>
                 <div id="wsFiles" class="ws-files"></div>
-              </div>
-              <div class="profile-section">
-                <h4>Run in workspace</h4>
-                <p class="muted" id="wsRunHint" style="font-size:.85rem; margin-top:.2rem;">
-                  Runs in your own environment (created on first use),
-                  with the workspace as the working directory.
-                </p>
-                <textarea id="wsCmd" rows="2" placeholder="e.g. python3 analyze.py &gt; report.txt" style="width:100%; box-sizing:border-box; font:inherit; font-size:.9rem;"></textarea>
-                <div style="display:flex; gap:.5rem; align-items:center; margin-top:.5rem; flex-wrap:wrap;">
-                  <select id="wsTimeout" title="Command timeout" style="width:auto;">
-                    <option value="30000">30 s</option>
-                    <option value="60000" selected>60 s</option>
-                    <option value="120000">2 min</option>
-                    <option value="300000">5 min</option>
-                  </select>
-                  <button class="btn btn-primary" id="wsRunBtn" type="button">Run</button>
-                  <span id="wsRunMsg" class="muted" style="font-size:.85rem;"></span>
-                </div>
-                <pre id="wsRunOut" class="ws-run-out" hidden></pre>
               </div>
             </div>
           </section>
@@ -1417,10 +1399,11 @@
       sendChat();
     });
 
-    // ---- workspaces: the user's folders on the server (mapped into
-    // their container, runnable in it). The disk is the source of truth
-    // for the file listing; the API tracks metadata for what it sees.
-    var ws = { current: null, files: [], sandbox: null };
+    // ---- workspaces: the user's folders on the server (the user's
+    // persistent working state — execution is the agent's job, not a
+    // user surface). The disk is the source of truth for the file
+    // listing; the API tracks metadata for what it sees.
+    var ws = { current: null, files: [] };
 
     function wsEsc(s) {
       var d = document.createElement("div");
@@ -1466,25 +1449,8 @@
       ws.current = id;
       $("wsDetail").hidden = false;
       $("wsDetailTitle").textContent = title || "Workspace";
-      $("wsRunOut").hidden = true;
-      $("wsRunMsg").textContent = "";
       loadWorkspaces(); // refresh the active card
       await loadWsFiles();
-      // The environment state decides what the run box can do (the
-      // server answers 503 when this platform has no execution
-      // environment — containerization is a hidden detail, so the
-      // wording stays neutral).
-      fetch("/api/sandbox").then(function (r) {
-        return r.json().then(function (d) { return { ok: r.ok, d: d }; });
-      }).then(function (res) {
-        ws.sandbox = res.d;
-        var hint = $("wsRunHint");
-        if (!res.ok) {
-          hint.textContent = "Running code is not available on this server yet — file management works.";
-        } else {
-          hint.textContent = "Runs in your own environment (created on first use), with the workspace as the working directory.";
-        }
-      }).catch(function () {});
     }
 
     function renderWsFiles() {
@@ -1596,38 +1562,6 @@
       } catch (err) {
         wsMsg("⚠ " + err.message, true);
       }
-    });
-
-    $("wsRunBtn").addEventListener("click", async function () {
-      if (!ws.current) return;
-      var cmd = $("wsCmd").value.trim();
-      if (!cmd) return;
-      var btn = this;
-      btn.disabled = true;
-      $("wsRunMsg").textContent = "Running… (the first run prepares your environment, it can take minutes)";
-      $("wsRunOut").hidden = true;
-      try {
-        var r = await fetch("/api/workspaces/" + ws.current + "/run", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command: cmd, timeout_ms: parseInt($("wsTimeout").value, 10) })
-        });
-        var d = await r.json();
-        if (!r.ok) {
-          throw new Error(d.error);
-        }
-        var out = d.stdout || "";
-        var err = d.stderr || "";
-        $("wsRunOut").textContent = (out ? out : "(no output)") +
-          (err ? "\n[stderr]\n" + err : "") +
-          "\n[exit " + d.exit_code + "]";
-        $("wsRunOut").hidden = false;
-        $("wsRunMsg").textContent = "Done (exit " + d.exit_code + ").";
-        // The command may have created/changed files: refresh the list.
-        await loadWsFiles();
-      } catch (err) {
-        $("wsRunMsg").textContent = "⚠ " + err.message;
-      }
-      btn.disabled = false;
     });
   </script>
 </body>
