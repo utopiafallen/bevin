@@ -393,6 +393,57 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 	}
 }
 
+// TestTurnCarriesConversationID drives the full turn path: the conversation's
+// completions carry the conversation's id (the value the request builder sets
+// verbatim, which the OAI wire sends as conversation_id for a llama.cpp proxy
+// to save/load the slot's KV cache per conversation), while the internal
+// summarization (compaction) meta-calls deliberately carry NO id — their
+// prompt has its own system prompt, so it is not a prefix of the
+// conversation's prompt (a proxy keyed on the id would load a mismatched
+// cache or save over the conversation's reusable one).
+func TestTurnCarriesConversationID(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	// Reports 900 total tokens (over the 800 budget) so the post-turn
+	// compaction fires — exercising the meta-call path too.
+	fp := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
+	a.providers["m1"] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	// Four turns: enough for a summarization call among the provider calls.
+	for i := 0; i < 4; i++ {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+			t.Fatalf("Turn %d: %v", i, err)
+		}
+	}
+	calls := fp.allCalls()
+	if len(calls) < 5 {
+		t.Fatalf("%d provider calls, want >= 5 (4 chat turns + >= 1 summarization)", len(calls))
+	}
+	var sawChat, sawSummary bool
+	for i, c := range calls {
+		// The summarizer's meta system prompt is the discriminator (the
+		// same check the effort test uses).
+		if len(c.System) > 0 && strings.Contains(c.System[0].Text, "context summary") {
+			sawSummary = true
+			if c.ConversationID != "" {
+				t.Fatalf("provider call %d: the summarization meta-call carries ConversationID %q, want empty (its prompt is not a prefix of the conversation's prompt)", i, c.ConversationID)
+			}
+			continue
+		}
+		sawChat = true
+		if c.ConversationID != convID {
+			t.Fatalf("provider call %d: ConversationID = %q, want %q (the conversation's id, verbatim)", i, c.ConversationID, convID)
+		}
+	}
+	if !sawChat || !sawSummary {
+		t.Fatalf("test did not exercise both paths (sawChat=%v sawSummary=%v)", sawChat, sawSummary)
+	}
+}
+
 // TestTurnSummarizesOnBudget drives a conversation past the summarization
 // budget and verifies a chained summary is produced + stored, and that the
 // next request uses the summary (not the full history).

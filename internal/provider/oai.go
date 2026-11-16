@@ -73,9 +73,14 @@ type oaiChatRequest struct {
 	// Omitted when empty — backends without the control simply ignore an
 	// unknown field, so this is the "silently drop" path for APIs that
 	// don't support it.
-	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
-	Stream          bool              `json:"stream,omitempty"`
-	StreamOptions   *oaiStreamOptions `json:"stream_options,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ConversationID: the bevin conversation's id, verbatim. The llama.cpp
+	// proxy reads it to save/load the slot's KV cache per conversation.
+	// Omitted when empty (internal meta-calls); backends without the
+	// feature ignore the unknown field.
+	ConversationID string            `json:"conversation_id,omitempty"`
+	Stream         bool              `json:"stream,omitempty"`
+	StreamOptions  *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
 type oaiUsage struct {
@@ -279,6 +284,7 @@ func buildOAIChatRequest(req ChatRequest, model string, stream, videoOK bool) (o
 		MaxTokens:       req.MaxTokens,
 		Stream:          stream,
 		ReasoningEffort: req.ReasoningEffort,
+		ConversationID:  req.ConversationID,
 	}
 	if stream {
 		ocr.StreamOptions = &oaiStreamOptions{IncludeUsage: true}

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -199,6 +200,92 @@ func TestReasoningEffortWire(t *testing.T) {
 	}
 	if _, present := antBody["reasoning_effort"]; present {
 		t.Fatalf("the Anthropic provider must drop the effort (no such API field), got %v", antBody)
+	}
+}
+
+// TestConversationIDWire verifies the conversation_id wire handling: a
+// request carrying a ConversationID serializes the OAI wire's
+// conversation_id field (OpenAI + llama.cpp share the OAI wire — the
+// llama.cpp proxy reads it to save/load the slot's KV cache per
+// conversation), an EMPTY id omits it (internal meta-calls like the
+// summarization call), and the Anthropic provider never maps it (its
+// API has no such field).
+func TestConversationIDWire(t *testing.T) {
+	const convID = "abc123def456abc123def456"
+
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, mustDecodeBody(t, r))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(srv.URL, "k")
+	// With a conversation id: the field is present with the exact value.
+	_, err := p.Chat(context.Background(), "m", ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Text: "hi"}},
+		ConversationID: convID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bodies[0]["conversation_id"] != convID {
+		t.Fatalf("conversation_id = %v, want %q", bodies[0]["conversation_id"], convID)
+	}
+	// Without one (meta-calls): the field is omitted entirely.
+	_, err = p.Chat(context.Background(), "m", ChatRequest{
+		Messages: []Message{{Role: RoleUser, Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := bodies[1]["conversation_id"]; present {
+		t.Fatalf("empty id must omit conversation_id, got %v", bodies[1])
+	}
+
+	// llama.cpp shares the OAI wire: the STREAMING path (the one the UI
+	// uses) carries the field the same way.
+	var llamaBody map[string]any
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llamaBody = mustDecodeBody(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`)
+	}))
+	defer srv2.Close()
+	_, err = NewLlama(srv2.URL, "").Stream(context.Background(), "m", ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Text: "hi"}},
+		ConversationID: convID,
+	}, func(Chunk) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if llamaBody["conversation_id"] != convID {
+		t.Fatalf("llama streaming conversation_id = %v, want %q", llamaBody["conversation_id"], convID)
+	}
+	if llamaBody["stream"] != true {
+		t.Fatalf("llama stream flag = %v, want true", llamaBody["stream"])
+	}
+
+	// Anthropic: silently dropped — its request never carries the field.
+	var antBody map[string]any
+	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		antBody = mustDecodeBody(t, r)
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn"}`))
+	}))
+	defer srv3.Close()
+	_, err = NewAnthropic(srv3.URL, "k").Chat(context.Background(), "m", ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Text: "hi"}},
+		ConversationID: convID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := antBody["conversation_id"]; present {
+		t.Fatalf("the Anthropic provider must drop conversation_id (no such API field), got %v", antBody)
 	}
 }
 

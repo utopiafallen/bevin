@@ -25,6 +25,12 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // reasoning-effort choice, already profile-validated ("" = none) — the
 // internal call runs under the same "how hard to think" setting as the chat
 // turns.
+//
+// The request deliberately carries NO ConversationID: this is a meta-call
+// with its OWN system prompt, so its prompt is not a prefix of the
+// conversation's prompt — a KV cache proxy keyed on the conversation id
+// would either load a mismatched cache or save this short-lived prompt's
+// KV over the conversation's reusable one.
 func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+1)
 	if prevSummary != "" {

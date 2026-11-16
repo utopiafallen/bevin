@@ -92,6 +92,19 @@ type ChatRequest struct {
 	// reasoning_effort) or drops it when its API has none (Anthropic).
 	// Empty = the model's own default.
 	ReasoningEffort string
+	// ConversationID: the bevin-level conversation the completion belongs
+	// to (the store's 24-hex id — globally unique across users). Carried
+	// verbatim into the OAI wire's `conversation_id` field, where a
+	// llama.cpp proxy in front of the model can use it to save/load the
+	// slot's KV cache per conversation (turn N's prompt is the prefix of
+	// turn N+1's, so the cached KV is directly reusable). Set by the
+	// request builder for the conversation's completions only — internal
+	// meta-calls (the summarization call) leave it empty because their
+	// prompt is NOT a prefix of the conversation's prompt (a different
+	// system prompt): loading or saving KV under the conversation's key
+	// there would clobber the reusable cache or load a mismatched one.
+	// Providers whose API has no such concept (Anthropic) drop it.
+	ConversationID string
 }
 
 // Result is the aggregated result of a completion (streaming or not).

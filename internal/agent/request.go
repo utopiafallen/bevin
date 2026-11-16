@@ -212,7 +212,7 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 		reqMsgs = append(reqMsgs, pm)
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 	}
-	req := provider.ChatRequest{System: sysParts, Messages: reqMsgs}
+	req := provider.ChatRequest{System: sysParts, Messages: reqMsgs, ConversationID: conv.ID}
 	// The conversation's reasoning-effort choice, when the active model's
 	// profile supports it (see profile.ReasoningEffortFor): an unsupported
 	// or stale choice is dropped — the provider's own default then applies,
