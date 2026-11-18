@@ -93,7 +93,7 @@ type Manager struct {
 	provMu    sync.Mutex
 	provState *provisionState
 
-	// Sandbox base image provisioning (also streamed by the sidecars
+	// Sandbox base image provisioning (also streamed by the server
 	// step): baseMu guards baseStateRun. See sandbox.go.
 	baseMu       sync.Mutex
 	baseStateRun *sandboxBaseState

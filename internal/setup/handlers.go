@@ -16,6 +16,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/provider"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 )
 
 //go:embed wizard.html
@@ -167,7 +168,16 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch p.Step {
 	case "server":
+		// The per-user container check is PART OF the server step (the
+		// mandatory gate — no opt-out): the step cannot advance until the
+		// OS runtime check succeeds. The wizard disables Next on exactly
+		// this state — a disabled button is the state the server rejects.
 		err = h.mgr.SetServer(p.Server)
+		if err == nil {
+			if rt := sandboxCheckRuntime(r.Context(), h.mgr.dataDir, sandbox.Config{Enabled: true, Network: "veth"}); !rt.OK {
+				err = SandboxGateError(rt)
+			}
+		}
 	case "admin":
 		err = h.mgr.SetAdmin(p.Admin)
 	case "oauth":

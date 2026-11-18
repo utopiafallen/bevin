@@ -347,6 +347,61 @@ func TestFinalizeSandboxGate(t *testing.T) {
 	})
 }
 
+// TestAdvanceServerGatedOnSandboxRuntime — the mandatory container check
+// is PART OF the server step (user directive): advancing from it is
+// refused until the OS runtime check succeeds — the server-side
+// enforcement of the wizard's Next gate (a disabled button is exactly
+// the state the server rejects).
+func TestAdvanceServerGatedOnSandboxRuntime(t *testing.T) {
+	advanceServer := func(t *testing.T, m *Manager, dir string) (int, string) {
+		t.Helper()
+		h := NewHandler(m, "tok123", nil)
+		mux := http.NewServeMux()
+		h.Routes(mux)
+		body, _ := json.Marshal(advancePayload{Step: "server", Server: ServerAnswers{}})
+		r := httptest.NewRequest(http.MethodPost, "/setup/advance?token=tok123", jsonReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	t.Run("refused when the runtime is not ready", func(t *testing.T) {
+		m, _, dir := newTestSetup(t)
+		finalizePrep(t, dir, false) // pinned runtime NOT ready
+		code, b := advanceServer(t, m, dir)
+		if code != http.StatusBadRequest {
+			t.Fatalf("advance(server) code = %d, want 400; body=%s", code, b)
+		}
+		if !strings.Contains(b, "the OS container runtime is not ready") {
+			t.Fatalf("gate response missing the runtime remediation: %s", b)
+		}
+	})
+	t.Run("passes when the runtime is ready", func(t *testing.T) {
+		m, _, dir := newTestSetup(t)
+		finalizePrep(t, dir, true)
+		code, b := advanceServer(t, m, dir)
+		if code != http.StatusOK {
+			t.Fatalf("advance(server) code = %d, want 200; body=%s", code, b)
+		}
+		if m.Answers().Server.BaseURI != "" {
+			t.Fatal("a blank base URI must be stored blank (it is optional)")
+		}
+	})
+	t.Run("base URI validation still applies first", func(t *testing.T) {
+		m, _, dir := newTestSetup(t)
+		finalizePrep(t, dir, true)
+		h := NewHandler(m, "tok123", nil)
+		mux := http.NewServeMux()
+		h.Routes(mux)
+		body, _ := json.Marshal(advancePayload{Step: "server", Server: ServerAnswers{BaseURI: "not a url"}})
+		r := httptest.NewRequest(http.MethodPost, "/setup/advance?token=tok123", jsonReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "base_uri") {
+			t.Fatalf("invalid base_uri must 400 with the base_uri error, got %d %s", w.Code, w.Body.String())
+		}
+	})
+}
+
 // TestCommitEdit — the admin config pages save a subset of the config areas
 // (models / aux / email) on the existing server.toml WITHOUT re-running
 // sidecar provisioning: the session secret, sidecar endpoints, and the

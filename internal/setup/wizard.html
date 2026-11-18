@@ -108,6 +108,7 @@ function renderServer(){ const d=el("div",{},
   field("Public base URI", inp("sv_baseuri", S.server.base_uri, "https://bevin.example.com"))
 );
   d.append(el("p",{class:"small"},"The PUBLIC address of this server behind your reverse proxy (https, with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Bevin generates every outside link from it — the OAuth redirect, and password-reset / notification links as they land. Leave blank only for a local-only setup; it is required when you enable OAuth on step 3."));
+  d.append(renderSandboxSection());
   return d;}
 function renderAdmin(){ const a=S.admin; return el("div",{},
   el("h3",{}, "2. Identity & admin"),
@@ -170,6 +171,7 @@ function renderAux(){
 // (checking → downloading → starting → ready) streamed from the server, then a
 // confirmation. No user input. _sidecarTimer is the 1s poll (null when stopped).
 let _sidecarTimer = null;
+let _sandboxTimer = null; // the server step's container check poll
 function renderSidecars(){
   const d = el("div",{});
   d.append(el("h3",{}, "6. Sidecars"));
@@ -177,18 +179,19 @@ function renderSidecars(){
   d.append(el("div",{class:"sidecar-list", id:"sidecar_list"}));
   d.append(el("div",{class:"sidecar-banner", id:"sidecar_banner"}));
   renderSidecarList();
-  d.append(renderSandboxSection());
   return d;
 }
-// ---- the per-user containers (sandbox) on the sidecars step ----
+// ---- the per-user containers (sandbox) on the SERVER step (step 1) ----
 // The OS container runtime check (the MANDATORY setup gate — per-user
 // containers are not optional, there is no opt-out) + the base container
-// image provisioning, streamed like the sidecars. Setup cannot finish
-// until the runtime is ready and the base is provisioned.
+// image provisioning, streamed like the sidecars. The step cannot ADVANCE
+// until the runtime check passes (Next is gated on it — client AND
+// server-side in /setup/advance); setup cannot FINISH until the base
+// image is provisioned (the Finalize backstop).
 function renderSandboxSection(){
   const sbx = el("div",{id:"sbx_section", style:"margin-top:1.2rem"});
   sbx.append(el("h4",{}, "Per-user containers (required)"));
-  sbx.append(el("p",{class:"small"},"Each user gets their own container — a full OS with a shell, mapped to their data directory — where they can install software and run arbitrary code in their own environment. This uses the OS's native container runtime (Windows: Hyper-V isolation + the HCS service; Linux: systemd as init + systemd-nspawn, running as root). bevin needs it — setup cannot complete until the runtime is enabled on this machine."));
+  sbx.append(el("p",{class:"small"},"Each user gets their own container — a full OS with a shell, mapped to their data directory — where they can install software and run arbitrary code in their own environment. This uses the OS's native container runtime (Windows: Hyper-V isolation + the HCS service; Linux: systemd as init + systemd-nspawn, running as root). bevin needs it — the check runs live below, and you cannot continue to the next step until it passes. The base image provisions automatically once the runtime is ready."));
   sbx.append(el("div",{class:"sidecar-list", id:"sbx_list"}));
   sbx.append(el("div",{class:"sidecar-banner", id:"sbx_banner"}));
   renderSandboxPanel();
@@ -236,8 +239,8 @@ function renderSandboxPanel(){
   banner.innerHTML = "";
   if(rt && !rt.ok){
     banner.classList.add("err");
-    banner.append(el("span",{}, "The container runtime is not ready on this machine — bevin needs it (per-user execution environments are a core feature, not an option). Enable it per the details above, then refresh. Setup cannot complete until it is ready. "));
-    const ref = el("button",{class:"sidecar-retry", onclick:"loadSandboxStatus()"},"Refresh check");
+    banner.append(el("span",{}, "The container runtime is not ready on this machine — bevin needs it (per-user execution environments are a core feature, not an option). Enable it per the details above, then refresh. You cannot proceed to the next step until it is ready. "));
+    const ref = el("button",{class:"sidecar-retry", onclick:"pollSandbox()"},"Refresh check");
     banner.append(ref);
   } else if(st && rt && rt.ok){
     const b = st.base;
@@ -330,32 +333,25 @@ async function pollSidecars(){
     S.sidecarStatus = st;
     renderSidecarList();
   }catch(e){ /* transient; keep polling */ }
-  loadSandboxStatus(); // the sandbox rows share the poll cadence
-  if(workDone()) stopSidecarPoll(); // stop only when BOTH the sidecars and the sandbox state are final
+  if(S.sidecarStatus && S.sidecarStatus.done) stopSidecarPoll();
 }
 function stopSidecarPoll(){ if(_sidecarTimer){ clearInterval(_sidecarTimer); _sidecarTimer = null; } }
-// workDone: the sidecars step's poll can stop only when the sidecars are
-// done AND the sandbox state is final (runtime not ready — setup will be
-// refused at finalize until it is — or base image ready/error; the base
-// may still be downloading after the sidecars finish, and the panel must
-// keep streaming its progress).
-function workDone(){
-  const sc = S.sidecarStatus;
-  if(!(sc && sc.done)) return false;
-  const sb = S.sandboxStatus;
-  if(!sb || !sb.runtime) return false; // the check itself is still in flight
-  if(!sb.runtime.ok) return true; // gated at finalize; the lever is enabling the runtime
-  return !!(sb.base && (sb.base.status === "ready" || sb.base.status === "error"));
-}
-// loadSandboxStatus fetches the container runtime check + base image state
-// (GET /setup/sandbox) — the server auto-starts the base provisioning when
-// the runtime is ready and the base is missing, so polling IS the driver.
-async function loadSandboxStatus(){
-  if(STEPS[idx] !== "sidecars") return;
+function stopSandboxPoll(){ if(_sandboxTimer){ clearInterval(_sandboxTimer); _sandboxTimer = null; } }
+// pollSandbox drives the SERVER step's mandatory container check: it
+// fetches the runtime state + base image progress (GET /setup/sandbox),
+// re-renders the panel, and refreshes the Next button (gated on the
+// runtime check passing — see stepReady). The server auto-starts the base
+// provisioning when the runtime is ready, so the poll also streams the
+// download progress while the admin is on the step; once started, the
+// server-side run continues after the admin advances, and the Finalize
+// gate is the backstop.
+async function pollSandbox(){
+  if(STEPS[idx] !== "server") return;
   try{
     S.sandboxStatus = await api("GET", "/setup/sandbox");
     renderSandboxPanel();
   }catch(e){ /* transient; keep polling */ }
+  refreshNav();
 }
 function renderEmail(){
   const d = el("div",{});
@@ -375,7 +371,7 @@ function renderReview(){ const d=el("div",{},el("h3",{}, "8. Review & finish"));
   delete shown.sidecarStatus;
   delete shown.sandboxStatus; // transient progress
   d.append(el("pre",{class:"kv"}, JSON.stringify(shown, null, 2)));
-  d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars. The server then switches to normal mode in-process — no restart."));
+  d.append(el("p",{class:"small"},"Finishing writes server.toml (0600, holds secrets), creates the admin, and provisions the sidecars and the base container image. The server then switches to normal mode in-process — no restart."));
   return d;
 }
 const RENDER = { server:renderServer, admin:renderAdmin, oauth:renderOAuth, models:renderModels, aux:renderAux, sidecars:renderSidecars, email:renderEmail, review:renderReview };
@@ -388,7 +384,10 @@ const RENDER = { server:renderServer, admin:renderAdmin, oauth:renderOAuth, mode
 function stepReady(){
   const step=STEPS[idx];
   switch(step){
-    case "server": return true; // everything here is optional (local-only setups leave the base URI blank)
+    case "server": { // the MANDATORY container check (the step gate): the OS runtime must be ready — the base image may still be provisioning (the Finalize gate covers it)
+      const rt = S.sandboxStatus && S.sandboxStatus.runtime;
+      return !!(rt && rt.ok);
+    }
     case "admin": { // read the DOM (the fields sync to S only at advance) with the same placeholder fallbacks doNext uses
       const g=(s)=>{ const e=q(s); return e ? (e.value.trim() || e.placeholder) : ""; };
       const pw=q("#ad_pw"), pw2=q("#ad_pw2");
@@ -447,12 +446,17 @@ function render(){
   // Sidecars step: start the (idempotent) provisioning + stream progress when
   // the admin lands on it (startSidecars guards against re-starting the poll).
   if(STEPS[idx] === "sidecars" && !_sidecarTimer){ startSidecars(); }
+  // Server step: poll the mandatory container check (this step's work-gate)
+  // while the admin is on it; stop it when they leave (a base provisioning
+  // already started continues server-side — the Finalize gate is the backstop).
+  if(STEPS[idx] === "server"){ if(!_sandboxTimer){ _sandboxTimer = setInterval(pollSandbox, 1000); pollSandbox(); } }
+  else stopSandboxPoll();
 }
 async function api(method, path, body){ const url = path; const opt={method}; if(body){opt.headers={"Content-Type":"application/json"}; opt.body=JSON.stringify(body);} const r=await fetch(url,opt); let j=null; try{j=await r.json();}catch(_){} if(!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status)); return j; }
 async function doNext(){
   const step=STEPS[idx];
   // gather per-step data from inputs into S (admin, sidecars via id-based reads)
-  if(step==="server"){ S.server.base_uri=(q("#sv_baseuri").value||"").trim(); }
+  if(step==="server"){ S.server.base_uri=(q("#sv_baseuri").value||"").trim(); const rt=S.sandboxStatus && S.sandboxStatus.runtime; if(!rt || !rt.ok){ msg("The container runtime check must pass before you can continue to the next step.","err"); return; } }
   if(step==="admin"){ S.admin.handle=q("#ad_handle").value||q("#ad_handle").placeholder; S.admin.display_name=q("#ad_name").value||q("#ad_name").placeholder; S.admin.password=q("#ad_pw").value; if(q("#ad_pw").value!==q("#ad_pw2").value){msg("Passwords do not match","err");return;} }
   // The OAuth step: gather the inputs + mirror the server's normalization
   // (normalizeOAuth) so the review step shows the effective values. The
@@ -462,8 +466,9 @@ async function doNext(){
   // The sidecars step is display-only: require all sidecars ready before
   // advancing (the Next button is disabled until then — belt-and-suspenders).
   if(step==="sidecars"){ const st=S.sidecarStatus; const allReady = st && st.sidecars && st.sidecars.every(s=>s.status==="ready"); if(!allReady){ msg("Wait for the sidecars to finish setting up.","err"); return; } }
-  // The sidecars step also shows the mandatory container runtime check —
-  // the server gates finalize on the runtime + base image (no opt-out).
+  // The server step gates on the mandatory container runtime check (the
+  // server enforces the same gate in /setup/advance); finalize additionally
+  // gates on the base image (no opt-out).
   // The email step: a blank field uses its PLACEHOLDER default (port 587,
   // from name "bevin", from address = the username) — the server applies the
   // same defaults in validateEmail (source of truth). Normalize in place so
@@ -486,7 +491,7 @@ async function doNext(){
   }catch(e){ msg(e.message,"err"); }
 }
 async function doBack(){ if(idx>0){ idx--; try{ await api("POST","/setup/back",{step:STEPS[idx]}); }catch(_){} render(); } }
-async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},server:{base_uri:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,sandboxStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
+async function doCancel(){ if(confirm("Cancel setup? (In-memory state is discarded; sidecars already downloaded remain.)")){ stopSidecarPoll(); stopSandboxPoll(); await api("POST","/setup/cancel",{}); S={admin:{handle:"",display_name:"",password:""},server:{base_uri:""},oauth:{enabled:false,name:"",client_id:"",client_secret:"",auth_url:"",token_url:"",userinfo_url:"",scopes:""},models:[],aux:[],auxError:{},sidecars:{qdrant:"",llama_server:"",ffmpeg:""},sidecarStatus:null,sandboxStatus:null,email:{enabled:false,smtp_host:"",smtp_port:"",username:"",password:"",from_address:"",from_name:"",use_starttls:true}}; idx=0; msg("Setup cancelled — nothing written.","ok"); render(); } }
 async function doFinalize(){ msg("Finalizing…",""); try{ const r=await api("POST","/setup/finalize",{});
   msg(""); // success: clear the status line — #msg sits OUTSIDE #body, so it would otherwise linger over the completion screen
   // The admin does not use the chat UI as a regular user — after setup they go

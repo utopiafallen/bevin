@@ -32,9 +32,10 @@ import (
 
 func main() {
 	var (
-		port = flag.Int("port", 0, "required: HTTP listen port (no default)")
-		bind = flag.String("bind", "0.0.0.0", "bind host (default 0.0.0.0)")
-		data = flag.String("data", "", "data dir (default: the directory containing this binary)")
+		port        = flag.Int("port", 0, "required: HTTP listen port (no default)")
+		bind        = flag.String("bind", "0.0.0.0", "bind host (default 0.0.0.0)")
+		data        = flag.String("data", "", "data dir (default: the directory containing this binary)")
+		allowUnpriv = flag.Bool("allow-unprivileged", false, "development/testing only: do not require root (linux) / Administrator (windows); the per-user container features will be unavailable")
 	)
 	flag.Parse()
 
@@ -42,6 +43,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "bevin: -port is required (no default)")
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	// The mandatory per-user container runtime needs elevated privileges
+	// (root: systemd-nspawn; Administrator: the Host Compute Service). Fail
+	// fast with an actionable message instead of serving a wizard that can
+	// never complete (the wizard's server step gates on the same runtime).
+	// -allow-unprivileged is the development/testing escape hatch: the
+	// server runs, but the per-user container features are unavailable.
+	if !*allowUnpriv && !privilegeOK() {
+		fmt.Fprintln(os.Stderr, privilegeMessage())
+		os.Exit(1)
 	}
 
 	dataDir := *data

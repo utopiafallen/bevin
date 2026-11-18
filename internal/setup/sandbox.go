@@ -8,8 +8,8 @@ package setup
 //     enable the runtime for their OS BEFORE setup is allowed to proceed;
 //   - the base container image provisioning (a minimal OS the per-user
 //     containers are created from — linux: an Ubuntu rootfs; windows: a
-//     servercore image), streamed by the display-only sidecars step like
-//     the other sidecars.
+//     servercore image), streamed by the display-only server step like
+//     the sidecars step streams its sidecars.
 //
 // Finalize gates on the sandbox (server-side enforcement of the wizard
 // prompt): per-user containers are MANDATORY (no opt-out — user
@@ -54,7 +54,7 @@ type sandboxBaseState struct {
 
 // SandboxStatus runs the OS runtime check + reports the base image state.
 // When the runtime is ready and the base is missing it auto-starts the
-// provisioning (the sidecars step polls this endpoint — display-only, the
+// provisioning (the server step polls this endpoint — display-only, the
 // server drives the work like it does for the sidecars).
 func (m *Manager) SandboxStatus(ctx context.Context) SandboxStatus {
 	// What setup will save: the [sandbox] section of the existing config
@@ -168,9 +168,11 @@ func (m *Manager) WaitForSandboxBase(ctx context.Context) error {
 	}
 }
 
-// SandboxGateError is the error Finalize returns when the OS container
-// runtime is not ready — it carries the human-readable remediation the
-// wizard shows (the user enables the runtime and re-submits).
+// SandboxGateError is the error the setup gates return when the OS
+// container runtime is not ready — it carries the human-readable
+// remediation the wizard shows (the user enables the runtime and
+// re-submits). It is enforced at the SERVER step (advance) and again at
+// Finalize (the backstop).
 func SandboxGateError(rt sandbox.Runtime) error {
-	return fmt.Errorf("the OS container runtime is not ready: %s — enable it (see the instructions on the sidecars step) and submit again", rt.Detail)
+	return fmt.Errorf("the OS container runtime is not ready: %s — enable it (see the instructions on the server step) and try again", rt.Detail)
 }
