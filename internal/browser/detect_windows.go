@@ -96,8 +96,14 @@ func registryInstallLocation(key, exe string) string {
 	return ""
 }
 
-// isExecutable reports whether p is a regular file with an executable bit.
+// isExecutable reports whether p is a regular file. Windows has NO execute
+// bit — Go reports 0666 for every regular file there — so the unix
+// Mode()&0o111 test is always false on a native Windows host and every
+// standard-path probe failed even with Edge installed (2026-11-19: the
+// live box had msedge.exe at the standard path and detection still
+// reported no browser). File existence IS the test: whatever an installer
+// put at these paths is the executable.
 func isExecutable(p string) bool {
 	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
+	return err == nil && fi.Mode().IsRegular()
 }

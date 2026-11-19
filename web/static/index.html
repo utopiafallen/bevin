@@ -903,7 +903,7 @@
               a.m.querySelector(".when").textContent = fmtWhen(dts);
               a.m.querySelector(".when").title = dts.toUTCString();
             }
-            a.buf = m.content;
+            a.buf = m.content || "(empty reply)";
             paint(a);
             if (m.reasoning) {
               // Restore the persisted thinking block: the full trace inside
