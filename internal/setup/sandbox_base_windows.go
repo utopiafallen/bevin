@@ -127,8 +127,8 @@ func provisionSandboxBase(ctx context.Context, dataDir string, progress func(fra
 	for i, l := range manifest.Layers {
 		id := strings.TrimPrefix(l.Digest, "sha256:")
 		dest := filepath.Join(baseDir, id)
-		if dirIsNonEmpty(dest) {
-			// Already extracted (a resume) — record + keep going.
+		if layerExtracted(baseDir, id) {
+			// Already fully extracted (a resume) — record + keep going.
 			bi.Layers = append(bi.Layers, sandboxBaseLayer{ID: id, Path: dest})
 			got += l.Size
 			continue
@@ -160,6 +160,9 @@ func provisionSandboxBase(ctx context.Context, dataDir string, progress func(fra
 			os.Remove(blob)
 			os.RemoveAll(dest) // a PARTIAL extraction must not masquerade as "done" on resume
 			return fmt.Errorf("extracting layer %d (%s): %w", i+1, id, err)
+		}
+		if err := markLayerComplete(baseDir, id); err != nil {
+			return err
 		}
 		os.Remove(blob)
 		bi.Layers = append(bi.Layers, sandboxBaseLayer{ID: id, Path: dest})
@@ -372,9 +375,5 @@ func registryDownload(ctx context.Context, path, dest string, progress func(frac
 	return os.Rename(part, dest)
 }
 
-// dirIsNonEmpty reports whether dir exists and holds at least one entry
-// (the resume check for an already-extracted layer).
-func dirIsNonEmpty(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	return err == nil && len(entries) > 0
-}
+// dirIsNonEmpty and the layer completion marker are in
+// sandbox_base_common.go (shared with the resume-check tests).

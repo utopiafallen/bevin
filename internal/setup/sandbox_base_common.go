@@ -115,6 +115,35 @@ func extractTarLayer(archive, destDir string, fallbackDirs ...string) error {
 	return nil
 }
 
+// dirIsNonEmpty reports whether dir exists and holds at least one entry.
+func dirIsNonEmpty(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) > 0
+}
+
+// hasLayerComplete reports whether a layer's completion marker exists.
+// The marker is written only after a layer has been FULLY extracted —
+// it is what makes the resume check trustworthy: a bare non-empty layer
+// dir can be a PARTIAL extraction from a failed run (or from an older
+// bevin without the marker) and must not count as done.
+func hasLayerComplete(baseDir, id string) bool {
+	_, err := os.Stat(filepath.Join(baseDir, id+".complete"))
+	return err == nil
+}
+
+// markLayerComplete writes the layer's completion marker (a sibling of
+// the layer dir, inside the base dir — never inside the layer dir
+// itself, which is passed to HCS as a layer path).
+func markLayerComplete(baseDir, id string) error {
+	return os.WriteFile(filepath.Join(baseDir, id+".complete"), []byte("complete\n"), 0o644)
+}
+
+// layerExtracted reports whether a layer dir holds a COMPLETE
+// extraction (the provisioner's resume check).
+func layerExtracted(baseDir, id string) bool {
+	return dirIsNonEmpty(filepath.Join(baseDir, id)) && hasLayerComplete(baseDir, id)
+}
+
 // writeRootfsTarEntry extracts one tar entry, for a real OS image
 // (shared by both platforms' base provisioners): it handles symlinks +
 // hard links (a rootfs has them — /bin/sh → dash, /lib → /usr/lib; the

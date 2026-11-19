@@ -166,6 +166,46 @@ func TestExtractTarLayerCrossLayerHardlink(t *testing.T) {
 	}
 }
 
+// TestLayerExtracted: the provisioner's resume check must distinguish a
+// COMPLETE extraction (non-empty dir + completion marker) from a stale
+// PARTIAL dir — the user's first real run left exactly that behind
+// (the pre-marker bevin failed mid-layer-2), and a partial dir must be
+// re-extracted, not counted as done.
+func TestLayerExtracted(t *testing.T) {
+	baseDir := t.TempDir()
+	id := "layer123"
+	dest := filepath.Join(baseDir, id)
+
+	// Nothing there yet.
+	if layerExtracted(baseDir, id) {
+		t.Fatal("layerExtracted with no layer dir")
+	}
+	// A PARTIAL dir (no marker) — must NOT count as done.
+	if err := os.MkdirAll(filepath.Join(dest, "Files"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "Files", "partial.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if layerExtracted(baseDir, id) {
+		t.Fatal("layerExtracted with a partial (unmarked) dir")
+	}
+	// A marker alone (no dir) — still not done.
+	if err := markLayerComplete(baseDir, "markeronly"); err != nil {
+		t.Fatal(err)
+	}
+	if layerExtracted(baseDir, "markeronly") {
+		t.Fatal("layerExtracted with a marker but no layer dir")
+	}
+	// Marker + non-empty dir = done.
+	if err := markLayerComplete(baseDir, id); err != nil {
+		t.Fatal(err)
+	}
+	if !layerExtracted(baseDir, id) {
+		t.Fatal("layerExtracted with a marked, non-empty dir")
+	}
+}
+
 // TestIsHTMLBody: the 200-HTML guard that turns "a network filter
 // served its own page" from an inscrutable JSON parse error into an
 // actionable one.
