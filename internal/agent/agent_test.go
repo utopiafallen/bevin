@@ -112,3 +112,72 @@ func TestModelsFiltersAutoDisabled(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+// TestConversationMessagesEmptyReply pins the display filter: an empty
+// assistant row that carries a P7 tool call is the model's tool-call turn
+// (hidden — the turn's text lands on the final reply row), but an empty
+// row WITHOUT tool calls is a genuine empty reply and must stay in the
+// history (the UI renders it as "(empty reply)") — otherwise the user's
+// question looks unanswered after a page reload (2026-11-19: the blanket
+// empty-row filter made the streamed-tool-call era's empty replies vanish
+// from restored chat logs).
+func TestConversationMessagesEmptyReply(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := us.CreateConversation("t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A question + a genuine empty reply (no tool calls).
+	if _, err := us.AppendMessage(conv.ID, roleUser, "hi", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := us.AppendMessage(conv.ID, roleAssistant, "", "the model thought but said nothing", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	// The tool-call turn: an empty row WITH a P7 call (hidden), then the
+	// turn's final text reply (shown).
+	if _, err := us.AppendMessage(conv.ID, roleUser, "do it", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	toolRow, err := us.AppendMessage(conv.ID, roleAssistant, "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := us.AppendToolCall(toolRow.ID, "fake_tool", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := us.AppendMessage(conv.ID, roleAssistant, "done", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := a.ConversationMessages("u1", conv.ID)
+	if err != nil {
+		t.Fatalf("ConversationMessages: %v", err)
+	}
+	var rows []string
+	var emptyReasoning string
+	for _, m := range msgs {
+		rows = append(rows, m.Role+":"+m.Content)
+		if m.Role == roleAssistant && m.Content == "" {
+			emptyReasoning = m.Reasoning
+		}
+	}
+	want := []string{"user:hi", "assistant:", "user:do it", "assistant:done"}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %v, want %v (the tool-call row hides, the genuine empty reply stays)", rows, want)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Fatalf("row %d = %q, want %q (rows = %v)", i, rows[i], want[i], rows)
+		}
+	}
+	// The empty reply keeps its reasoning trace (the UI's thinking block).
+	if emptyReasoning != "the model thought but said nothing" {
+		t.Fatalf("empty reply's reasoning = %q, want the stored trace", emptyReasoning)
+	}
+}

@@ -773,11 +773,19 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 		if m.Role != roleUser && m.Role != roleAssistant {
 			continue
 		}
-		// Empty assistant rows are tool-call narration rows the model left
-		// no text on — they exist to carry the P7 tool calls, not to be
-		// rendered as chat bubbles.
+		// An empty assistant row WITH P7 tool calls is the model's
+		// tool-call turn — the row exists to carry the calls, and the text
+		// lands on the turn's final reply row: not a chat bubble. An empty
+		// row WITHOUT any tool calls is a genuine empty reply (the model
+		// ended the turn with no text — a reasoning-only completion, or the
+		// dropped streamed tool call before 7174606): it stays in the
+		// history so the user's question never looks unanswered, and the
+		// UI renders it as "(empty reply)".
 		if m.Role == roleAssistant && m.Content == "" {
-			continue
+			rows, err := us.ToolCallsForMessage(m.ID)
+			if err == nil && len(rows) > 0 {
+				continue
+			}
 		}
 		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, CreatedAt: m.CreatedAt})
 	}
