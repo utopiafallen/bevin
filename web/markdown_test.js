@@ -57,6 +57,52 @@ console.log("parseBlocks: shape");
   check("ordered list detected", MD.parseBlocks(t3)[0].ordered === true);
 })();
 
+console.log("parseBlocks: tables");
+check("table terminated by blank line is complete",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\n\n") === "t",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\n\n"));
+check("table terminated by newline-terminated text is complete",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\nnext\n") === "t,p*",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\nnext\n"));
+check("table terminated by unterminated text is incomplete (the line may grow into a row)",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\nnext") === "t*,p*",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\nnext"));
+check("table at EOF is incomplete",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |") === "t*",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |"));
+check("table at EOF with trailing newline is still incomplete (rows may follow)",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\n") === "t*",
+  blocksOf("| a | b |\n| - | - |\n| 1 | 2 |\n"));
+check("header + unterminated delimiter is an incomplete table (tail re-parses as it grows)",
+  blocksOf("| a | b |\n| - | - |") === "t*",
+  blocksOf("| a | b |\n| - | - |"));
+check("pipe-less line ends the table",
+  blocksOf("| a | b |\n| - | - |\nplain\n") === "t,p*",
+  blocksOf("| a | b |\n| - | - |\nplain\n"));
+check("paragraph breaks before a table header",
+  blocksOf("intro\n| a | b |\n| - | - |\n| 1 | 2 |\n\n") === "p,t",
+  blocksOf("intro\n| a | b |\n| - | - |\n| 1 | 2 |\n\n"));
+check("single-column delimiter is NOT a table (paragraph + hr stays)",
+  blocksOf("text\n---\n\n") === "p,h",
+  blocksOf("text\n---\n\n"));
+check("header without pipes is not a table",
+  blocksOf("a b\n| - | - |\n") === "p*",
+  blocksOf("a b\n| - | - |\n"));
+check("table text keeps all rows", (function () {
+  var b = MD.parseBlocks("| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\n")[0];
+  return b.type === "table" &&
+    b.text === "| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n",
+    JSON.stringify(b.text);
+})());
+
+console.log("stableCut: tables stream in the tail");
+check("cut holds while a table streams (stays in the tail)",
+  cut("| a | b |\n| - | - |\n| 1 | 2 |") === 0,
+  cut("| a | b |\n| - | - |\n| 1 | 2 |"));
+check("cut settles the table once terminated",
+  cut("text\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n") === "text\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n".length,
+  cut("text\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n"));
+
 console.log("settled-chunk re-parse (sentinel)");
 (function () {
   // A list whose completeness was decided by a line past the chunk end:
@@ -120,6 +166,11 @@ console.log("stableCut: settle-then-render consistency");
     "\n",
     "> a quote line\n",
     "> second line\n",
+    "\n",
+    "| col A | col B | col C |\n",
+    "| :--- | ---: | :---: |\n",
+    "| **one** | `two` | plain |\n",
+    "| [link](https://example.com/c) | 4 | \\\\| escaped-ish |\n",
     "\n",
     "Final paragraph. See [docs](https://example.com/a?b=1). See also https://example.com/bare.\n",
     "\n",

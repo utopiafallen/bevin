@@ -16,12 +16,16 @@
  *
  * Subset (deliberate, chat-first): fenced code (``` / ~~~, optional lang),
  * ATX headings (#..######), hr (three or more -, * or _ chars), blockquote
- * (>), unordered + ordered lists (nested, loose), paragraphs (single \n =
- * <br>, chat style), and inline: code spans, **bold** / __bold__, *em* /
- * _em_ (intraword _ guards), ~~strike~~, [text](url) (http(s) only), bare
- * http(s) URLs. Not supported (documented deviations, v1): setext
- * headings, tables, image syntax (renders literal), lazy blockquote
- * continuations, 4-space code indents inside list items.
+ * (>), tables (header + delimiter row, 2+ columns; :--- / ---: / :---:
+ * alignment), unordered + ordered lists (nested, loose), paragraphs
+ * (single \n = <br>, chat style), and inline: code spans, **bold** /
+ * __bold__, *em* / _em_ (intraword _ guards), ~~strike~~, [text](url)
+ * (http(s) only), bare http(s) URLs. Not supported (documented deviations,
+ * v1): setext headings, image syntax (renders literal), single-column
+ * tables (they collide with the paragraph + HR chat pattern), table rows
+ * without pipes (a pipe-less line ends the table), backslash escapes (the
+ * one exception is \| inside table rows, which splits the cell), lazy
+ * blockquote continuations, 4-space code indents inside list items.
  *
  * Works in the browser (global BevinMD) and in node (module.exports) for
  * testing the DOM-free parts (parseBlocks, stableCut).
@@ -39,6 +43,7 @@
   var HR = /^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})$/;
   var QUOTE = /^\s{0,3}>\s?(.*)$/;
   var LIST = /^\s{0,3}([-*+]|\d{1,9}[.)])\s+(.*)$/;
+  var TABLE_DELIM_CELL = /^\s*:?-+:?\s*$/;
 
   function indentOf(line) {
     var m = line.match(/^\s*/);
@@ -49,6 +54,57 @@
   function isBlockStart(line) {
     return FENCE.test(line) || HEADING.test(line) || HR.test(line) ||
       QUOTE.test(line) || LIST.test(line);
+  }
+
+  // splitTableRow(line) -> the row's cells (trimmed). The outer pipes are
+  // stripped; UNESCAPED pipes split the cells (\| stays in the cell, the
+  // backslash is dropped).
+  function splitTableRow(line) {
+    var s = line.trim();
+    if (s.charAt(0) === "|") s = s.slice(1);
+    if (s.length > 0 && s.charAt(s.length - 1) === "|") s = s.slice(0, -1);
+    var cells = [], cur = "", esc = false;
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (esc) {
+        cur += (ch === "|") ? ch : "\\" + ch;
+        esc = false;
+        continue;
+      }
+      if (ch === "\\") { esc = true; continue; }
+      if (ch === "|") { cells.push(cur); cur = ""; continue; }
+      cur += ch;
+    }
+    cells.push(cur);
+    for (var j = 0; j < cells.length; j++) cells[j] = cells[j].trim();
+    return cells;
+  }
+
+  // isDelimRow: every cell is an alignment spec (---, :---, ---:, :---:).
+  function isDelimRow(line) {
+    var cells = splitTableRow(line);
+    if (cells.length < 1) return false;
+    for (var i = 0; i < cells.length; i++) {
+      if (!TABLE_DELIM_CELL.test(cells[i])) return false;
+    }
+    return true;
+  }
+
+  // tableHeadAt: the line at [pos, lineEnd) is a table HEADER — it has
+  // 2+ cells and the following line is a 2+ cell delimiter row. (Requiring
+  // 2+ columns on both is deliberate: a single-column table would swallow
+  // the very common chat pattern "text\n---" (paragraph + hr).) The
+  // delimiter may be unterminated at EOF — a table block is incomplete
+  // then, so it stays in the re-rendered tail and re-parses as it grows.
+  function tableHeadAt(text, pos, lineEnd, n) {
+    var line = text.slice(pos, lineEnd);
+    if (line.indexOf("|") < 0) return false;
+    var next = lineEnd + 1;
+    if (next >= n) return false;
+    var ne = text.indexOf("\n", next); if (ne < 0) ne = n;
+    if (splitTableRow(line).length < 2) return false;
+    var dline = text.slice(next, ne);
+    return splitTableRow(dline).length >= 2 && isDelimRow(dline);
   }
 
   // parseBlocks(text) -> [{start, end, type, complete, ...}]
@@ -179,12 +235,38 @@
         continue;
       }
 
+      // Table: header row + delimiter row + the run of rows after it.
+      if (tableHeadAt(text, pos, lineEnd, n)) {
+        var dEnd = text.indexOf("\n", lineEnd + 1);
+        if (dEnd < 0) dEnd = n;
+        var tStart = pos, t = dEnd + 1;
+        while (t < n) {
+          var tle = text.indexOf("\n", t); if (tle < 0) tle = n;
+          var tl = text.slice(t, tle);
+          // Rows: non-empty lines that carry a pipe. A blank line or a
+          // pipe-less line ends the table (documented deviation — no
+          // cell-count-only rows).
+          if (tl.trim() === "" || tl.indexOf("|") < 0) break;
+          t = tle + 1;
+        }
+        // Complete only once the terminating line exists AND is itself
+        // newline-terminated: a blank line is decisive (a table cannot
+        // continue across one), and a non-empty pipe-less line can no
+        // longer grow into a row once its newline has arrived. A table
+        // at EOF can still gain rows — it stays in the tail.
+        blocks.push({ start: tStart, end: t, type: "table",
+          complete: t < n && text.indexOf("\n", t) >= 0,
+          text: text.slice(tStart, t) });
+        pos = t;
+        continue;
+      }
+
       // Paragraph: runs until a blank line or a line that opens a block.
       var pStart = pos, p2 = lineEnd + 1;
       while (p2 < n) {
         var ple = text.indexOf("\n", p2); if (ple < 0) ple = n;
         var pl = text.slice(p2, ple);
-        if (pl.trim() === "" || isBlockStart(pl)) break;
+        if (pl.trim() === "" || isBlockStart(pl) || tableHeadAt(text, p2, ple, n)) break;
         p2 = ple + 1;
       }
       blocks.push({ start: pStart, end: p2, type: "paragraph",
@@ -398,6 +480,62 @@
     frag.appendChild(el);
   }
 
+  // buildTable renders a table block's text (header + delimiter + rows)
+  // into <div class="md-table"><table>…</table></div> — the wrapper gives
+  // wide tables an in-bubble horizontal scroll instead of overflow.
+  // Cells go through parseInline (the same safe inline pass: no HTML by
+  // construction, links restricted to http(s)).
+  function buildTable(text, frag, doc) {
+    var lines = text.split("\n");
+    // The settled slice ends with the last row's newline — drop the empty
+    // split artifact so it doesn't render as a phantom row.
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    var header = splitTableRow(lines[0]);
+    var delim = splitTableRow(lines[1]);
+    function alignOf(i) {
+      var c = delim[i];
+      if (c == null) return "";
+      var l = c.charAt(0) === ":", r = c.charAt(c.length - 1) === ":";
+      if (l && r) return "center";
+      if (r) return "right";
+      if (l) return "left";
+      return "";
+    }
+    var wrap = doc.createElement("div");
+    wrap.className = "md-table";
+    var table = doc.createElement("table");
+    var thead = doc.createElement("thead");
+    var htr = doc.createElement("tr");
+    for (var h = 0; h < header.length; h++) {
+      var th = doc.createElement("th");
+      parseInline(header[h], th, doc);
+      var ha = alignOf(h);
+      if (ha) th.style.textAlign = ha;
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    if (lines.length > 2) {
+      var tbody = doc.createElement("tbody");
+      for (var r2 = 2; r2 < lines.length; r2++) {
+        var row = splitTableRow(lines[r2]);
+        var tr = doc.createElement("tr");
+        var cols = row.length > header.length ? row.length : header.length;
+        for (var c3 = 0; c3 < cols; c3++) {
+          var td = doc.createElement("td");
+          parseInline(row[c3] || "", td, doc);
+          var ca = alignOf(c3);
+          if (ca) td.style.textAlign = ca;
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+    }
+    wrap.appendChild(table);
+    frag.appendChild(wrap);
+  }
+
   function buildBlock(b, frag, doc, text) {
     var el;
     switch (b.type) {
@@ -439,6 +577,9 @@
         break;
       case "list":
         buildList(b.text, b.ordered, 0, frag, doc);
+        break;
+      case "table":
+        buildTable(b.text, frag, doc);
         break;
       case "paragraph":
       default:
