@@ -340,11 +340,11 @@ function stopSandboxPoll(){ if(_sandboxTimer){ clearInterval(_sandboxTimer); _sa
 // pollSandbox drives the SERVER step's mandatory container check: it
 // fetches the runtime state + base image progress (GET /setup/sandbox),
 // re-renders the panel, and refreshes the Next button (gated on the
-// runtime check passing — see stepReady). The server auto-starts the base
-// provisioning when the runtime is ready, so the poll also streams the
-// download progress while the admin is on the step; once started, the
-// server-side run continues after the admin advances, and the Finalize
-// gate is the backstop.
+// runtime check passing AND the base image being ready — see
+// stepReady). The server auto-starts the base provisioning when the
+// runtime is ready (and auto-retries a failed run after a cooldown), so
+// the poll streams the download progress; the step unlocks when
+// extraction succeeds. The Finalize gate re-checks both (the backstop).
 async function pollSandbox(){
   if(STEPS[idx] !== "server") return;
   try{
@@ -384,9 +384,11 @@ const RENDER = { server:renderServer, admin:renderAdmin, oauth:renderOAuth, mode
 function stepReady(){
   const step=STEPS[idx];
   switch(step){
-    case "server": { // the MANDATORY container check (the step gate): the OS runtime must be ready — the base image may still be provisioning (the Finalize gate covers it)
-      const rt = S.sandboxStatus && S.sandboxStatus.runtime;
-      return !!(rt && rt.ok);
+    case "server": { // the MANDATORY container check (the step gate): the OS runtime must be ready AND the base image must be provisioned — the step streams the download + extraction and unlocks on success (user decision 2026-11-18: a consistent hard gate; a failed provisioning auto-retries after a short cooldown)
+    const st = S.sandboxStatus;
+    const rt = st && st.runtime;
+    const base = st && st.base;
+    return !!(rt && rt.ok && base && base.status === "ready");
     }
     case "admin": { // read the DOM (the fields sync to S only at advance) with the same placeholder fallbacks doNext uses
       const g=(s)=>{ const e=q(s); return e ? (e.value.trim() || e.placeholder) : ""; };

@@ -78,7 +78,9 @@ func isHTMLBody(body []byte, contentType string) bool {
 // (tar), and now serves them as .tar.gzip (verified against the live
 // ltsc2025 image 2026-11-18), so both must work — the mediaType in the
 // manifest agrees, but the magic check is the robust signal.
-func extractTarLayer(archive, destDir string) error {
+// fallbackDirs: previously extracted lower layer directories for
+// cross-layer hard links (see writeRootfsTarEntry).
+func extractTarLayer(archive, destDir string, fallbackDirs ...string) error {
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
@@ -106,7 +108,7 @@ func extractTarLayer(archive, destDir string) error {
 		if err != nil {
 			return err
 		}
-		if err := writeRootfsTarEntry(destDir, hdr, tr); err != nil {
+		if err := writeRootfsTarEntry(destDir, hdr, tr, fallbackDirs...); err != nil {
 			return err
 		}
 	}
@@ -120,7 +122,15 @@ func extractTarLayer(archive, destDir string) error {
 // bits, exec bits). The sidecar installer's writeTarEntry is not reused
 // here on purpose (its blanket 0755 + no-symlink behavior is right for
 // release artifacts, wrong for an OS).
-func writeRootfsTarEntry(destDir string, hdr *tar.Header, r io.Reader) error {
+//
+// fallbackDirs: previously extracted lower layer directories (windows
+// layered images, in image order) — a layer's hard link may target a
+// file created by a LOWER layer (cross-layer hard link, e.g. a GAC
+// assembly linked from a role layer); when the target is not in this
+// layer, the topmost lower layer that has it supplies the content
+// (materialized as a regular file copy — unambiguous for the union file
+// system, no inode coupling across the layer dirs).
+func writeRootfsTarEntry(destDir string, hdr *tar.Header, r io.Reader, fallbackDirs ...string) error {
 	target := filepath.Join(destDir, filepath.FromSlash(hdr.Name))
 	if target != filepath.Clean(destDir) && !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
 		return fmt.Errorf("unsafe tar path: %s", hdr.Name) // path traversal guard
@@ -154,8 +164,46 @@ func writeRootfsTarEntry(destDir string, hdr *tar.Header, r io.Reader) error {
 		if !strings.HasPrefix(linkTarget, filepath.Clean(destDir)+string(os.PathSeparator)) {
 			return fmt.Errorf("unsafe hardlink target: %s", hdr.Linkname)
 		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		src := linkTarget
+		if _, err := os.Stat(src); err != nil {
+			for _, fb := range fallbackDirs {
+				p := filepath.Join(fb, filepath.FromSlash(hdr.Linkname))
+				if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+					src = p
+					break
+				}
+			}
+			if src == linkTarget {
+				return fmt.Errorf("hard link target %q not found in this layer or any lower layer", hdr.Linkname)
+			}
+		}
 		os.Remove(target)
-		return os.Link(linkTarget, target)
+		if src == linkTarget {
+			return os.Link(src, target)
+		}
+		// Cross-layer: materialize a copy.
+		in, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		fi, err := in.Stat()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fi.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(out, in)
+		cerr := out.Close()
+		if err != nil {
+			return err
+		}
+		return cerr
 	}
 	return nil
 }

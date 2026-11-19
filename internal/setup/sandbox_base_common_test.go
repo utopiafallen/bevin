@@ -36,6 +36,7 @@ func makeLayerTar(t *testing.T, compressed bool) []byte {
 	write("windows/system32", tar.TypeDir, 0o755, "", "")
 	write("windows/system32/base.txt", tar.TypeReg, 0o644, "base layer\n", "")
 	write("windows/link.txt", tar.TypeSymlink, 0, "", "system32/base.txt")
+	write("windows/hard.txt", tar.TypeLink, 0o644, "", "windows/system32/base.txt")
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,82 @@ func TestExtractTarLayer(t *testing.T) {
 			if link != "system32/base.txt" {
 				t.Fatalf("symlink target = %q, want %q", link, "system32/base.txt")
 			}
+			hard, err := os.ReadFile(filepath.Join(dest, "windows", "hard.txt"))
+			if err != nil {
+				t.Fatalf("reading extracted hardlink: %v", err)
+			}
+			if string(hard) != "base layer\n" {
+				t.Fatalf("hardlink content = %q, want %q", hard, "base layer\n")
+			}
 		})
+	}
+}
+
+// TestExtractTarLayerCrossLayerHardlink: a windows layered image's hard
+// link may target a file created by a LOWER layer (the user's first real
+// windows run hit exactly this: the servercore role layer linking a GAC
+// assembly file the base layer installed — os.Link then failed with
+// "The system cannot find the path specified"). The target must be
+// materialized from the topmost lower layer that has it, and the link's
+// parent dirs created (the tar declares no entry for them).
+func TestExtractTarLayerCrossLayerHardlink(t *testing.T) {
+	dir := t.TempDir()
+	lower := filepath.Join(dir, "lower")
+	upper := filepath.Join(dir, "upper")
+
+	// The lower layer: Files/x.txt.
+	var lb bytes.Buffer
+	tw := tar.NewWriter(&lb)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(tw.WriteHeader(&tar.Header{Name: "Files/", Typeflag: tar.TypeDir, Mode: 0o755}))
+	must(tw.WriteHeader(&tar.Header{Name: "Files/x.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 6}))
+	if _, err := tw.Write([]byte("lower\n")); err != nil {
+		t.Fatal(err)
+	}
+	must(tw.Close())
+	lbPath := filepath.Join(dir, "lower.tar")
+	must(os.WriteFile(lbPath, lb.Bytes(), 0o644))
+	must(extractTarLayer(lbPath, lower))
+
+	// The upper layer: ONE entry — a hard link to Files/x.txt (not in
+	// this layer) under an undeclared directory.
+	var ub bytes.Buffer
+	tw = tar.NewWriter(&ub)
+	must(tw.WriteHeader(&tar.Header{Name: "Files/GAC_64/link.txt", Typeflag: tar.TypeLink, Mode: 0o644, Linkname: "Files/x.txt"}))
+	must(tw.Close())
+	ubPath := filepath.Join(dir, "upper.tar")
+	must(os.WriteFile(ubPath, ub.Bytes(), 0o644))
+	must(extractTarLayer(ubPath, upper, lower))
+
+	got, err := os.ReadFile(filepath.Join(upper, "Files", "GAC_64", "link.txt"))
+	if err != nil {
+		t.Fatalf("reading materialized hardlink: %v", err)
+	}
+	if string(got) != "lower\n" {
+		t.Fatalf("content = %q, want %q", got, "lower\n")
+	}
+	fi, err := os.Stat(filepath.Join(upper, "Files", "GAC_64", "link.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeType != 0 {
+		t.Fatalf("materialized entry mode = %v, want regular file", fi.Mode())
+	}
+
+	// A target missing from ALL layers is a broken image: clear error.
+	var bad bytes.Buffer
+	tw = tar.NewWriter(&bad)
+	must(tw.WriteHeader(&tar.Header{Name: "Files/y.txt", Typeflag: tar.TypeLink, Mode: 0o644, Linkname: "Files/nope.txt"}))
+	must(tw.Close())
+	badPath := filepath.Join(dir, "bad.tar")
+	must(os.WriteFile(badPath, bad.Bytes(), 0o644))
+	if err := extractTarLayer(badPath, filepath.Join(dir, "upper2"), lower); err == nil {
+		t.Fatal("expected an error for a hardlink target missing from every layer")
 	}
 }
 

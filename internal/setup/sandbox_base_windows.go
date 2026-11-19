@@ -146,10 +146,19 @@ func provisionSandboxBase(ctx context.Context, dataDir string, progress func(fra
 		}); err != nil {
 			return fmt.Errorf("downloading layer %d (%s): %w", i+1, id, err)
 		}
+		// Lower layers (already extracted, in image order) — a layer's
+		// hard link may target a file a LOWER layer created (cross-layer
+		// hard links are normal in windows layered images: a role layer
+		// hard-links a GAC file the base layer installed).
+		lowers := make([]string, len(bi.Layers))
+		for j, l := range bi.Layers {
+			lowers[j] = l.Path
+		}
 		// Windows registry layers are tar — gzip-compressed today,
 		// uncompressed historically (extractTarLayer detects the magic).
-		if err := extractTarLayer(blob, dest); err != nil {
+		if err := extractTarLayer(blob, dest, lowers...); err != nil {
 			os.Remove(blob)
+			os.RemoveAll(dest) // a PARTIAL extraction must not masquerade as "done" on resume
 			return fmt.Errorf("extracting layer %d (%s): %w", i+1, id, err)
 		}
 		os.Remove(blob)

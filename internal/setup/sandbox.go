@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/sandbox"
@@ -50,12 +51,17 @@ type sandboxBaseState struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	doneCh   chan struct{} // closed when the run finishes
+	started  time.Time     // last run start (the auto-retry cooldown)
 }
 
 // SandboxStatus runs the OS runtime check + reports the base image state.
 // When the runtime is ready and the base is missing it auto-starts the
 // provisioning (the server step polls this endpoint — display-only, the
-// server drives the work like it does for the sidecars).
+// server drives the work like it does for the sidecars). A FAILED run
+// auto-retries after a short cooldown: the server step's Next gate blocks
+// until the base is ready, so there must be a path from "error" back to
+// success without reaching Finalize (a re-run is safe — the provisioner
+// is resumable, done layers are skipped).
 func (m *Manager) SandboxStatus(ctx context.Context) SandboxStatus {
 	// What setup will save: the [sandbox] section of the existing config
 	// when there is one (edit mode), else the fresh-setup default —
@@ -69,6 +75,15 @@ func (m *Manager) SandboxStatus(ctx context.Context) SandboxStatus {
 	if rt.OK && base.Status == "pending" {
 		m.StartSandboxBaseProvision()
 		base = m.baseState()
+	}
+	if rt.OK && base.Status == "error" {
+		m.baseMu.Lock()
+		cool := m.baseStateRun == nil || time.Since(m.baseStateRun.started) >= 30*time.Second
+		m.baseMu.Unlock()
+		if cool {
+			m.StartSandboxBaseProvision()
+			base = m.baseState()
+		}
 	}
 	return SandboxStatus{Runtime: rt, Base: base}
 }
@@ -113,6 +128,7 @@ func (m *Manager) StartSandboxBaseProvision() {
 		cancel:  cancel,
 		detail:  "starting…",
 		doneCh:  make(chan struct{}),
+		started: time.Now(),
 	}
 	m.baseStateRun = st
 	go func() {
@@ -172,7 +188,11 @@ func (m *Manager) WaitForSandboxBase(ctx context.Context) error {
 // container runtime is not ready — it carries the human-readable
 // remediation the wizard shows (the user enables the runtime and
 // re-submits). It is enforced at the SERVER step (advance) and again at
-// Finalize (the backstop).
+// Finalize (the backstop). The step's OTHER half — the base image —
+// gates on baseState() == "ready" (see the advance handler); the step
+// streams the download and unlocks when extraction succeeds (user
+// decision 2026-11-18: a consistent hard gate — the step cannot be left
+// while the container image is missing).
 func SandboxGateError(rt sandbox.Runtime) error {
 	return fmt.Errorf("the OS container runtime is not ready: %s — enable it (see the instructions on the server step) and try again", rt.Detail)
 }

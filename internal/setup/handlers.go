@@ -170,12 +170,30 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	case "server":
 		// The per-user container check is PART OF the server step (the
 		// mandatory gate — no opt-out): the step cannot advance until the
-		// OS runtime check succeeds. The wizard disables Next on exactly
-		// this state — a disabled button is the state the server rejects.
+		// OS runtime check succeeds AND the base image is provisioned
+		// (user decision 2026-11-18: a consistent hard gate — the step
+		// streams the download + extraction and unlocks on success). The
+		// wizard disables Next on exactly this state — a disabled button
+		// is the state the server rejects. Finalize re-checks both (the
+		// backstop).
 		err = h.mgr.SetServer(p.Server)
 		if err == nil {
 			if rt := sandboxCheckRuntime(r.Context(), h.mgr.dataDir, sandbox.Config{Enabled: true, Network: "veth"}); !rt.OK {
 				err = SandboxGateError(rt)
+			} else {
+				// Ensure the provisioning run is going (the wizard's poll
+				// starts it; the gate must not depend on the poll).
+				h.mgr.StartSandboxBaseProvision()
+				if b := h.mgr.baseState(); b.Status != "ready" {
+					switch b.Status {
+					case "provisioning":
+						err = fmt.Errorf("the base container image is still provisioning (%s) — the step unlocks when the download + extraction finish", b.Detail)
+					case "error":
+						err = fmt.Errorf("the base container image failed to provision: %s — it will be retried automatically; see the base line on this step", b.Detail)
+					default: // pending (the run has not started yet)
+						err = fmt.Errorf("the base container image provisioning has not started — see the base line on this step")
+					}
+				}
 			}
 		}
 	case "admin":
@@ -189,7 +207,8 @@ func (h *Handler) advance(w http.ResponseWriter, r *http.Request) {
 	case "sidecars":
 		// display-only for the sidecars themselves (the server auto-
 		// provisions them); the per-user container runtime check + base
-		// image are shown on the step and enforced by the Finalize gate.
+		// image are gated on the SERVER step and re-checked by the
+		// Finalize gate.
 		err = nil
 	case "email":
 		err = h.mgr.SetEmail(p.Email)
