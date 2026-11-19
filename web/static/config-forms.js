@@ -272,7 +272,13 @@ function renderModelForm(){
   disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });
   return f;
 }
-function renderModelList(){
+function renderModelList(opts){
+  // opts.removable — the admin dashboard passes this: each row gets a
+  // Remove button (the page defines removeModel and mirrors the guard
+  // client-side). The LAST main model's Remove is disabled — at least one
+  // must remain; the model being edited is spliced out of S.models for
+  // the duration of the edit, so it counts as remaining. The setup wizard
+  // does not pass it (its rows are edit/reorder only).
   // The table sits in an overflow-x:auto wrapper: a very wide table (long
   // names, a narrow screen) scrolls INSIDE the frame instead of widening the
   // page's scrollable canvas (which made the centered setup frame read as
@@ -283,9 +289,21 @@ function renderModelList(){
   t.append(el("thead",{}, el("tr",{},
     el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "Profile"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
   const tb=el("tbody",{});
+  const removable=!!(opts&&opts.removable);
   S.models.forEach((m,i)=>{
     const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
     const dn=el("button",{title:"Move down", onclick:`reorderModel(${i},1)`}, "\u25bc"); if(i===S.models.length-1) dn.setAttribute("disabled","");
+    // actions cell: Edit, plus Remove when removable (disabled on the last
+    // main model — "remaining" counts the model being edited, which is
+    // spliced out of S.models for the edit)
+    const acts=el("div",{class:"row-actions"});
+    acts.append(el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"));
+    if(removable){
+      const canRemove=S.models.length+(S.editingIndex!==-1?1:0)>1;
+      const rm=el("button",{class:"row-btn", onclick:`removeModel(${i})`, title:canRemove?"Remove this model":"Add another model first — at least one main model is required"},"Remove");
+      if(!canRemove) rm.setAttribute("disabled","");
+      acts.append(rm);
+    }
     tb.append(el("tr",{},
       el("td",{}, el("div",{class:"reorder"}, up, dn)),
       el("td",{}, el("span",{class:"kv", title:m.display_name||""}, m.display_name||"(unnamed)")),
@@ -297,7 +315,7 @@ function renderModelList(){
       el("td",{}, m.profile||"general"),
       el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
       el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
-      el("td",{}, el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"))));
+      el("td",{}, acts)));
   });
   t.append(tb);
   w.append(t);

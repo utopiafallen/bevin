@@ -61,6 +61,7 @@
   .toolbar { display:flex; gap:.6rem; align-items:center; margin:.4rem 0 1rem; }
   .page-note { color:var(--text-muted); font-size:.85rem; margin:.2rem 0 .6rem; }
   .row-actions { display:flex; gap:.35rem; }
+  .row-actions .row-btn:disabled { opacity:.4; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -342,6 +343,20 @@ function saveAuxModel() {
   notifyConfigChanged("aux");
 }
 function removeAuxModel(i) { S.aux.splice(i, 1); render(); notifyConfigChanged("aux"); }
+// removeModel — page-local (the shared table renders the button only when
+// called with {removable:true}); the guard mirrors the table's disabled
+// state: the last main model can't be removed (the server's validateModels
+// rejects an empty list too). The model being edited is spliced out of
+// S.models for the edit, so it counts as remaining.
+function removeModel(i) {
+  const remaining = S.models.length - 1 + (S.editingIndex !== -1 ? 1 : 0);
+  if (remaining < 1) { msg("Add another model first — at least one main model is required."); return; }
+  const m = S.models[i];
+  S.models.splice(i, 1);
+  render();
+  msg("Model \u201c" + (m.display_name || m.model_id) + "\u201d removed.", "ok");
+  notifyConfigChanged("models");
+}
 function renderAuxForm() {
   const m = S.auxDraft, editing = S.auxEditingIndex !== -1;
   const f = el("div", {});
@@ -443,11 +458,12 @@ function renderModels() {
   else if (modelFormVisible()) { const c = document.createElement("div"); c.className = "card"; c.append(renderModelForm()); m.append(c); }
   // Main models — the list; each row's Edit loads that model into the form
   // above (while editing, the row is spliced out of the table — it comes
-  // back on save).
+  // back on save). Each row's Remove deletes the model (the last one is
+  // disabled — at least one main model must remain).
   const cl = document.createElement("div"); cl.className = "card";
   cl.innerHTML = "<h2>Main models</h2>";
   cl.append(elP("The chat models users can switch between. List order is the order users see when choosing a model."));
-  cl.append(renderModelList());
+  cl.append(renderModelList({removable:true}));
   m.append(cl);
   // Aux perception models — a table like the main models (the setup wizard
   // keeps the shared inline-card flow; the dashboard lists them compactly
