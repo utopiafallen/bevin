@@ -182,11 +182,11 @@ async function detectAux(i){ const m=S.aux[i]; if(m._detecting) return; if(!m.ba
 function renderModelForm(){
   const m=S.modelDraft, editing=S.editingIndex!==-1;
   const f=el("div",{});
-  // half A: provider configuration (shared with the aux step)
+  // half A: provider configuration (shared with the aux step; the form's
+  // Cancel lives in the footer button row, not here)
   f.append(renderProviderHalf("mf", m, {
     knownBases: allKnownBases(),
     detect: () => detectModel(),
-    clearBtn: { label: "Cancel", fn: cancelEdit },
     getError: () => S.formError,
     clearError: () => { S.formError = null; }
   }));
@@ -254,8 +254,12 @@ function renderModelForm(){
     scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }, locked)
   );
   f.append(halfB);
-  // the save button
-  f.append(el("div",{class:"btns"}, el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
+  // the form's button row: Cancel (discards the draft — restoring the
+  // original row when editing — and closes the form) + the primary
+  // (Add while adding, Save changes while editing)
+  f.append(el("div",{class:"btns"},
+    el("button",{class:"ghost", onclick:"cancelEdit()"}, "Cancel"),
+    el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
   // wire the display-name input (base + key are wired inside renderProviderHalf)
   disp.addEventListener("input",()=>{ m.display_name=disp.value; });
   disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });

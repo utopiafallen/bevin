@@ -345,12 +345,11 @@ function removeAuxModel(i) { S.aux.splice(i, 1); render(); notifyConfigChanged("
 function renderAuxForm() {
   const m = S.auxDraft, editing = S.auxEditingIndex !== -1;
   const f = el("div", {});
-  // half A: provider configuration (the shared block; its ghost button is
-  // the form's Cancel)
+  // half A: provider configuration (the shared block; the form's Cancel
+  // lives in the footer button row, not here)
   f.append(renderProviderHalf("auxf", m, {
     knownBases: allKnownBases(),
     detect: () => detectAuxDraft(),
-    clearBtn: { label: "Cancel", fn: cancelAuxEdit },
     getError: () => S.auxFormError,
     clearError: () => { S.auxFormError = null; }
   }));
@@ -376,8 +375,12 @@ function renderAuxForm() {
     el("div", { class: "row" }, profileField("auxf_prof", m, false, () => { S.auxFormError = null; }))
   );
   f.append(ph);
-  // the save button (Add while adding, Save changes while editing)
-  f.append(el("div", { class: "btns" }, el("button", { class: "primary", onclick: "saveAuxModel()" }, editing ? "Save changes" : "Add")));
+  // the form's button row: Cancel (discards the draft — restoring the
+  // original row when editing — and closes the form) + the primary
+  // (Add while adding, Save changes while editing)
+  f.append(el("div", { class: "btns" },
+    el("button", { class: "ghost", onclick: "cancelAuxEdit()" }, "Cancel"),
+    el("button", { class: "primary", onclick: "saveAuxModel()" }, editing ? "Save changes" : "Add")));
   return f;
 }
 function renderAuxList() {
