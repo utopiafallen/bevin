@@ -60,6 +60,7 @@
   .blocked .btn { margin-top:1rem; }
   .toolbar { display:flex; gap:.6rem; align-items:center; margin:.4rem 0 1rem; }
   .page-note { color:var(--text-muted); font-size:.85rem; margin:.2rem 0 .6rem; }
+  .row-actions { display:flex; gap:.35rem; }
 </style>
 </head>
 <body>
@@ -213,12 +214,17 @@ function poolRow(p) {
 // leaves the hook unset and persists at step advance). The editor is INLINE
 // on the dashboard's Models page (no detour to a dedicated page —
 // /admin/models redirects here): "Add model" / "Add aux" are their own
-// buttons, and a specific model is edited from its row's Edit button in the
-// model table (the shared editModel loads it into the form).
+// buttons, each opening its form (nothing commits until the form's Add /
+// Save changes button is pressed — the form has an explicit Cancel), and a
+// specific model is edited from its row's Edit button in its table (the
+// shared editModel / the page-local editAuxModel load it into the form;
+// while editing, the row is spliced out of the table and comes back on
+// save). Both model kinds are LIST-CENTRIC tables; the forms are
+// on-demand (hidden by default), and only one form is open at a time.
 const PROBE_URL = "/admin/api/probe-model";
 const EMAIL_TEST_URL = "/admin/api/email/test"; // unused here; the shared email form references it
 const PROFILES_URL = "/admin/api/profiles"; // the build's model profile registry (the profile selects' options)
-let S = { models: [], modelDraft: freshModel(), editingIndex: -1, editOriginal: null, formError: null, aux: [], auxError: {}, showForm: false, loaded: false };
+let S = { models: [], modelDraft: freshModel(), editingIndex: -1, editOriginal: null, formError: null, aux: [], showForm: false, loaded: false, auxDraft: freshAux(), auxEditingIndex: -1, auxEditOriginal: null, auxFormError: null, auxShowForm: false };
 
 // api — the fetch helper the shared components expect (parsed JSON; throws
 // with the server's error message on a non-2xx).
@@ -269,9 +275,133 @@ async function loadModelEditor() {
   loadProfiles().then(render);
 }
 
-function modelFormVisible() { return S.showForm || S.editingIndex !== -1; }
+function modelFormVisible() { return (S.showForm || S.editingIndex !== -1) && !auxFormVisible(); }
+function auxFormVisible() { return S.auxShowForm || S.auxEditingIndex !== -1; }
 function scrollToModelForm() { const e = document.getElementById("mf_base"); if (e) e.scrollIntoView({ behavior: "smooth", block: "center" }); }
-function scrollToAuxTail() { const cards = document.querySelectorAll(".aux-block"); if (cards.length) cards[cards.length - 1].scrollIntoView({ behavior: "smooth", block: "center" }); }
+function scrollToAuxForm() { const e = document.getElementById("auxf_base"); if (e) e.scrollIntoView({ behavior: "smooth", block: "center" }); }
+
+// ---- Aux form (page-local) ----
+// The setup wizard keeps the shared inline-card aux flow (renderAuxSection);
+// the dashboard lists aux models in a table and edits them through this
+// on-demand form — the same draft/edit pattern as the main-model form:
+// "Add aux" opens a blank draft, a row's Edit loads that aux (spliced out of
+// the table while editing, restored on cancel). Nothing commits until the
+// form's primary button (Add / Save changes) is pressed; Cancel discards.
+function resetAuxDraft() { S.auxDraft = freshAux(); S.auxEditingIndex = -1; S.auxEditOriginal = null; S.auxFormError = null; }
+// closeAuxForm — discard the open aux form: restore the original row when
+// editing (it was spliced out), reset the draft, hide the form. The callers
+// render() themselves (cancelAuxEdit is the form's Cancel button and does).
+function closeAuxForm() {
+  if (S.auxEditingIndex !== -1 && S.auxEditOriginal) {
+    const idx = Math.min(S.auxEditingIndex, S.aux.length);
+    S.aux.splice(idx, 0, S.auxEditOriginal);
+  }
+  resetAuxDraft();
+  S.auxShowForm = false;
+}
+function cancelAuxEdit() { closeAuxForm(); render(); }
+function editAuxModel(i) {
+  S.auxEditOriginal = deepCopy(S.aux[i]);
+  S.auxDraft = deepCopy(S.aux[i]);
+  S.auxEditingIndex = i; S.aux.splice(i, 1); S.auxFormError = null;
+  if (S.editingIndex !== -1) cancelEdit(); else resetDraft();
+  S.auxShowForm = true; S.showForm = false;
+  render();
+  scrollToAuxForm();
+}
+// detectAuxDraft — probe the provider for the AUX DRAFT (not a stored aux
+// entry): mirror of the shared detectAux, bound to S.auxDraft.
+async function detectAuxDraft() {
+  const m = S.auxDraft;
+  if (m._detecting) return;
+  if (!m.base_url) { S.auxFormError = "Enter the API base URL first."; render(); return; }
+  m._detecting = true; S.auxFormError = null; msg("Detecting " + m.base_url + "…", ""); render();
+  try {
+    const r = await probeDraft(m);
+    if (r.base_url) { m.base_url = r.base_url; }
+    applyAuxFields(m, r.models, -1);
+    msg("Detected " + r.provider + " — " + r.models.length + " model(s) found.", "ok");
+  } catch (e) { S.auxFormError = "Detect failed: " + e.message + " — " + suggestedFix(e.message); }
+  finally { m._detecting = false; render(); }
+}
+function saveAuxModel() {
+  const m = S.auxDraft;
+  if (!m.base_url) { S.auxFormError = "Base URL is required."; render(); return; }
+  if (!m.model_id) { S.auxFormError = "Pick a model — press Detect to list the provider's models."; render(); return; }
+  if (!(m.kinds || []).length) { S.auxFormError = "Pick at least one modality — an aux model with nothing to perceive is dead config."; render(); return; }
+  const wasEditing = S.auxEditingIndex !== -1;
+  const toSave = deepCopy(m); delete toSave._models; delete toSave._lastBase; delete toSave._detecting;
+  if (!wasEditing) { S.aux.push(toSave); } else { const idx = Math.min(S.auxEditingIndex, S.aux.length); S.aux.splice(idx, 0, toSave); }
+  // NOTE: reset the draft directly (NOT closeAuxForm — it would splice the
+  // ORIGINAL back in on top of the just-saved copy and duplicate the row;
+  // the saved entry already put the row back).
+  resetAuxDraft();
+  S.auxShowForm = false;
+  render();
+  msg(wasEditing ? "Aux model saved." : "Aux model added.", "ok");
+  notifyConfigChanged("aux");
+}
+function removeAuxModel(i) { S.aux.splice(i, 1); render(); notifyConfigChanged("aux"); }
+function renderAuxForm() {
+  const m = S.auxDraft, editing = S.auxEditingIndex !== -1;
+  const f = el("div", {});
+  // half A: provider configuration (the shared block; its ghost button is
+  // the form's Cancel)
+  f.append(renderProviderHalf("auxf", m, {
+    knownBases: allKnownBases(),
+    detect: () => detectAuxDraft(),
+    clearBtn: { label: "Cancel", fn: cancelAuxEdit },
+    getError: () => S.auxFormError,
+    clearError: () => { S.auxFormError = null; }
+  }));
+  // half B: perception model (mirror of the shared renderAuxPerception,
+  // bound to the draft instead of a stored aux entry)
+  const ph = el("div", { class: "config-half" }, el("h4", {}, "Perception model"));
+  const sel = el("select", { id: "auxf_sel" });
+  const allModels = m._models || [];
+  if (!allModels.length) { sel.append(el("option", { value: "" }, "— press Detect —")); }
+  else { allModels.forEach(mm => { const mods = modalitiesFromModel(mm); const hint = mods.length ? "  (" + mods.join(", ") + ")" : ""; const o = el("option", { value: mm.ID }, mm.ID + hint); if (m.model_id === mm.ID) o.selected = true; sel.append(o); }); }
+  sel.addEventListener("change", () => { m.model_id = sel.value; const mm = allModels.find(x => x.ID === sel.value); const mods = modalitiesFromModel(mm); if (mods.length) m.kinds = mods; S.auxFormError = null; render(); });
+  const modWrap = el("div", { class: "modality-checks" });
+  ["vision", "audio", "video"].forEach(v => {
+    const cb = el("input", { type: "checkbox", id: "auxf_mod_" + v });
+    if ((m.kinds || []).includes(v)) cb.checked = true;
+    cb.addEventListener("change", () => { const s = new Set(m.kinds || []); if (cb.checked) s.add(v); else s.delete(v); m.kinds = [...s]; S.auxFormError = null; });
+    modWrap.append(el("label", { class: "modality-check" }, cb, v));
+  });
+  ph.append(
+    field("Model", sel),
+    field("Modalities (input)", modWrap),
+    el("p", { class: "field-help" }, "Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."),
+    el("div", { class: "row" }, profileField("auxf_prof", m, false, () => { S.auxFormError = null; }))
+  );
+  f.append(ph);
+  // the save button (Add while adding, Save changes while editing)
+  f.append(el("div", { class: "btns" }, el("button", { class: "primary", onclick: "saveAuxModel()" }, editing ? "Save changes" : "Add")));
+  return f;
+}
+function renderAuxList() {
+  const w = el("div", { class: "model-table-wrap" });
+  if (!S.aux.length) { w.append(el("p", { class: "empty-list" }, "No aux models yet — press \u201c+ Add aux\u201d above.")); return w; }
+  const t = el("table", { class: "model-table" });
+  t.append(el("thead", {}, el("tr", {},
+    el("th", {}, "Kinds"), el("th", {}, "Provider"), el("th", {}, "Base URL"), el("th", {}, "Model ID"), el("th", {}, "Profile"), el("th", {}, ""))));
+  const tb = el("tbody", {});
+  S.aux.forEach((m, i) => {
+    tb.append(el("tr", {},
+      el("td", {}, (m.kinds || []).join(", ") || "—"),
+      el("td", {}, m.provider || "—"),
+      el("td", {}, el("span", { class: "kv baseurl", title: m.base_url || "" }, m.base_url || "—")),
+      el("td", {}, el("span", { class: "kv" }, m.model_id || "—")),
+      el("td", {}, m.profile || "general"),
+      el("td", {}, el("div", { class: "row-actions" },
+        el("button", { class: "row-btn", onclick: "editAuxModel(" + i + ")" }, "Edit"),
+        el("button", { class: "row-btn", onclick: "removeAuxModel(" + i + ")" }, "Remove")))));
+  });
+  t.append(tb);
+  w.append(t);
+  return w;
+}
 
 function renderModels() {
   const m = document.getElementById("main");
@@ -283,19 +413,31 @@ function renderModels() {
   m.append(note);
   const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
   if (!S.loaded) { const c = document.createElement("div"); c.className = "card"; c.append(elP("Loading…")); m.append(c); return; }
-  // Toolbar — "Add model" and "Add aux" are their own buttons: Add model
-  // reveals the model form (hidden until then; the page is list-centric),
-  // Add aux appends a new aux card.
+  // Toolbar — "Add model" and "Add aux" are their own buttons. Each ONLY
+  // opens its form (a fresh, empty draft): nothing is pushed to S and
+  // nothing is committed until the form's Add / Save changes button is
+  // pressed. Opening one form closes the other (only one at a time).
   const tb = document.createElement("div"); tb.className = "toolbar";
   const bAdd = document.createElement("button"); bAdd.className = "btn"; bAdd.textContent = "+ Add model";
-  bAdd.onclick = () => { if (S.editingIndex !== -1) cancelEdit(); else resetDraft(); S.showForm = true; render(); scrollToModelForm(); };
+  bAdd.onclick = () => {
+    closeAuxForm();
+    if (S.editingIndex !== -1) cancelEdit(); else resetDraft();
+    S.showForm = true; render(); scrollToModelForm();
+  };
   const bAux = document.createElement("button"); bAux.className = "btn ghost"; bAux.textContent = "+ Add aux";
-  bAux.onclick = () => { addAux(); scrollToAuxTail(); };
+  bAux.onclick = () => {
+    if (S.editingIndex !== -1) cancelEdit(); else resetDraft();
+    S.showForm = false;
+    closeAuxForm(); resetAuxDraft();
+    S.auxShowForm = true; render(); scrollToAuxForm();
+  };
   tb.append(bAdd, bAux);
   m.append(tb);
-  // The model form — revealed by "+ Add model" or a row's Edit (the shared
-  // editModel sets editingIndex, which shows the form; save/cancel hide it).
-  if (modelFormVisible()) { const c = document.createElement("div"); c.className = "card"; c.append(renderModelForm()); m.append(c); }
+  // The model form — revealed by "+ Add model" or a main-model row's Edit
+  // (the shared editModel sets editingIndex, which shows the form; its
+  // Cancel / Save changes close it). Mutually exclusive with the aux form.
+  if (auxFormVisible()) { const c = document.createElement("div"); c.className = "card"; c.append(renderAuxForm()); m.append(c); }
+  else if (modelFormVisible()) { const c = document.createElement("div"); c.className = "card"; c.append(renderModelForm()); m.append(c); }
   // Main models — the list; each row's Edit loads that model into the form
   // above (while editing, the row is spliced out of the table — it comes
   // back on save).
@@ -304,14 +446,13 @@ function renderModels() {
   cl.append(elP("The chat models users can switch between. List order is the order users see when choosing a model."));
   cl.append(renderModelList());
   m.append(cl);
-  // Aux perception models — listed as their own editable cards (the shared
-  // renderAuxSection is not used: its built-in add button would duplicate
-  // the toolbar's; the cards come from renderAuxCard).
+  // Aux perception models — a table like the main models (the setup wizard
+  // keeps the shared inline-card flow; the dashboard lists them compactly
+  // and edits them through the on-demand form above).
   const ca = document.createElement("div"); ca.className = "card";
   ca.innerHTML = "<h2>Aux perception models</h2>";
   ca.append(elP("Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip."));
-  if (!S.aux.length) ca.append(el("p", { class: "empty-list" }, "No aux models yet — press \u201c+ Add aux\u201d above."));
-  S.aux.forEach((mm, i) => ca.append(renderAuxCard(i)));
+  ca.append(renderAuxList());
   m.append(ca);
   refreshScoreFills();
 }

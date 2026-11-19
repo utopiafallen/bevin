@@ -101,7 +101,7 @@ function saveModel(){
   if(!Number.isFinite(sl) || sl<1){ S.formError="Execution slots must be a whole number >= 1."; render(); return; }
   toSave.slots=sl;
   if(!wasEditing){ S.models.push(toSave); } else { const idx=Math.min(S.editingIndex,S.models.length); S.models.splice(idx,0,toSave); }
-  resetDraft(); render(); msg(wasEditing?"Model saved.":"Model added.","ok"); notifyConfigChanged("models");
+  resetDraft(); S.showForm=false; render(); msg(wasEditing?"Model saved.":"Model added.","ok"); notifyConfigChanged("models");
 }
 function editModel(i){
   S.editOriginal=deepCopy(S.models[i]);
@@ -116,7 +116,7 @@ function cancelEdit(){
     const idx=Math.min(S.editingIndex,S.models.length);
     S.models.splice(idx,0,S.editOriginal);
   }
-  resetDraft(); render();
+  resetDraft(); S.showForm=false; render();
 }
 function reorderModel(i,dir){
   const j=i+dir;
@@ -186,7 +186,7 @@ function renderModelForm(){
   f.append(renderProviderHalf("mf", m, {
     knownBases: allKnownBases(),
     detect: () => detectModel(),
-    clearBtn: { label: editing ? "Cancel" : "Clear", fn: cancelEdit },
+    clearBtn: { label: "Cancel", fn: cancelEdit },
     getError: () => S.formError,
     clearError: () => { S.formError = null; }
   }));
