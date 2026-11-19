@@ -66,7 +66,12 @@ func newWindows(dataDir string, cfg Config) *windowsBackend {
 
 // Runtime reports whether the windows container runtime is ready: bevin
 // elevated (HCS requires admin), the Host Compute Service running, the
-// hypervisor active (Hyper-V isolation), and the base image provisioned.
+// hypervisor active (Hyper-V isolation). The base container image is a
+// SEPARATE gate (the setup's base provisioning + its Finalize backstop —
+// setup/sandbox.go): folding it into Runtime().OK deadlocks setup,
+// because the base auto-download only starts once the runtime reports
+// ready, and the runtime was never ready until the download had
+// finished. Must be cheap (no container is created or started by it).
 func (b *windowsBackend) Runtime(_ context.Context) Runtime {
 	if !isElevated() {
 		return Runtime{false, "bevin must run as Administrator: the Host Compute Service (which creates the Hyper-V isolated containers) requires it"}
@@ -77,10 +82,7 @@ func (b *windowsBackend) Runtime(_ context.Context) Runtime {
 	if !cpuHypervisorPresent() {
 		return Runtime{false, "no hypervisor is active — enable the “Hyper-V Platform” Windows feature (Control Panel → Programs → Turn Windows features on or off) and restart the computer"}
 	}
-	if _, err := os.Stat(b.baseJSONPath()); err != nil {
-		return Runtime{false, "the base container image is not provisioned — run the setup wizard's sandbox step (it downloads a Windows servercore image)"}
-	}
-	return Runtime{true, "Host Compute Service running; hypervisor active; base image present"}
+	return Runtime{true, "Host Compute Service running; hypervisor active"}
 }
 
 // hcsServiceState queries the Host Compute Service through the service

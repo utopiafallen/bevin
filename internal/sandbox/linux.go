@@ -70,7 +70,13 @@ func newLinux(dataDir string, cfg Config) *linuxBackend {
 	return &linuxBackend{dataDir: dataDir, cfg: cfg, run: osRun, machinesDir: defaultMachinesDir, unitBaseDir: defaultUnitBaseDir}
 }
 
-// Runtime reports whether the linux container runtime is ready.
+// Runtime reports whether the linux container runtime is ready (root,
+// systemd as init, systemd-nspawn available). The base container image
+// is a SEPARATE gate (the setup's base provisioning + its Finalize
+// backstop — setup/sandbox.go): folding it into Runtime().OK deadlocks
+// setup, because the base auto-download only starts once the runtime
+// reports ready, and the runtime was never ready until the download had
+// finished. Must be cheap (no container is created or started by it).
 func (b *linuxBackend) Runtime(_ context.Context) Runtime {
 	if os.Geteuid() != 0 {
 		return Runtime{false, "bevin must run as root: managing systemd-nspawn containers (and their networking) requires it"}
@@ -81,10 +87,7 @@ func (b *linuxBackend) Runtime(_ context.Context) Runtime {
 	if _, err := exec.LookPath("systemd-nspawn"); err != nil {
 		return Runtime{false, "systemd-nspawn is not installed (Debian/Ubuntu: apt install systemd-container)"}
 	}
-	if _, err := os.Stat(filepath.Join(BaseRoot(b.dataDir), "etc", "os-release")); err != nil {
-		return Runtime{false, "the base container image is not provisioned — run the setup wizard's sandbox step (it downloads a minimal OS)"}
-	}
-	return Runtime{true, "systemd + systemd-nspawn ready; base image present"}
+	return Runtime{true, "systemd + systemd-nspawn ready"}
 }
 
 func (b *linuxBackend) machineName(handle string) string { return MachineName(handle) }

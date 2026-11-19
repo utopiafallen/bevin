@@ -477,16 +477,21 @@ func TestMachineName(t *testing.T) {
 }
 
 func TestLinuxRuntimeDetail(t *testing.T) {
-	// Without a base image the runtime check must name it (whichever
-	// earlier check is the first failure on this host, the detail must be
-	// non-empty + actionable).
+	// The runtime detail must always be non-empty + actionable (whatever
+	// fails first on this host).
 	b, _, dataDir := newTestBackend(t)
-	os.RemoveAll(BaseRoot(dataDir)) // no base
 	rt := b.Runtime(context.Background())
-	if rt.OK {
-		t.Fatal("runtime OK without the base image")
-	}
 	if rt.Detail == "" {
 		t.Fatal("empty detail")
+	}
+	// The base image is NOT a runtime gate (the setup's base provisioning
+	// + Finalize own it — folding it into Runtime().OK deadlocked setup:
+	// the base auto-download starts only when the runtime reports ready,
+	// so a fresh machine could never get either ready). With no base
+	// image, the runtime check must never cite it.
+	os.RemoveAll(BaseRoot(dataDir))
+	rt = b.Runtime(context.Background())
+	if strings.Contains(rt.Detail, "base") {
+		t.Fatalf("runtime check cites the base image (it is not a runtime gate): %q", rt.Detail)
 	}
 }
