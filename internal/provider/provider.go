@@ -52,6 +52,21 @@ type ToolCall struct {
 	Arguments string // JSON-encoded arguments
 }
 
+// ToolCallDelta is one streamed tool-call fragment (the OAI wire's
+// delta.tool_calls entries). A call's id + name ride on its first fragment;
+// Arguments is THIS fragment's piece of the JSON arguments (the full
+// arguments usually arrive across many fragments). The provider accumulates
+// the fragments per call index and exposes the complete calls on
+// Result.ToolCalls; the raw fragments are here for consumers that want live
+// tool-call progress (the Anthropic wire has no equivalent — its stream
+// carries whole tool_use blocks, accumulated the same way on Result).
+type ToolCallDelta struct {
+	Index     int
+	ID        string
+	Name      string
+	Arguments string
+}
+
 // Tool describes a callable tool the model may invoke.
 type Tool struct {
 	Name        string
@@ -119,10 +134,11 @@ type Result struct {
 
 // Chunk is a streaming delta.
 type Chunk struct {
-	TextDelta          string // incremental text
-	ReasoningDelta     string // incremental reasoning trace
-	ReasoningSignature string // Anthropic: per-turn signature when the thinking block finalizes
-	StopReason         string // stop_reason from message_delta
+	TextDelta          string          // incremental text
+	ReasoningDelta     string          // incremental reasoning trace
+	ReasoningSignature string          // Anthropic: per-turn signature when the thinking block finalizes
+	ToolCallDeltas     []ToolCallDelta // streamed tool-call fragments (OAI wire; empty when the chunk carries none)
+	StopReason         string          // stop_reason from message_delta
 	Usage              *Usage
 	Done               bool
 }

@@ -334,6 +334,132 @@ func TestOpenAIStreamAggregation(t *testing.T) {
 	}
 }
 
+// TestOAIStreamToolCalls pins the streaming tool-call decode: the OAI wire
+// delivers a model tool call as delta.tool_calls FRAGMENTS — the id + name
+// on the first, the JSON arguments split across the following chunks
+// (OpenAI's style). The aggregator must reassemble complete calls (id,
+// name, concatenated arguments) in call-index order. Before this existed
+// the streaming path silently DROPPED every tool call: the model's call
+// arrived as an empty reply (finish_reason "tool_calls") and the harness's
+// tool loop never fired (the 2026-11-19 sephora.com failure).
+func TestOAIStreamToolCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); f.Flush() }
+		write("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"let me open it\"}}]}\n\n")
+		// Call 0: id + name + first argument piece.
+		write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_browser\",\"arguments\":\"{\\\"command\\\":\\\"ope\"}}]}}]}\n\n")
+		// Call 0: remaining argument pieces (a middle one may be empty).
+		write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"nTab\\\"}\"}}]}}]}\n\n")
+		write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\"}}]}}]}\n\n")
+		// Call 1: a second call, whole in one fragment (index 1).
+		write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"report_progress\",\"arguments\":\"{\\\"percent\\\":40,\\\"next_step\\\":\\\"read the page\\\"}\"}}]}}]}\n\n")
+		// Finish + usage (the include_usage final chunk).
+		write("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n")
+		write("data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(srv.URL, "k")
+	var fragmentCount int
+	res, err := p.Stream(context.Background(), "m", ChatRequest{Messages: []Message{{Role: RoleUser, Text: "open sephora.com"}}}, func(c Chunk) error {
+		fragmentCount += len(c.ToolCallDeltas)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "" {
+		t.Fatalf("text = %q, want empty (a tool-call reply carries no content)", res.Text)
+	}
+	if res.Reasoning != "let me open it" {
+		t.Fatalf("reasoning = %q", res.Reasoning)
+	}
+	if res.StopReason != "tool_calls" {
+		t.Fatalf("stop = %q, want tool_calls", res.StopReason)
+	}
+	if res.Usage == nil || res.Usage.TotalTokens != 15 {
+		t.Fatalf("usage = %+v", res.Usage)
+	}
+	if fragmentCount != 4 {
+		t.Fatalf("emitted tool-call fragments = %d, want 4 (3 for call 0, 1 for call 1)", fragmentCount)
+	}
+	if len(res.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls = %+v, want 2 complete calls", res.ToolCalls)
+	}
+	tc0, tc1 := res.ToolCalls[0], res.ToolCalls[1]
+	if tc0.ID != "call_1" || tc0.Name != "web_browser" || tc0.Arguments != `{"command":"openTab"}` {
+		t.Fatalf("call 0 = %+v, want the reassembled id/name/concatenated arguments", tc0)
+	}
+	if tc1.ID != "call_2" || tc1.Name != "report_progress" || tc1.Arguments != `{"percent":40,"next_step":"read the page"}` {
+		t.Fatalf("call 1 = %+v, want the single-fragment call intact", tc1)
+	}
+}
+
+// TestLlamaStreamToolCalls: the llama.cpp variant of the same wire — a
+// whole tool call (id + name + full arguments) in ONE delta, alongside
+// text content (the model narrates, then calls). The same accumulator must
+// yield the complete call.
+func TestLlamaStreamToolCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); f.Flush() }
+		write("data: {\"choices\":[{\"delta\":{\"content\":\"Sure, checking that.\\n\"}}]}\n\n")
+		write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_9\",\"type\":\"function\",\"function\":{\"name\":\"web_browser\",\"arguments\":\"{\\\"command\\\":\\\"read\\\"}\"}}]}}]}\n\n")
+		write("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n")
+		write("data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewLlama(srv.URL, "")
+	res, err := p.Stream(context.Background(), "m", ChatRequest{Messages: []Message{{Role: RoleUser, Text: "read the page"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "Sure, checking that.\n" {
+		t.Fatalf("text = %q", res.Text)
+	}
+	if res.StopReason != "tool_calls" {
+		t.Fatalf("stop = %q", res.StopReason)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v, want 1", res.ToolCalls)
+	}
+	tc := res.ToolCalls[0]
+	if tc.ID != "call_9" || tc.Name != "web_browser" || tc.Arguments != `{"command":"read"}` {
+		t.Fatalf("call = %+v", tc)
+	}
+}
+
+// TestOAIStreamNoToolsUnchanged: a stream WITHOUT tool calls must produce
+// exactly the pre-tools shape (nil ToolCalls — not an empty slice, not a
+// phantom call).
+func TestOAIStreamNoToolsUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"))
+		f.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		f.Flush()
+	}))
+	defer srv.Close()
+
+	p := NewOpenAI(srv.URL, "k")
+	res, err := p.Stream(context.Background(), "m", ChatRequest{Messages: []Message{{Role: RoleUser, Text: "hi"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ToolCalls != nil {
+		t.Fatalf("ToolCalls = %+v, want nil (no tool activity)", res.ToolCalls)
+	}
+	if res.Text != "ok" {
+		t.Fatalf("text = %q", res.Text)
+	}
+}
+
 func TestLlamaMultimodalRequestFormat(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

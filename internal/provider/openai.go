@@ -88,6 +88,7 @@ func (o *OpenAI) Stream(ctx context.Context, model string, req ChatRequest, emit
 	}
 
 	var res Result
+	acc := newOAIToolAccumulator()
 	scanner := newLineScanner(resp.Body)
 	for scanner.Scan() {
 		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "data:"))
@@ -104,6 +105,12 @@ func (o *OpenAI) Stream(ctx context.Context, model string, req ChatRequest, emit
 			c.ReasoningDelta += ch.Delta.ReasoningContent
 			c.StopReason = ch.FinishReason
 		}
+		// The model's tool calls ride in delta.tool_calls fragments (id +
+		// name on the first, the JSON arguments usually split across the
+		// following chunks). Accumulate them per call index — without this
+		// a streamed tool call arrives as an EMPTY reply (content empty,
+		// finish_reason "tool_calls") and the tool loop never fires.
+		c.ToolCallDeltas = acc.Absorb(chunk)
 		if chunk.Usage != nil {
 			c.Usage = &Usage{PromptTokens: chunk.Usage.PromptTokens, CompletionTokens: chunk.Usage.CompletionTokens, TotalTokens: chunk.Usage.TotalTokens}
 			res.Usage = c.Usage
@@ -120,6 +127,7 @@ func (o *OpenAI) Stream(ctx context.Context, model string, req ChatRequest, emit
 			}
 		}
 	}
+	res.ToolCalls = acc.Result()
 	return &res, scanner.Err()
 }
 

@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -410,6 +413,117 @@ func TestWebBrowserToolRegistered(t *testing.T) {
 		if !strings.Contains(string(schema), want) {
 			t.Fatalf("web_browser schema missing command %s:\n%s", want, schema)
 		}
+	}
+}
+
+// TestTurnStreamExecutesToolCalls pins the PRODUCTION failure end to end:
+// the chat UI STREAMS every turn, and the OAI wire delivers a model tool
+// call as delta.tool_calls fragments. Before the stream decoder learned
+// them, a tool call arrived as an EMPTY reply (finish_reason "tool_calls",
+// no content) — the harness saw zero tool calls, ended the turn, and the
+// user got an empty bubble (the 2026-11-19 sephora.com conversation: the
+// model's reasoning said it would open the site, nothing executed). This
+// drives a REAL streaming OpenAI provider (an SSE fake) through the full
+// turn: the first call streams a tool call, the harness must execute it
+// (P7 row) and call again with the paired result; the second call streams
+// the final text.
+func TestTurnStreamExecutesToolCalls(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	var mu sync.Mutex
+	var echoRan bool
+	if err := a.tools.Register(Tool{
+		Name:        "fake_echo",
+		Description: "echo its arguments back",
+		Parameters:  map[string]any{"type": "object"},
+		Execute: func(_ context.Context, _ string, args json.RawMessage) (string, error) {
+			mu.Lock()
+			echoRan = true
+			mu.Unlock()
+			return "echo-result " + string(args), nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The fake OAI endpoint streams: call 1 = a tool call (empty content),
+	// call 2 = the final text.
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		calls = append(calls, string(b))
+		n := len(calls)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		write := func(s string) { _, _ = w.Write([]byte(s)); f.Flush() }
+		if n == 1 {
+			write("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"use the tool\"}}]}\n\n")
+			write("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"fake_echo\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\n")
+			write("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n")
+		} else {
+			write("data: {\"choices\":[{\"delta\":{\"content\":\"done: \"}}]}\n\n")
+			write("data: {\"choices\":[{\"delta\":{\"content\":\"echo-result {\\\"x\\\":1}\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}\n\n")
+		}
+		write("data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	a.providers["m1"] = &provider.OpenAI{BaseURL: srv.URL, APIKey: "k", HTTP: &http.Client{}}
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "use the tool", func(provider.Chunk) error { return nil })
+	if err != nil {
+		t.Fatalf("TurnStream: %v", err)
+	}
+	if reply != "done: echo-result {\"x\":1}" {
+		t.Fatalf("reply = %q, want the final call's streamed text (a dropped tool call would end the turn with an empty reply)", reply)
+	}
+	mu.Lock()
+	if !echoRan {
+		t.Error("the streamed tool call was never executed (the dropped-tool-call bug)")
+	}
+	if len(calls) != 2 {
+		t.Errorf("provider calls = %d, want 2 (tool call + final answer)", len(calls))
+	}
+	if len(calls) == 2 {
+		// The SECOND call's wire must carry the executed result back to
+		// the model (the loop fed it the tool result).
+		if !strings.Contains(calls[1], "echo-result") {
+			t.Errorf("second call wire lacks the tool result:\\n%s", calls[1])
+		}
+	}
+	mu.Unlock()
+
+	// The P7 row for the streamed call exists and is complete.
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p7 int
+	for _, msg := range msgs {
+		if msg.Role != roleAssistant {
+			continue
+		}
+		rows, err := us.ToolCallsForMessage(msg.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.Tool == "fake_echo" && row.Success {
+				p7++
+			}
+		}
+	}
+	if p7 != 1 {
+		t.Fatalf("completed fake_echo P7 rows = %d, want 1", p7)
 	}
 }
 
