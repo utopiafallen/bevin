@@ -207,6 +207,43 @@ func TestValidateSandbox(t *testing.T) {
 	}
 }
 
+// TestValidateNoProgress — the [no_progress] detection params are admin-tier:
+// zero/missing fields fall back to the defaults (a partial section must not
+// disable the detector), and explicit values are preserved.
+func TestValidateNoProgress(t *testing.T) {
+	base := func(n NoProgress) *ServerConfig {
+		return &ServerConfig{
+			Models:     []Model{{Provider: "openai", BaseURL: "u", ModelID: "m"}},
+			Auth:       Auth{SessionSecret: "x"},
+			NoProgress: n,
+		}
+	}
+	// A missing/empty section -> all defaults (5 / 10 / 5).
+	c := base(NoProgress{})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("empty no_progress: %v", err)
+	}
+	if c.NoProgress.RepeatN != 5 || c.NoProgress.Window != 10 || c.NoProgress.StateK != 5 {
+		t.Fatalf("defaults = %+v, want RepeatN=5 Window=10 StateK=5", c.NoProgress)
+	}
+	// A partial section: the set field is kept, the rest default.
+	c2 := base(NoProgress{RepeatN: 8})
+	if err := c2.Validate(); err != nil {
+		t.Fatalf("partial no_progress: %v", err)
+	}
+	if c2.NoProgress.RepeatN != 8 || c2.NoProgress.Window != 10 || c2.NoProgress.StateK != 5 {
+		t.Fatalf("partial = %+v, want RepeatN=8 Window=10 StateK=5", c2.NoProgress)
+	}
+	// A fully explicit section is preserved.
+	c3 := base(NoProgress{RepeatN: 7, Window: 12, StateK: 3})
+	if err := c3.Validate(); err != nil {
+		t.Fatalf("explicit no_progress: %v", err)
+	}
+	if c3.NoProgress != (NoProgress{RepeatN: 7, Window: 12, StateK: 3}) {
+		t.Fatalf("explicit = %+v, want unchanged", c3.NoProgress)
+	}
+}
+
 func TestCleanPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	got, err := CleanPath("~/bevin")

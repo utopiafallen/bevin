@@ -92,6 +92,9 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerWebBrowser(a.tools, a.browserMgr); err != nil {
 		return nil, fmt.Errorf("register web_browser: %w", err)
 	}
+	if err := registerReportProgress(a.tools); err != nil {
+		return nil, fmt.Errorf("register report_progress: %w", err)
+	}
 	return a, nil
 }
 
@@ -781,6 +784,57 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 	return out, nil
 }
 
+// npCfg returns the no-progress detector's configuration for a turn. The
+// DETECTION params (N, W, K) come from the admin config (server.toml
+// [no_progress] — read fresh each turn, so an admin edit applies on the next
+// turn without a restart, like the model slots). The CONFIDENCE params
+// (weights, decay, threshold) are the named internal defaults — the harness's
+// risk model, a design decision rather than a per-deployment dial. Zero/invalid
+// detection values are sanitized to the defaults by newNoProgress (a partial
+// config must not disable the detector).
+func (a *Agent) npCfg() npCfg {
+	d := defaultNPCfg()
+	c := a.cfg.NoProgress
+	return npCfg{
+		N:         c.RepeatN,
+		W:         c.Window,
+		K:         c.StateK,
+		WL0:       d.WL0,
+		WL1:       d.WL1,
+		WDecl:     d.WDecl,
+		WDecline:  d.WDecline,
+		WMiss:     d.WMiss,
+		Decay:     d.Decay,
+		Threshold: d.Threshold,
+	}
+}
+
+// checkinText is the neutral, PERSISTENT check-in the harness appends (as a
+// roleCheckin row — in the model's request, filtered from the UI) when a
+// no-progress layer fires: it REQUIRES the model to call report_progress on
+// its next reply. It is phrased neutrally (a status check, not an accusation)
+// so it doesn't bias the model, and it is persistent (a stored, tail-appended
+// row — prefix-safe, unlike a system-prompt change) so the model sees the
+// trigger when it responds and its % declaration doesn't dangle with no cause.
+const checkinText = "Check-in: before your next action, call report_progress to state (1) your honest estimated completion percent for the user's goal and (2) your next step. If you are repeating an action without making progress, say so honestly — a low or declining percent is useful information, not a failure."
+
+// stoppedNotice is the "stopped, not done" text appended to the reply when the
+// turn ends on the no-progress confidence threshold: the user must know the
+// trajectory was STOPPED (and the indicators), not silently cut off as if the
+// answer were complete. It is appended to the reply text (persisted with the
+// assistant row and streamed as part of it) so it reaches both the streaming
+// and non-streaming paths.
+func stoppedNotice(np *noProgress) string {
+	var b strings.Builder
+	b.WriteString("\n\n---\n")
+	fmt.Fprintf(&b, "Bevin stopped this turn: no observed progress (confidence %d%%). ", int(np.confidence()*100+0.5))
+	if s := np.signals(); len(s) > 0 {
+		b.WriteString("Indicators: " + strings.Join(s, "; ") + ". ")
+	}
+	b.WriteString("The work is not finished — you can give more specific direction, or ask bevin to continue from here.")
+	return b.String()
+}
+
 // runTurn is the shared logic for Turn (non-streaming, emit=nil) and
 // TurnStream (streaming, emit!=nil). It persists the user message, builds the
 // request (frozen system prompt + latest context summary + raw turns since
@@ -824,18 +878,27 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// (v1: parallel calls are out of scope) + records each outcome on its
 	// P7 row, and calls the model again — the tool transcript is just
 	// history on the next iteration (re-read from the store, so the request
-	// builder's compaction/selection applies to it unchanged). The loop is
-	// capped (maxToolIterations): the call after the cap goes out with NO
-	// tools on the wire, forcing a plain-text answer from whatever the tool
-	// results showed. With an empty registry the loop body never fires and
-	// the turn is exactly today's single call.
+	// builder's compaction/selection applies to it unchanged). The loop has NO
+	// hard count cap: it stops when the no-progress confidence accumulator
+	// crosses its threshold (the model is stuck) — the call after that goes
+	// out with NO tools on the wire, forcing a plain-text answer from whatever
+	// the tool results showed (see the np state below). With an empty registry
+	// the loop body never fires and the turn is exactly today's single call.
 	wireTools := a.tools.Wire()
 	var res *provider.Result
-	capped := false // the turn ended on the tool-iteration cap (the reply row is persisted inside the loop)
+	// The no-progress / stuck-detection state (the design log's TOOL LOOP
+	// NO-PROGRESS section): REPLACES the hard maxToolIterations cap. The turn
+	// stops when the accumulated no-progress CONFIDENCE crosses a threshold
+	// (the model is stuck), not at an arbitrary count (which cut "long but
+	// progressing" and "stuck" alike). Fresh each turn.
+	np := newNoProgress(a.npCfg())
+	stopped := false         // the turn ended on the no-progress confidence threshold
+	persistedInLoop := false // the reply row was persisted inside the loop (runaway)
 	for iter := 0; ; iter++ {
 		tools := wireTools
-		if iter >= maxToolIterations {
-			tools = nil // the forced text-only final call
+		if np.stopped() {
+			tools = nil // the forced text-only final call (the hard stop)
+			stopped = true
 		}
 		hist, err := us.ListMessages(convID)
 		if err != nil {
@@ -891,14 +954,15 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		if len(res.ToolCalls) == 0 {
 			break // the final answer
 		}
-		if iter >= maxToolIterations {
-			// The cap: this call went out with NO tools on the wire, yet the
+		if np.stopped() {
+			// The stop: this call went out with NO tools on the wire, yet the
 			// model still returned tool calls (runaway). Executing them would
-			// defeat the cap — the turn ends here: the narration is persisted
-			// as the reply and the calls are recorded as FAILED P7 rows
-			// (wire-valid complete pairs — the model sees why they never ran,
-			// and the pair can never orphan).
-			res.Text = stripLeadingTranscriptTimestamp(res.Text)
+			// defeat the stop — the turn ends here: the narration (plus the
+			// "stopped, not done" notice) is persisted as the reply and the
+			// calls are recorded as FAILED P7 rows (wire-valid complete pairs
+			// — the model sees why they never ran, and the pair can never
+			// orphan).
+			res.Text = stripLeadingTranscriptTimestamp(res.Text) + stoppedNotice(np)
 			assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
 			if err != nil {
 				return conv.ID, "", err
@@ -908,11 +972,11 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 				if err != nil {
 					return conv.ID, "", err
 				}
-				if cerr := us.CompleteToolCall(p7id, "not executed: the turn reached the tool-iteration cap (this call went out with no tools)", false); cerr != nil {
+				if cerr := us.CompleteToolCall(p7id, "not executed: the turn was stopped (no observed progress — the no-progress confidence reached its threshold)", false); cerr != nil {
 					return conv.ID, "", cerr
 				}
 			}
-			capped = true
+			persistedInLoop = true
 			break
 		}
 		// Persist the assistant row that carries the tool calls (its text is
@@ -941,12 +1005,36 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 			if cerr := us.CompleteToolCall(p7id, resultText, ok); cerr != nil {
 				return conv.ID, "", cerr
 			}
+			// Feed the no-progress accumulator: the executed call (name, args,
+			// result) is one observation. A failed / not-executed call (ok=false)
+			// is not recorded (it is the model self-healing, not no-progress);
+			// report_progress updates the pending declaration, not the action
+			// window (it is excluded from L0/L1).
+			np.observe(tc.Name, json.RawMessage(tc.Arguments), resultText, ok)
+		}
+		// Settle the accumulator for this iteration: evaluate the layers,
+		// accumulate the confidence, apply decay. A check-in (a persistent,
+		// tail-appended, UI-hidden roleCheckin row) is issued when a layer fired
+		// and the rate-limit allows — UNLESS the turn is already stopping (then
+		// the next call is text-only and a check-in is moot).
+		if stop, checkin := np.settle(iter); checkin && !stop {
+			if _, err := us.AppendMessage(convID, roleCheckin, checkinText, "", "", nil); err != nil {
+				return conv.ID, "", err
+			}
 		}
 	}
-	if capped {
-		// The reply row (narration) was persisted inside the loop; the
-		// post-loop path below would double-persist it.
+	if persistedInLoop {
+		// The reply row (narration + the "stopped, not done" notice) was
+		// persisted inside the loop (the runaway case); the post-loop path
+		// below would double-persist it.
 		return conv.ID, res.Text, nil
+	}
+	// The turn was stopped by the no-progress threshold (the model gave a final
+	// answer on the forced text-only call): append the "stopped, not done"
+	// notice so the user knows the trajectory was STOPPED, not finished (a
+	// silent cut would look like a completed answer).
+	if stopped {
+		res.Text += stoppedNotice(np)
 	}
 	// Deterministic backstop for the no-echo rule: if the model echoed a
 	// transcript timestamp marker into the start of its reply, strip it

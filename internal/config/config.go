@@ -62,7 +62,32 @@ type ServerConfig struct {
 	Sidecars         Sidecars   `toml:"sidecars" json:"sidecars"`
 	Email            Email      `toml:"email" json:"email"`
 	Sandbox          Sandbox    `toml:"sandbox" json:"sandbox"`
+	NoProgress       NoProgress `toml:"no_progress" json:"no_progress"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
+}
+
+// NoProgress is the tool-loop no-progress / stuck-detection DETECTION tuning
+// (server.toml [no_progress]): what counts as "no progress." These are
+// admin-configurable (admin tier) because no-progress is work-specific — a
+// research task that legitimately polls a page repeats, a debugging task that
+// re-runs a broken command is stuck, and the admin knows the deployment's
+// work. The CONFIDENCE params (weights, decay, threshold) are deliberately NOT
+// here: they are the harness's risk model, named internal constants in the
+// agent package (a design decision, not a per-deployment dial — see the design
+// log's no-progress section).
+type NoProgress struct {
+	// RepeatN: the same ACTION tool+args repeated this many times IN A ROW
+	// fires L0 (the repeat detector). Default 5 (0 = default).
+	RepeatN int `toml:"repeat_n" json:"repeat_n"`
+	// Window: the sliding window of recent action calls the detectors look
+	// over — and the check-in rate-limit (at most one check-in per Window
+	// iterations). Must be >= RepeatN and >= StateK (a smaller value is
+	// clamped at use time). Default 10 (0 = default).
+	Window int `toml:"window" json:"window"`
+	// StateK: the same tool RESULT repeated this many times IN A ROW fires L1
+	// (the no-state-change detector — "acted, but the world didn't change").
+	// Default 5 (0 = default).
+	StateK int `toml:"state_k" json:"state_k"`
 }
 
 // Sandbox is the per-user execution environment (server.toml [sandbox]):
@@ -334,6 +359,20 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.MaxWorkspaceSize <= 0 {
 		c.MaxWorkspaceSize = DefaultMaxWorkspaceSize
+	}
+	// NoProgress: the tool-loop stuck-detection DETECTION params (admin-tier).
+	// Zero/invalid values fall back to the defaults — a partial or missing
+	// [no_progress] section must not disable the detector. (The confidence
+	// params are not config — they live in the agent package as named
+	// constants.)
+	if c.NoProgress.RepeatN <= 0 {
+		c.NoProgress.RepeatN = 5
+	}
+	if c.NoProgress.Window <= 0 {
+		c.NoProgress.Window = 10
+	}
+	if c.NoProgress.StateK <= 0 {
+		c.NoProgress.StateK = 5
 	}
 	// Public base URI: optional (a local-only setup generates no outside
 	// links) but must be a well-formed absolute http(s) URL when set, and is

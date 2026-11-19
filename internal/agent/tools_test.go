@@ -290,11 +290,13 @@ func TestTurnToolLoopRoundTrip(t *testing.T) {
 	}
 }
 
-// TestTurnToolLoopCap: a runaway model that returns tool calls EVEN on the
-// no-tools final call must not loop forever — the turn ends at the cap, the
-// reply is the narration, and the unexecuted calls are recorded as FAILED
-// P7 rows (complete pairs: the model sees why they never ran).
-func TestTurnToolLoopCap(t *testing.T) {
+// TestTurnNoProgressStop: a runaway model that returns the SAME tool call
+// every time (the worst-case loop) is stopped by the no-progress confidence
+// accumulator — WELL BEFORE the old 21-iteration cap — the reply carries the
+// "stopped, not done" notice, the final call went out with NO tools on the
+// wire, and the unexecuted calls are recorded as FAILED P7 rows (complete
+// pairs: the model sees why they never ran).
+func TestTurnNoProgressStop(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
 	if err := a.tools.Register(Tool{
@@ -306,7 +308,7 @@ func TestTurnToolLoopCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The model ALWAYS returns the same tool call (the worst case).
-	fp := &scriptedProvider{script: make([]provider.Result, maxToolIterations+1)}
+	fp := &scriptedProvider{script: make([]provider.Result, 40)}
 	for i := range fp.script {
 		fp.script[i] = provider.Result{
 			Text:      "looping",
@@ -323,20 +325,27 @@ func TestTurnToolLoopCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	if reply != "looping" {
-		t.Fatalf("reply = %q, want the capped call's narration", reply)
+	// The reply carries the "stopped, not done" notice (the user must know the
+	// trajectory was stopped, not finished — a silent cut would look complete).
+	if !strings.Contains(reply, "stopped this turn") {
+		t.Fatalf("reply = %q, want the 'stopped, not done' notice", reply)
 	}
 	calls := fp.allCalls()
-	if len(calls) != maxToolIterations+1 {
-		t.Fatalf("provider calls = %d, want %d (the loop + the capped no-tools call)", len(calls), maxToolIterations+1)
+	// Stopped well BEFORE the old 21-iteration cap (the confidence threshold
+	// fires on the sustained repeat), but it did loop a few times first.
+	if len(calls) > 15 {
+		t.Errorf("provider calls = %d, want well under the old 21-iteration cap", len(calls))
 	}
-	// The capped call went out with NO tools on the wire.
+	if len(calls) < 5 {
+		t.Errorf("provider calls = %d, want at least a few iterations before the stop", len(calls))
+	}
+	// The final call went out with NO tools on the wire (the forced text-only
+	// call).
 	if got := len(calls[len(calls)-1].Tools); got != 0 {
-		t.Fatalf("capped call tools = %d, want 0 (the forced text-only call)", got)
+		t.Errorf("final call tools = %d, want 0 (the forced text-only call)", got)
 	}
-	// The capped call's calls were recorded as failed rows, never executed:
-	// exactly maxToolIterations executions happened (iterations 0..N-1), and
-	// the capped message's row says so.
+	// The final call's call was recorded as a failed row, never executed; the
+	// earlier iterations' calls WERE executed.
 	us, err := a.userStore("u1")
 	if err != nil {
 		t.Fatalf("userStore: %v", err)
@@ -362,11 +371,11 @@ func TestTurnToolLoopCap(t *testing.T) {
 			}
 		}
 	}
-	if executed != maxToolIterations {
-		t.Fatalf("executed tool calls = %d, want %d (one per iteration before the cap)", executed, maxToolIterations)
+	if executed < 5 {
+		t.Errorf("executed tool calls = %d, want at least 5 (the model looped before stopping)", executed)
 	}
 	if notExecuted != 1 {
-		t.Fatalf("not-executed rows = %d, want 1 (the capped call's single call)", notExecuted)
+		t.Errorf("not-executed rows = %d, want 1 (the final call's single call)", notExecuted)
 	}
 }
 

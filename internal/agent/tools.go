@@ -10,20 +10,15 @@ import (
 	"github.com/utopiafallen/bevin/internal/provider"
 )
 
-// maxToolIterations caps the tool loop: a turn makes at most this many
-// model→tool round trips before the loop forces a plain-text answer (one
-// final call with NO tools on the wire). A model that tool-loops on a
-// broken page or a flapping tool must not hold a model slot forever — the
-// cap bounds the damage and the final answer gets one clean shot to say what
-// happened. If the model STILL returns tool calls on the no-tools call
-// (runaway), the turn ends there: the calls are recorded as failed P7 rows
-// (wire-valid complete pairs) and are never executed.
-const maxToolIterations = 20
-
 // maxToolCallsPerMessage caps the calls executed from ONE assistant message
 // (a single message with hundreds of calls would burn the turn's budget in
-// one shot). Excess calls are recorded as failed rows like the iteration
-// cap — executed work is bounded on both axes.
+// one shot). Excess calls are recorded as failed rows, like the no-progress
+// stop's unexecuted calls — executed work is bounded on both axes: the
+// per-message fan-out here, and the per-trajectory NON-PROGRESS via the
+// confidence accumulator (noprogress.go). The old hard maxToolIterations
+// count cap is GONE — it conflated "long but progressing" with "stuck" and
+// cut both; the accumulator replaces it (a model that is stuck stops, a model
+// that is progressing runs as long as it needs).
 const maxToolCallsPerMessage = 10
 
 // Tool is one callable capability the model may invoke (the plan's WS1

@@ -19,6 +19,18 @@ const (
 	roleAssistant = "assistant"
 	roleTool      = "tool"
 	roleSummary   = "summary"
+	// roleCheckin is the no-progress check-in: a PERSISTENT, neutral,
+	// tail-appended harness instruction that REQUIRES the model to call
+	// report_progress (the design log's no-progress section). It is a stored
+	// transcript row (so the model sees the trigger when it responds — a
+	// one-shot removed check-in would leave the model's % declaration dangling
+	// with no visible cause) and is IN the model's request (buildRequest does
+	// not exclude it — only roleSystem/roleSummary are excluded). It maps to a
+	// provider USER message on the wire (universally supported, and it appears
+	// at the tail in transcript order — prefix-safe: the prior prompt stays a
+	// prefix, unlike a system-prompt CHANGE). It is filtered from the UI (like
+	// summary/tool rows) — it is a harness instruction, not user content.
+	roleCheckin = "checkin"
 )
 
 // estimateTokens is a rough prompt-size estimate. There is no local tokenizer
@@ -103,7 +115,17 @@ func assistantFacing(m store.Message, includeReasoning bool) provider.Message {
 	if m.Role == roleUser {
 		text = withTimestamp(m)
 	}
-	pm := provider.Message{Role: provider.Role(m.Role), Text: text}
+	role := provider.Role(m.Role)
+	if m.Role == roleCheckin {
+		// The no-progress check-in is a harness instruction: sent as a USER
+		// message on the wire (the only role every provider supports mid-
+		// transcript, and it lands at the tail in transcript order —
+		// prefix-safe). It carries no user timestamp (it is not the user
+		// speaking — withTimestamp only stamps roleUser, and this is
+		// roleCheckin).
+		role = provider.RoleUser
+	}
+	pm := provider.Message{Role: role, Text: text}
 	if m.Role == roleAssistant && includeReasoning && m.Reasoning != "" {
 		pm.Reasoning = m.Reasoning
 		pm.ReasoningSignature = m.ReasoningSignature
