@@ -254,12 +254,19 @@ function renderModelForm(){
     scoreSlider("Speed (1-10)","mf_s", m.metadata.speed||5, (v)=>{ m.metadata.speed=v; }, locked)
   );
   f.append(halfB);
-  // the form's button row: Cancel (discards the draft — restoring the
-  // original row when editing — and closes the form) + the primary
-  // (Add while adding, Save changes while editing)
-  f.append(el("div",{class:"btns"},
-    el("button",{class:"ghost", onclick:"cancelEdit()"}, "Cancel"),
-    el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model")));
+  // the form's button row: Cancel + the primary (Add while adding, Save
+  // changes while editing). Cancel is hidden while ADDING the first model
+  // (S.models empty, not editing) — at least one main model is a
+  // product-wide invariant (the wizard's step gate requires
+  // S.models.length>0 and the server's validateModels rejects an empty
+  // list), so there is nothing to cancel back to. While EDITING, Cancel
+  // always stays: it restores the model, which is spliced out of
+  // S.models for the duration of the edit (so "empty" during an edit
+  // means "this is the last model", not "cancel is useless").
+  const btnsRow = el("div",{class:"btns"});
+  if (S.editingIndex !== -1 || S.models.length > 0) btnsRow.append(el("button",{class:"ghost", onclick:"cancelEdit()"}, "Cancel"));
+  btnsRow.append(el("button",{class:"primary", onclick:"saveModel()"}, editing?"Save changes":"+ Add model"));
+  f.append(btnsRow);
   // wire the display-name input (base + key are wired inside renderProviderHalf)
   disp.addEventListener("input",()=>{ m.display_name=disp.value; });
   disp.addEventListener("change",()=>{ m.display_name=disp.value; syncDispLock(); S.formError=null; render(); });
