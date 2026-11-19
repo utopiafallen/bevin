@@ -69,7 +69,8 @@ func TestModelProfileUISurface(t *testing.T) {
 		`"Model profile"`,
 		`loadProfiles()`,
 		`profileField(`,
-		`el("th",{}, "Profile")`,
+		// The model list (card) shows each model's profile in its meta grid.
+		`metaItem("Profile", m.profile||"general")`,
 		// The display-name lock inherits the profile (same model, same
 		// behavior — a locked decision, not a form detail).
 		`m.profile=match.profile`,

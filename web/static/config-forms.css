@@ -1,7 +1,7 @@
 /* config-forms.css — styles for the shared config form components (config-forms.js):
    the model/aux/email form fields, score sliders, yes-no toggles, the model
-   list table, and the button/status conventions. Loaded by the setup wizard
-   and the admin config pages. */
+   card list (the aux list stays a table), and the button/status conventions.
+   Loaded by the setup wizard and the admin config pages. */
 .row { display:flex; gap:.6rem; } .row > div { flex:1; }
   .btns { display:flex; gap:.5rem; margin-top:1.2rem; flex-wrap:wrap; }
   .btns button { font:inherit; font-weight:700; cursor:pointer; padding:.55rem 1.05rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); color:var(--text); transition:background .15s; }
@@ -49,16 +49,34 @@
   .field-help { font-size:.78rem; color:var(--text-muted); margin:.15rem 0 .1rem; }
   .scores-header { margin:.9rem 0 .1rem; font-size:.78rem; font-weight:800; color:var(--brand-strong); text-transform:uppercase; letter-spacing:.03em; }
   input.ctx-disabled { opacity:.65; cursor:not-allowed; }
-  /* model list table */
+  /* model list — a CARD LIST (supersedes the 11-column table, which
+     ellipsized nearly every cell at the dashboard's and the wizard
+     frame's widths). Each model: a header (reorder, name + status badge,
+     provider · model · base URL) over a reflowing label/value meta grid.
+     Values wrap — nothing truncates. */
+  .model-cards { margin-top:.8rem; display:flex; flex-direction:column; gap:.6rem; }
+  .model-card { border:1px solid var(--border); border-radius:var(--radius); padding:.65rem .9rem; background:var(--surface); }
+  .model-card-head { display:flex; align-items:flex-start; gap:.6rem; }
+  .model-card-id { flex:1; min-width:0; }
+  .model-card-name { font-weight:800; font-size:1rem; line-height:1.25; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+  .model-card-sub { font-size:.82rem; color:var(--text-muted); margin-top:.12rem; overflow-wrap:anywhere; }
+  .model-card-actions { display:flex; gap:.35rem; flex-shrink:0; }
+  .model-card-actions .row-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .model-card-meta { display:grid; grid-template-columns:repeat(auto-fit, minmax(118px, 1fr)); gap:.35rem .9rem; margin-top:.6rem; padding-top:.55rem; border-top:1px solid var(--border); }
+  .meta-item { min-width:0; }
+  .meta-item .meta-label { font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
+  .meta-item .meta-val { font-family:var(--font-mono); font-size:.82rem; margin-top:.1rem; overflow-wrap:anywhere; }
+  .badge-off { display:inline-block; font-size:.7rem; font-weight:700; color:var(--text-muted); background:color-mix(in srgb, var(--text-muted) 14%, transparent); padding:.08rem .42rem; border-radius:999px; }
+  /* table (still used by the dashboard's AUX list) */
   .model-table-wrap { overflow-x:auto; } /* a too-wide table scrolls INSIDE the frame — it must never widen the page (the body is a centered fixed-width frame; an overflowing child widens the scrollable canvas and the frame reads as "narrower") */
   .model-table { width:100%; border-collapse:collapse; margin-top:.8rem; font-size:.85rem; }
   .model-table th, .model-table td { text-align:left; padding:.36rem .4rem; border-bottom:1px solid var(--border); }
   .model-table th { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
-  .model-table .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
-  .model-table .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
-  .model-table .reorder button:disabled { opacity:.35; cursor:default; }
-  .model-table .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
-  .model-table .row-btn:hover { background:var(--surface-2); }
+  .model-table .reorder, .model-card-head .reorder { display:inline-flex; flex-direction:column; gap:.12rem; }
+  .model-table .reorder button, .model-card-head .reorder button { font:inherit; font-size:.68rem; line-height:1; padding:.05rem .32rem; border:1px solid var(--border); border-radius:4px; background:var(--surface); cursor:pointer; }
+  .model-table .reorder button:disabled, .model-card-head .reorder button:disabled { opacity:.35; cursor:default; }
+  .model-table .row-btn, .model-card-actions .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
+  .model-table .row-btn:hover, .model-card-actions .row-btn:hover { background:var(--surface-2); }
   .empty-list { color:var(--text-muted); font-size:.85rem; font-style:italic; padding:.6rem 0; }
   .model-table .kv { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:125px; }
   .model-table .baseurl { max-width:140px; }

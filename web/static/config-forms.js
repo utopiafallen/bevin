@@ -273,30 +273,35 @@ function renderModelForm(){
   return f;
 }
 function renderModelList(opts){
-  // opts.removable — the admin dashboard passes this: each row gets a
+  // opts.removable — the admin dashboard passes this: each card gets a
   // Remove button (the page defines removeModel and mirrors the guard
   // client-side). The LAST main model's Remove is disabled — at least one
   // must remain; the model being edited is spliced out of S.models for
   // the duration of the edit, so it counts as remaining. The setup wizard
-  // does not pass it (its rows are edit/reorder only).
-  // The table sits in an overflow-x:auto wrapper: a very wide table (long
-  // names, a narrow screen) scrolls INSIDE the frame instead of widening the
-  // page's scrollable canvas (which made the centered setup frame read as
-  // "narrower" and the table render past the frame).
-  const w=el("div",{class:"model-table-wrap"});
+  // does not pass it (its cards stay edit/reorder only).
+  //
+  // CARD LIST (supersedes the 11-column table): at the dashboard's and
+  // the wizard frame's widths the table ellipsized nearly every cell, so
+  // each model is a card — identity in the header (reorder, name + status
+  // badge, provider · model · base URL) and the config in a reflowing
+  // label/value meta grid. Values wrap; nothing truncates.
+  const w=el("div",{class:"model-cards"});
   if(!S.models.length){ w.append(el("p",{class:"empty-list"},"No models added yet — fill the form above and press \u201cAdd model\u201d.")); return w; }
-  const t=el("table",{class:"model-table"});
-  t.append(el("thead",{}, el("tr",{},
-    el("th",{}, ""), el("th",{}, "Display name"), el("th",{}, "Provider"), el("th",{}, "Base URL"), el("th",{}, "Model ID"), el("th",{}, "Context"), el("th",{}, "Slots"), el("th",{}, "Profile"), el("th",{}, "R/K/S"), el("th",{}, "On"), el("th",{}, ""))));
-  const tb=el("tbody",{});
   const removable=!!(opts&&opts.removable);
   S.models.forEach((m,i)=>{
     const up=el("button",{title:"Move up", onclick:`reorderModel(${i},-1)`}, "\u25b2"); if(i===0) up.setAttribute("disabled","");
     const dn=el("button",{title:"Move down", onclick:`reorderModel(${i},1)`}, "\u25bc"); if(i===S.models.length-1) dn.setAttribute("disabled","");
-    // actions cell: Edit, plus Remove when removable (disabled on the last
+    // header: reorder | name (+ status badge) | actions
+    const name=el("div",{class:"model-card-name"}, m.display_name||"(unnamed)");
+    if(m.auto_disabled){ name.append(el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable")); }
+    else if(!m.enabled){ name.append(el("span",{class:"badge-off", title:"Hidden from users — enable the model in its editor to show it."},"hidden from users")); }
+    const id=el("div",{class:"model-card-id"},
+      name,
+      el("div",{class:"model-card-sub"}, (m.provider||"—")+" \u00b7 "+(m.model_id||"—")+" \u00b7 "+(m.base_url||"—")));
+    // actions: Edit, plus Remove when removable (disabled on the last
     // main model — "remaining" counts the model being edited, which is
     // spliced out of S.models for the edit)
-    const acts=el("div",{class:"row-actions"});
+    const acts=el("div",{class:"model-card-actions"});
     acts.append(el("button",{class:"row-btn", onclick:`editModel(${i})`},"Edit"));
     if(removable){
       const canRemove=S.models.length+(S.editingIndex!==-1?1:0)>1;
@@ -304,23 +309,21 @@ function renderModelList(opts){
       if(!canRemove) rm.setAttribute("disabled","");
       acts.append(rm);
     }
-    tb.append(el("tr",{},
-      el("td",{}, el("div",{class:"reorder"}, up, dn)),
-      el("td",{}, el("span",{class:"kv", title:m.display_name||""}, m.display_name||"(unnamed)")),
-      el("td",{}, m.provider||"—"),
-      el("td",{}, el("span",{class:"kv baseurl", title:m.base_url||""}, m.base_url||"—")),
-      el("td",{}, el("span",{class:"kv"}, m.model_id||"—")),
-      el("td",{}, m.max_context?m.max_context:"auto"),
-      el("td",{}, String(m.slots||1)),
-      el("td",{}, m.profile||"general"),
-      el("td",{}, (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0)),
-      el("td",{}, m.auto_disabled ? el("span",{class:"badge-unavail", title:"The provider reported this model unavailable, so it was auto-disabled. It re-enables automatically when a later attempt succeeds."},"unavailable") : (m.enabled?"yes":"no")),
-      el("td",{}, acts)));
+    const card=el("div",{class:"model-card"});
+    card.append(el("div",{class:"model-card-head"}, el("div",{class:"reorder"}, up, dn), id, acts));
+    // meta grid: label/value pairs that reflow at any width (grid
+    // auto-fit) — the numbers that used to be ellipsized table cells
+    card.append(el("div",{class:"model-card-meta"},
+      metaItem("Context", m.max_context?String(m.max_context):"—"),
+      metaItem("Slots", String(m.slots||1)),
+      metaItem("Profile", m.profile||"general"),
+      metaItem("R/K/S", (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0))));
+    w.append(card);
   });
-  t.append(tb);
-  w.append(t);
   return w;
 }
+// metaItem — one label/value pair in a model card's meta grid
+function metaItem(label, value){ return el("div",{class:"meta-item"}, el("div",{class:"meta-label"}, label), el("div",{class:"meta-val"}, value)); }
 
 // renderProviderHalf — the shared "Provider configuration" block used by BOTH
 // the main-model form and each aux model: a base URL (a combobox over the
