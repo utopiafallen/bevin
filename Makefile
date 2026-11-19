@@ -1,6 +1,6 @@
 BIN := bin/bevin
 
-.PHONY: build build-linux build-windows run test tidy clean
+.PHONY: build build-linux build-windows run test check tidy clean
 
 build:
 	go build -o $(BIN) ./cmd/bevin
@@ -16,6 +16,14 @@ run:
 
 test:
 	go test ./...
+
+# check: vet under BOTH the host GOOS and windows — the windows-tagged
+# files (the HCS check, the CPUID asm stub, the windows tests) only
+# compile under GOOS=windows, so host-only vetting misses their bugs
+# (the CPUID asm ABI bug slipped through this way).
+check:
+	go vet ./...
+	GOOS=windows GOARCH=amd64 go vet ./...
 
 tidy:
 	go mod tidy

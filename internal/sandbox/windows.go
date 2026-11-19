@@ -33,7 +33,13 @@ import (
 //     restarts
 //   - a mapped directory: the user's data dir → C:\data in the container
 const (
-	hcsServiceName = "hcsshim" // the Windows Host Compute Service
+	// hcsServiceName is the Windows service NAME (not the localized display
+	// name, not the hcsshim Go library) of the Hyper-V Host Compute
+	// Service — the service that actually creates the isolated containers.
+	// Its binary is C:\Windows\System32\vmcompute.exe; it is registered
+	// under the name "vmcompute" on every locale (display name "Hyper-V
+	// Host Compute Service" is localized, the service name is not).
+	hcsServiceName = "vmcompute"
 	hcsOwner       = "bevin"   // the Owner field used to find our containers
 	dataMount      = `C:\data` // where the user's data dir is mapped in
 )
@@ -66,7 +72,7 @@ func (b *windowsBackend) Runtime(_ context.Context) Runtime {
 		return Runtime{false, "bevin must run as Administrator: the Host Compute Service (which creates the Hyper-V isolated containers) requires it"}
 	}
 	if ok, detail := hcsServiceState(); !ok {
-		return Runtime{false, "the Windows Host Compute Service (hcsshim) is not " + detail + " — enable it (services.msc → “Host Compute Service” → Start, set to Automatic)"}
+		return Runtime{false, "the Windows Host Compute Service (vmcompute) is not " + detail + " — enable it (services.msc → “Hyper-V Host Compute Service” → Start, set to Automatic)"}
 	}
 	if !cpuHypervisorPresent() {
 		return Runtime{false, "no hypervisor is active — enable the “Hyper-V Platform” Windows feature (Control Panel → Programs → Turn Windows features on or off) and restart the computer"}
