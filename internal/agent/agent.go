@@ -10,12 +10,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/utopiafallen/bevin/internal/browser"
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/prompt"
@@ -42,6 +44,15 @@ type Agent struct {
 	// collection); nil when the embedder or the Qdrant endpoint is not
 	// configured — turns then skip indexing and search returns no hits.
 	vec *vectorIndex
+
+	// tools is the user agent's tool registry (the plan's WS1): the turn
+	// loop dispatches the model's tool calls into it (see runTurn). The
+	// registry is shared across users — the executors resolve per-user
+	// state from the handle. browserMgr is the per-user desktop browser
+	// manager behind the web_browser tool (WS5); the browser launches
+	// lazily on the user's first web_browser call, never at agent start.
+	tools      *ToolRegistry
+	browserMgr *browser.Manager
 
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
@@ -72,6 +83,15 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		return nil, fmt.Errorf("no enabled models configured")
 	}
 	a.vec = a.buildVectorIndex(cfg)
+	// The user agent's tools (WS1 registry + WS5 web_browser). The browser
+	// manager is created here but launches nothing until a user's first
+	// web_browser call (lazy, per user); a host without a desktop browser
+	// simply gets the tool's "unavailable" result at use time.
+	a.browserMgr = browser.NewManager(dataDir)
+	a.tools = NewToolRegistry()
+	if err := registerWebBrowser(a.tools, a.browserMgr); err != nil {
+		return nil, fmt.Errorf("register web_browser: %w", err)
+	}
 	return a, nil
 }
 
@@ -286,8 +306,13 @@ func isModelUnavailable(err error) bool {
 		(strings.Contains(lower, "404") && strings.Contains(lower, "model"))
 }
 
-// Close closes all open per-user stores.
+// Close closes all open per-user stores and kills every launched per-user
+// browser (the server-shutdown cleanup trigger — a browser child must not
+// outlive the server).
 func (a *Agent) Close() {
+	if a.browserMgr != nil {
+		a.browserMgr.Close()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, us := range a.users {
@@ -708,7 +733,7 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 		return nil, err
 	}
 	prof := a.profileFor(c.ActiveModelID)
-	_, tokens := buildRequest(c, hist, prof)
+	_, tokens := buildRequest(c, hist, prof, nil)
 	return map[string]any{"tokens": tokens, "max_tokens": a.modelMaxContext(c.ActiveModelID)}, nil
 }
 
@@ -743,6 +768,12 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 	out := make([]ConversationMessage, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role != roleUser && m.Role != roleAssistant {
+			continue
+		}
+		// Empty assistant rows are tool-call narration rows the model left
+		// no text on — they exist to carry the P7 tool calls, not to be
+		// rendered as chat bubbles.
+		if m.Role == roleAssistant && m.Content == "" {
 			continue
 		}
 		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, CreatedAt: m.CreatedAt})
@@ -782,58 +813,146 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", err
 	}
 	a.indexMessage(ctx, handle, userMsg, conv.Title)
-	hist, err := us.ListMessages(convID)
-	if err != nil {
-		return conv.ID, "", err
-	}
 	// The conversation's active model's profile drives the request builder
 	// (its model-facing decisions — see buildRequest); it is resolved once
 	// per turn from live config.
 	prof := a.profileFor(conv.ActiveModelID)
-	req, tokens := buildRequest(conv, hist, prof)
-	if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
-		// Pre-compact: the prompt is over budget before the call. Fold the
-		// older turns (incl. this message) into a summary so the call fits.
-		// No API usage yet for this call — fall back to the char/4 estimate.
-		if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof); cerr != nil {
-			return conv.ID, "", cerr
+	apiName := a.modelAPIName(conv.ActiveModelID)
+	modelID := conv.ActiveModelID
+	// The tool loop (WS1): while the model's answer carries tool calls, the
+	// harness persists the assistant row + executes each call SEQUENTIALLY
+	// (v1: parallel calls are out of scope) + records each outcome on its
+	// P7 row, and calls the model again — the tool transcript is just
+	// history on the next iteration (re-read from the store, so the request
+	// builder's compaction/selection applies to it unchanged). The loop is
+	// capped (maxToolIterations): the call after the cap goes out with NO
+	// tools on the wire, forcing a plain-text answer from whatever the tool
+	// results showed. With an empty registry the loop body never fires and
+	// the turn is exactly today's single call.
+	wireTools := a.tools.Wire()
+	var res *provider.Result
+	capped := false // the turn ended on the tool-iteration cap (the reply row is persisted inside the loop)
+	for iter := 0; ; iter++ {
+		tools := wireTools
+		if iter >= maxToolIterations {
+			tools = nil // the forced text-only final call
 		}
-		hist, err = us.ListMessages(convID)
+		hist, err := us.ListMessages(convID)
 		if err != nil {
 			return conv.ID, "", err
 		}
-		req, _ = buildRequest(conv, hist, prof)
-	}
-	// Call the model (non-streaming or streaming). The wire request carries
-	// the provider-side model name, not the internal ID (they differ whenever
-	// the upstream name slugs to something else).
-	apiName := a.modelAPIName(conv.ActiveModelID)
-	var res *provider.Result
-	if emit == nil {
-		res, err = p.Chat(ctx, apiName, req)
-	} else {
-		res, err = p.Stream(ctx, apiName, req, emit)
-	}
-	if err != nil {
-		if isModelUnavailable(err) {
-			// The provider reports the model is unavailable — auto-disable it
-			// (independent of the admin's Enabled flag) so new conversations
-			// stop routing to it. A later successful attempt re-enables it.
-			a.SetModelAutoDisabled(conv.ActiveModelID, true)
+		tcMap, err := toolCallsForMessages(us, hist)
+		if err != nil {
+			return conv.ID, "", err
 		}
-		return conv.ID, "", err
+		req, tokens := buildRequest(conv, hist, prof, tcMap)
+		req.Tools = tools
+		if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
+			// Pre-compact: the prompt is over budget before the call. Fold the
+			// older turns (incl. this message) into a summary so the call fits.
+			// No API usage yet for this call — fall back to the char/4
+			// estimate.
+			if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof); cerr != nil {
+				return conv.ID, "", cerr
+			}
+			hist, err = us.ListMessages(convID)
+			if err != nil {
+				return conv.ID, "", err
+			}
+			tcMap, err = toolCallsForMessages(us, hist)
+			if err != nil {
+				return conv.ID, "", err
+			}
+			req, _ = buildRequest(conv, hist, prof, tcMap)
+			req.Tools = tools
+		}
+		// Call the model (non-streaming or streaming). The wire request carries
+		// the provider-side model name, not the internal ID (they differ
+		// whenever the upstream name slugs to something else).
+		if emit == nil {
+			res, err = p.Chat(ctx, apiName, req)
+		} else {
+			res, err = p.Stream(ctx, apiName, req, emit)
+		}
+		if err != nil {
+			if isModelUnavailable(err) {
+				// The provider reports the model is unavailable — auto-disable it
+				// (independent of the admin's Enabled flag) so new conversations
+				// stop routing to it. A later successful attempt re-enables it.
+				a.SetModelAutoDisabled(conv.ActiveModelID, true)
+			}
+			return conv.ID, "", err
+		}
+		// A successful call proves the model is available again — re-enable it
+		// if it had been auto-disabled.
+		if a.isAutoDisabled(conv.ActiveModelID) {
+			a.SetModelAutoDisabled(conv.ActiveModelID, false)
+		}
+		if len(res.ToolCalls) == 0 {
+			break // the final answer
+		}
+		if iter >= maxToolIterations {
+			// The cap: this call went out with NO tools on the wire, yet the
+			// model still returned tool calls (runaway). Executing them would
+			// defeat the cap — the turn ends here: the narration is persisted
+			// as the reply and the calls are recorded as FAILED P7 rows
+			// (wire-valid complete pairs — the model sees why they never ran,
+			// and the pair can never orphan).
+			res.Text = stripLeadingTranscriptTimestamp(res.Text)
+			assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+			if err != nil {
+				return conv.ID, "", err
+			}
+			for _, tc := range res.ToolCalls {
+				p7id, err := us.AppendToolCall(assistantMsg.ID, tc.Name, tc.Arguments)
+				if err != nil {
+					return conv.ID, "", err
+				}
+				if cerr := us.CompleteToolCall(p7id, "not executed: the turn reached the tool-iteration cap (this call went out with no tools)", false); cerr != nil {
+					return conv.ID, "", cerr
+				}
+			}
+			capped = true
+			break
+		}
+		// Persist the assistant row that carries the tool calls (its text is
+		// the model's narration, possibly empty — the UI skips empty
+		// assistant rows), then execute + record each call. A tool error is a
+		// RESULT back to the model (the self-healing signal), never a turn
+		// failure.
+		res.Text = stripLeadingTranscriptTimestamp(res.Text)
+		assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+		if err != nil {
+			return conv.ID, "", err
+		}
+		for ci, tc := range res.ToolCalls {
+			p7id, err := us.AppendToolCall(assistantMsg.ID, tc.Name, tc.Arguments)
+			if err != nil {
+				return conv.ID, "", err
+			}
+			var resultText string
+			var ok bool
+			if ci >= maxToolCallsPerMessage {
+				// Per-message call cap: the excess is recorded, not executed.
+				resultText, ok = fmt.Sprintf("not executed: this message requested more than %d tool calls — split the work across fewer calls per reply", maxToolCallsPerMessage), false
+			} else {
+				resultText, ok = a.executeToolCall(ctx, handle, tc)
+			}
+			if cerr := us.CompleteToolCall(p7id, resultText, ok); cerr != nil {
+				return conv.ID, "", cerr
+			}
+		}
 	}
-	// A successful call proves the model is available again — re-enable it if
-	// it had been auto-disabled.
-	if a.isAutoDisabled(conv.ActiveModelID) {
-		a.SetModelAutoDisabled(conv.ActiveModelID, false)
+	if capped {
+		// The reply row (narration) was persisted inside the loop; the
+		// post-loop path below would double-persist it.
+		return conv.ID, res.Text, nil
 	}
 	// Deterministic backstop for the no-echo rule: if the model echoed a
 	// transcript timestamp marker into the start of its reply, strip it
 	// before the reply is persisted (and before it is sent to the client on
 	// the streaming "done" event / returned from Turn).
 	res.Text = stripLeadingTranscriptTimestamp(res.Text)
-	modelID := conv.ActiveModelID
 	assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
 	if err != nil {
 		return conv.ID, "", err
@@ -872,6 +991,25 @@ func (a *Agent) modelSlots(modelID string) int {
 		}
 	}
 	return 1
+}
+
+// executeToolCall dispatches one of the model's tool calls into the
+// registry and returns the tool result text + success. Every failure mode
+// is a RESULT back to the model (never a turn error): an unknown tool name
+// (a model imitating a removed/renamed tool from its own history — the
+// self-healing path of the tool-evolution invariants) gets an error naming
+// the available tools; an executor error gets its message. Either way the
+// model sees an actionable signal and can recover within the same turn.
+func (a *Agent) executeToolCall(ctx context.Context, handle string, tc provider.ToolCall) (string, bool) {
+	t, ok := a.tools.Get(tc.Name)
+	if !ok {
+		return fmt.Sprintf("unknown tool %q — the available tools are: %s. Use one of those instead.", tc.Name, strings.Join(a.tools.Names(), ", ")), false
+	}
+	out, err := t.Execute(ctx, handle, json.RawMessage(tc.Arguments))
+	if err != nil {
+		return fmt.Sprintf("tool %s failed: %v — check the arguments against the tool's schema and try again, or answer from what you already have.", tc.Name, err), false
+	}
+	return out, true
 }
 
 // PoolStatus is one model's pool as seen by the admin dashboard: the slot

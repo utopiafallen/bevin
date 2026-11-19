@@ -32,6 +32,25 @@ func (s *UserStore) RecordToolCall(messageID int64, tool, args, result string, s
 	return err
 }
 
+// AppendToolCall persists one tool call as IN-FLIGHT before it runs: the row
+// exists the instant the model requested it, so a crash mid-execution leaves
+// an in-flight row (result="", success=0) instead of the assistant row
+// silently lacking the call. Returns the new row's id.
+func (s *UserStore) AppendToolCall(messageID int64, tool, args string) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO tool_calls (message_id, tool, args, result, success, created_at) VALUES (?,?,?,?,?,?)`,
+		messageID, tool, args, "", 0, nowUTC())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// CompleteToolCall fills in an in-flight row's result.
+func (s *UserStore) CompleteToolCall(id int64, result string, success bool) error {
+	_, err := s.db.Exec(`UPDATE tool_calls SET result = ?, success = ? WHERE id = ?`, result, boolInt(success), id)
+	return err
+}
+
 func (s *UserStore) ToolCallsForMessage(messageID int64) ([]ToolCall, error) {
 	rows, err := s.db.Query(`SELECT id, message_id, tool, args, result, success, created_at FROM tool_calls WHERE message_id = ? ORDER BY id`, messageID)
 	if err != nil {
@@ -47,6 +66,47 @@ func (s *UserStore) ToolCallsForMessage(messageID int64) ([]ToolCall, error) {
 		}
 		tc.Success = ok == 1
 		out = append(out, tc)
+	}
+	return out, rows.Err()
+}
+
+// ToolCallsForMessages is the batch form of ToolCallsForMessage: the rows
+// for every given assistant message id, grouped by message id (each group
+// in P7 id order = the order the model requested the calls). The request
+// builder needs it to pair every assistant tool_calls message in the turn
+// window with its results in one query.
+func (s *UserStore) ToolCallsForMessages(messageIDs []int64) (map[int64][]ToolCall, error) {
+	out := map[int64][]ToolCall{}
+	if len(messageIDs) == 0 {
+		return out, nil
+	}
+	ph := make([]string, len(messageIDs))
+	args := make([]any, len(messageIDs))
+	for i, id := range messageIDs {
+		ph[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT id, message_id, tool, args, result, success, created_at FROM tool_calls WHERE message_id IN (`
+	for i, p := range ph {
+		if i > 0 {
+			q += ", "
+		}
+		q += p
+	}
+	q += `) ORDER BY id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tc ToolCall
+		var ok int
+		if err := rows.Scan(&tc.ID, &tc.MessageID, &tc.Tool, &tc.Args, &tc.Result, &ok, &tc.CreatedAt); err != nil {
+			return nil, err
+		}
+		tc.Success = ok == 1
+		out[tc.MessageID] = append(out[tc.MessageID], tc)
 	}
 	return out, rows.Err()
 }

@@ -205,7 +205,7 @@ func TestBuildRequest(t *testing.T) {
 		{Role: roleUser, Content: "how are you", Seq: 3},
 		{Role: roleAssistant, Content: "fine", Seq: 4},
 	}
-	req, tokens := buildRequest(conv, msgs, profile.Default())
+	req, tokens := buildRequest(conv, msgs, profile.Default(), nil)
 	if len(req.System) != 2 {
 		t.Fatalf("System = %d parts, want 2 (frozen prompt + summary)", len(req.System))
 	}
@@ -238,7 +238,7 @@ func TestBuildRequestNoSummary(t *testing.T) {
 		{Role: roleUser, Content: "hello", Seq: 0},
 		{Role: roleAssistant, Content: "hi", Seq: 1},
 	}
-	req, _ := buildRequest(conv, msgs, profile.Default())
+	req, _ := buildRequest(conv, msgs, profile.Default(), nil)
 	if len(req.System) != 1 {
 		t.Fatalf("System = %d parts, want 1 (no summary yet)", len(req.System))
 	}
@@ -262,27 +262,27 @@ func TestBuildRequestReasoningEffort(t *testing.T) {
 
 	// Supported level: sent verbatim.
 	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin.", ReasoningEffort: "xhigh"}
-	req, _ := buildRequest(conv, msgs, q)
+	req, _ := buildRequest(conv, msgs, q, nil)
 	if req.ReasoningEffort != "xhigh" {
 		t.Fatalf("supported: ReasoningEffort = %q, want %q", req.ReasoningEffort, "xhigh")
 	}
 
 	// A profile with no effort support: dropped (even a supported-looking value).
-	req, _ = buildRequest(conv, msgs, profile.Default())
+	req, _ = buildRequest(conv, msgs, profile.Default(), nil)
 	if req.ReasoningEffort != "" {
 		t.Fatalf("no support: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
 	}
 
 	// A level the profile doesn't know (stale after a reassignment): dropped.
 	convUnknown := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin.", ReasoningEffort: "high"}
-	req, _ = buildRequest(convUnknown, msgs, q)
+	req, _ = buildRequest(convUnknown, msgs, q, nil)
 	if req.ReasoningEffort != "" {
 		t.Fatalf("unknown level: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
 	}
 
 	// No stored choice: nothing to send.
 	convNone := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
-	req, _ = buildRequest(convNone, msgs, q)
+	req, _ = buildRequest(convNone, msgs, q, nil)
 	if req.ReasoningEffort != "" {
 		t.Fatalf("no choice: ReasoningEffort = %q, want \"\"", req.ReasoningEffort)
 	}
@@ -584,7 +584,7 @@ func TestBuildRequestTimestampUserOnly(t *testing.T) {
 		{Role: roleUser, Content: "hello", Seq: 0, CreatedAt: "2026-11-12T10:30:00.123456789Z"},
 		{Role: roleAssistant, Content: "hi", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
 	}
-	req, _ := buildRequest(conv, msgs, profile.Default())
+	req, _ := buildRequest(conv, msgs, profile.Default(), nil)
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
@@ -610,7 +610,7 @@ func TestBuildRequestWithReasoning(t *testing.T) {
 		{Role: roleUser, Content: "solve it", Seq: 0, CreatedAt: "2026-11-12T10:30:00Z"},
 		{Role: roleAssistant, Content: "the answer is 42", Reasoning: "step one: read the problem\nstep two: compute", Seq: 1, CreatedAt: "2026-11-12T10:30:05Z"},
 	}
-	req, _ := buildRequest(conv, msgs, profile.Default())
+	req, _ := buildRequest(conv, msgs, profile.Default(), nil)
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}
@@ -769,7 +769,7 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	if summaries == 0 {
 		t.Fatal("no summary produced — the compaction did not fire")
 	}
-	req, _ := buildRequest(conv, msgs, profile.Default())
+	req, _ := buildRequest(conv, msgs, profile.Default(), nil)
 	if len(req.System) < 2 {
 		t.Fatalf("request System = %d parts, want >= 2 (frozen prompt + summary)", len(req.System))
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"regexp"
 	"time"
 
@@ -135,21 +136,72 @@ func stripLeadingTranscriptTimestamp(s string) string {
 // (a model-specific profile may frame it differently), so the general
 // profile owns the standard wording — see internal/profile.
 
+// wireToolCallID derives the provider-side pairing id for a P7 tool-call row:
+// the assistant message's tool_calls entry and the synthesized role=tool
+// result message share exactly this id on the wire. It is derived from the
+// row's id (not stored) so the P7 row stays the single immutable record and
+// pairing can never drift from it.
+func wireToolCallID(tc store.ToolCall) string {
+	return fmt.Sprintf("tc%d", tc.ID)
+}
+
+// toolCallComplete reports whether a P7 row has an outcome to send: a row
+// with result="" and success=false is IN-FLIGHT (the process died between
+// the model's request and the execution) — sending the assistant's tool call
+// without its result is wire-illegal, so in-flight rows are excluded from
+// the wire (from BOTH the assistant's tool_calls list and the synthesized
+// results — the pairing is derived from the same row set, so they can never
+// orphan each other).
+func toolCallComplete(tc store.ToolCall) bool {
+	return tc.Result != "" || tc.Success
+}
+
+// wireTurnMessages renders the raw turns (already selected by the builder)
+// into the provider wire messages. An assistant message whose P7 tool calls
+// are complete is sent WITH its tool_calls list, immediately followed by one
+// role=tool message per call (the pairing id derived from the P7 row). This
+// is the single place the tool transcript is turned into wire messages —
+// the chat request and the summarization call both go through it, so a
+// tool-using turn is rendered identically in both.
+func wireTurnMessages(turns []store.Message, tcMap map[int64][]store.ToolCall, includeReasoning bool) []provider.Message {
+	out := make([]provider.Message, 0, len(turns)+len(tcMap))
+	for _, m := range turns {
+		pm := assistantFacing(m, includeReasoning)
+		var complete []store.ToolCall
+		if m.Role == roleAssistant {
+			for _, tc := range tcMap[m.ID] {
+				if toolCallComplete(tc) {
+					complete = append(complete, tc)
+					pm.ToolCalls = append(pm.ToolCalls, provider.ToolCall{ID: wireToolCallID(tc), Name: tc.Tool, Arguments: tc.Args})
+				}
+			}
+		}
+		out = append(out, pm)
+		for _, tc := range complete {
+			out = append(out, provider.Message{Role: provider.RoleTool, Text: tc.Result, ToolCallID: wireToolCallID(tc)})
+		}
+	}
+	return out
+}
+
 // buildRequest assembles the provider request for a conversation: the frozen
-// system prompt + the latest context summary (if any, as a second system part)
-// + the raw turns to send. When there's a summary, it covers the older turns
-// and the last KeepLastTurns messages (the profile's) are sent verbatim (the
-// chat resumes exactly where it left off); when there's no summary, all the
-// raw turns are sent (up to the compaction budget). It returns the request +
-// an estimated token count of the prompt (for the compaction trigger). Full
-// history is retained in the store; this selects what each model call sees.
+// system prompt + the latest context summary (if any, as a second system
+// part) + the raw turns to send. When there's a summary, it covers the older
+// turns and the last KeepLastTurns messages (the profile's) are sent verbatim
+// (the chat resumes exactly where it left off); when there's no summary, all
+// the raw turns are sent (up to the compaction budget). It returns the
+// request + an estimated token count of the prompt (for the compaction
+// trigger). Full history is retained in the store; this selects what each
+// model call sees. tcMap carries the P7 tool-call rows for the turns'
+// assistant messages (see wireTurnMessages; an empty map = a conversation
+// with no tool activity — the request is identical to the pre-tools shape).
 //
 // prof is the conversation's active model's model profile — the request
 // builder's model-facing decisions (what the model gets back of its own
 // reasoning, how the summary is framed, the estimate factor, the verbatim
 // tail) all come from it, so a model-specific profile changes the request
 // without the harness special-casing the model.
-func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.Profile) (provider.ChatRequest, int) {
+func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.Profile, tcMap map[int64][]store.ToolCall) (provider.ChatRequest, int) {
 	// Latest summary (role=summary) — the last one in seq order (summaries are
 	// chained; the builder uses only the latest, which already folds in the rest).
 	latestSummarySeq := -1
@@ -199,17 +251,12 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 		sysParts = append(sysParts, provider.ContentPart{Text: fr})
 		tokens += estimateTokens(fr, prof)
 	}
-	reqMsgs := make([]provider.Message, 0, len(turns))
 	// Whether this model receives earlier assistant reasoning traces — the
 	// profile's decision (general: yes — the model sees its own earlier
 	// reasoning for continuity).
 	includeReasoning := prof.ReasoningInTranscript
-	for _, m := range turns {
-		// Stamp the user's messages with their UTC timestamp (the assistant's
-		// replies stay plain; see assistantFacing) + replay the assistant's
-		// stored reasoning when sent back — the stored content is untouched.
-		pm := assistantFacing(m, includeReasoning)
-		reqMsgs = append(reqMsgs, pm)
+	reqMsgs := wireTurnMessages(turns, tcMap, includeReasoning)
+	for _, pm := range reqMsgs {
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 	}
 	req := provider.ChatRequest{System: sysParts, Messages: reqMsgs, ConversationID: conv.ID}

@@ -31,14 +31,17 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // conversation's prompt — a KV cache proxy keyed on the conversation id
 // would either load a mismatched cache or save this short-lived prompt's
 // KV over the conversation's reusable one.
-func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message) (string, error) {
-	msgs := make([]provider.Message, 0, len(turns)+1)
+func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message, tcMap map[int64][]store.ToolCall) (string, error) {
+	msgs := make([]provider.Message, 0, len(turns)+len(tcMap)+1)
 	if prevSummary != "" {
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
 	}
-	for _, m := range turns {
-		msgs = append(msgs, assistantFacing(m, prof.ReasoningInTranscript))
-	}
+	// The SAME wire rendering as the chat request (wireTurnMessages): a
+	// tool-using turn must reach the summarizer with its tool calls AND
+	// results paired — the summarizer needs to know what the tools returned
+	// to fold the turn in accurately, and an unpaired tool_calls message is
+	// wire-illegal on the same grounds as in the chat request.
+	msgs = append(msgs, wireTurnMessages(turns, tcMap, prof.ReasoningInTranscript)...)
 	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
 		System:          []provider.ContentPart{{Text: summarizationSystemPrompt}},
 		Messages:        msgs,
@@ -73,9 +76,13 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	if err != nil {
 		return err
 	}
+	tcMap, err := toolCallsForMessages(us, hist)
+	if err != nil {
+		return err
+	}
 	tokens := actualTokens
 	if tokens <= 0 {
-		_, tokens = buildRequest(conv, hist, prof)
+		_, tokens = buildRequest(conv, hist, prof, tcMap)
 	}
 	if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 		return nil
@@ -93,7 +100,10 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	// name (the internal ID would be rejected for slug-mangled upstream
 	// names).
 	toSummarize := turns[:len(turns)-prof.KeepLastTurns]
-	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize)
+	// The tool-call rows of the FOLDED assistant messages ride along with
+	// their messages (pair-safe: the builder derives both sides from the
+	// same row set).
+	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize, toolCallsSubset(tcMap, toSummarize))
 	if err != nil {
 		return err
 	}
@@ -115,4 +125,33 @@ func (a *Agent) modelMaxContext(modelID string) int {
 		}
 	}
 	return 0
+}
+
+// toolCallsForMessages fetches the P7 tool-call rows for every assistant
+// message in hist (one query; empty map when the conversation has no tool
+// activity).
+func toolCallsForMessages(us *store.UserStore, hist []store.Message) (map[int64][]store.ToolCall, error) {
+	ids := make([]int64, 0)
+	for _, m := range hist {
+		if m.Role == roleAssistant {
+			ids = append(ids, m.ID)
+		}
+	}
+	return us.ToolCallsForMessages(ids)
+}
+
+// toolCallsSubset narrows a tool-call map to the messages in msgs (the
+// summarization call folds a PREFIX of the turns — only those assistant
+// messages' rows are needed).
+func toolCallsSubset(tcMap map[int64][]store.ToolCall, msgs []store.Message) map[int64][]store.ToolCall {
+	if len(tcMap) == 0 {
+		return tcMap
+	}
+	out := map[int64][]store.ToolCall{}
+	for _, m := range msgs {
+		if tcs, ok := tcMap[m.ID]; ok {
+			out[m.ID] = tcs
+		}
+	}
+	return out
 }
