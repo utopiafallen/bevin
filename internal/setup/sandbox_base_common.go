@@ -2,6 +2,9 @@ package setup
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -45,6 +48,69 @@ func (p *sandboxProgressWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// isHTMLBody reports whether a response body that was expected to be
+// JSON is actually an HTML page. A 200 HTML body is the signature of a
+// network filter / proxy / captive portal serving its own page (a
+// challenge or block page) for the registry's URL — without the check
+// the failure surfaces deep in the code as
+// "invalid character '<' looking for beginning of value" (json.Unmarshal
+// on a "<!doctype html>..." body), which points at nothing.
+func isHTMLBody(body []byte, contentType string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "text/html") {
+		return true
+	}
+	b := bytes.TrimLeft(body, " \t\r\n\xef\xbb\xbf")
+	if len(b) == 0 {
+		return false
+	}
+	head := b
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	return strings.HasPrefix(strings.ToLower(string(head)), "<")
+}
+
+// extractTarLayer extracts a registry image layer into destDir. A layer
+// is a tar, optionally gzip-compressed — detected by the gzip magic
+// bytes (0x1f 0x8b): MCR historically served windows layers UNCOMPRESSED
+// (tar), and now serves them as .tar.gzip (verified against the live
+// ltsc2025 image 2026-11-18), so both must work — the mediaType in the
+// manifest agrees, but the magic check is the robust signal.
+func extractTarLayer(archive, destDir string) error {
+	f, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 1<<20)
+	var r io.Reader = br
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		r = gz
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return err
+	}
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if err := writeRootfsTarEntry(destDir, hdr, tr); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeRootfsTarEntry extracts one tar entry, for a real OS image
