@@ -730,7 +730,13 @@
       // created IMMEDIATELY — feedback while the request is in flight and
       // while the model thinks, not on the first token. If the turn fails
       // before any content lands, the placeholder bubble is discarded.
+      // Measure the follow state BEFORE the append (the append grows the
+      // log and would trip the pinScroll threshold by itself), then scroll
+      // the new bubble into view — without this, the Thinking… animation
+      // sits below the fold until the first content delta.
+      var wasAtBottom = pinScroll($("#chatLog"));
       var asst = startAssistantMsg();
+      if (wasAtBottom) scrollChat();
       asst.t0 = 0;
       var reasoning = "";
       try {
@@ -776,10 +782,17 @@
             if (evt === "message") {
               if (p.reasoning) {
                 reasoning += p.reasoning;
-                asst.details.style.display = "";
-                // The collapsed block previews the current line of the
-                // streaming reasoning, so it shows what the model is doing
-                // instead of a static label.
+                if (asst.details.style.display === "none") {
+                  asst.details.style.display = "";
+                  // Expanded while we wait for the response: the user sees
+                  // the full trace growing (and the log follows it). It
+                  // collapses on the first content delta, so the final
+                  // reply lands in a calm view.
+                  asst.details.open = true;
+                }
+                // The summary previews the current line of the streaming
+                // reasoning, so the collapsed block (once the response
+                // starts) still shows what the model was doing.
                 var lines = reasoning.split("\n");
                 var ln = "";
                 for (var li = lines.length - 1; li >= 0; li--) {
@@ -787,11 +800,12 @@
                 }
                 if (ln.length > 90) ln = ln.slice(0, 90) + "…";
                 if (ln) asst.details.querySelector("summary").textContent = "thinking — " + ln;
-                var atBottom = pinScroll($("chatLog"));
+                var atBottom = pinScroll($("#chatLog"));
                 asst.pre.textContent = reasoning;
-                if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
+                if (atBottom) $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
               }
               if (p.delta) {
+                if (asst.details.open) asst.details.open = false; // the response started — collapse the thinking
                 if (!asst.t0) asst.t0 = performance.now(); // live stats start on the first content
                 asst.buf += p.delta;
                 schedulePaint(asst);
