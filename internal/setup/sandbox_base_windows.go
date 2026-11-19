@@ -133,18 +133,36 @@ func provisionSandboxBase(ctx context.Context, dataDir string, progress func(fra
 			got += l.Size
 			continue
 		}
-		if progress != nil {
-			progress(float64(got)/float64(total),
-				fmt.Sprintf("layer %d of %d: %s", i+1, len(manifest.Layers), humanBytes(l.Size)))
-		}
 		blob := filepath.Join(baseDir, id+".blob")
-		if err := registryDownload(ctx, "/v2/"+winBaseImage+"/blobs/"+l.Digest, blob, func(frac float64, detail string) {
+		// A blob left behind by a run that died between download and
+		// extraction (crash/reboot) is reused when its content matches
+		// the registry digest — that skips re-downloading an already
+		// fetched layer; anything that doesn't verify is re-downloaded.
+		haveBlob := false
+		if fi, err := os.Stat(blob); err == nil && fi.Size() > 0 {
 			if progress != nil {
-				progress((float64(got)+frac*float64(l.Size))/float64(total),
-					fmt.Sprintf("layer %d of %d: %s", i+1, len(manifest.Layers), detail))
+				progress(float64(got)/float64(total),
+					fmt.Sprintf("layer %d of %d: verifying existing %s", i+1, len(manifest.Layers), humanBytes(fi.Size())))
 			}
-		}); err != nil {
-			return fmt.Errorf("downloading layer %d (%s): %w", i+1, id, err)
+			if blobMatchesDigest(blob, l.Digest) {
+				haveBlob = true
+			} else {
+				os.Remove(blob) // corrupted / truncated / stale
+			}
+		}
+		if !haveBlob {
+			if progress != nil {
+				progress(float64(got)/float64(total),
+					fmt.Sprintf("layer %d of %d: %s", i+1, len(manifest.Layers), humanBytes(l.Size)))
+			}
+			if err := registryDownload(ctx, "/v2/"+winBaseImage+"/blobs/"+l.Digest, blob, func(frac float64, detail string) {
+				if progress != nil {
+					progress((float64(got)+frac*float64(l.Size))/float64(total),
+						fmt.Sprintf("layer %d of %d: %s", i+1, len(manifest.Layers), detail))
+				}
+			}); err != nil {
+				return fmt.Errorf("downloading layer %d (%s): %w", i+1, id, err)
+			}
 		}
 		// Lower layers (already extracted, in image order) — a layer's
 		// hard link may target a file a LOWER layer created (cross-layer

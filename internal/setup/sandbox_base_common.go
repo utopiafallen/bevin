@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,6 +144,59 @@ func markLayerComplete(baseDir, id string) error {
 // extraction (the provisioner's resume check).
 func layerExtracted(baseDir, id string) bool {
 	return dirIsNonEmpty(filepath.Join(baseDir, id)) && hasLayerComplete(baseDir, id)
+}
+
+// fileSHA256Hex streams a local file through sha256 (a GB-size blob never
+// loads into memory).
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// blobMatchesDigest reports whether a local file's content matches a
+// registry digest ("sha256:<hex>"). It is the skip-the-download predicate
+// for an already-fetched artifact left behind by a run that died between
+// download and extraction (crash/reboot): verify first, then reuse.
+func blobMatchesDigest(path, digest string) bool {
+	got, err := fileSHA256Hex(path)
+	return err == nil && got == strings.ToLower(strings.TrimPrefix(digest, "sha256:"))
+}
+
+// publishedSHA256 fetches a published SHA256SUMS file and returns the
+// hex digest of the named entry. The checksums file is a few KB on the
+// same host as the artifact itself.
+func publishedSHA256(ctx context.Context, url, filename string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.TrimPrefix(fields[1], "*") == filename {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", fmt.Errorf("%s has no entry for %s", url, filename)
 }
 
 // writeRootfsTarEntry extracts one tar entry, for a real OS image

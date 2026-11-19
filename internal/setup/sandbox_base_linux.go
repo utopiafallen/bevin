@@ -21,7 +21,15 @@ import (
 // OS WITH systemd (systemd-nspawn --boot needs an init inside) — ~40 MB
 // compressed. The "current" alias is pinned: a stable URL Canonical keeps
 // updated within the resolute series (point releases).
-const linuxBaseURL = "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64-root.tar.xz"
+const (
+	linuxBaseURL = "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64-root.tar.xz"
+	// linuxBaseName / linuxBaseSHA256: the published checksums file
+	// (same directory as the artifact). The digest lets a FRESH download
+	// be verified, and an already-downloaded archive (a run that died
+	// between download and extraction) be reused WITHOUT re-downloading.
+	linuxBaseName   = "resolute-server-cloudimg-amd64-root.tar.xz"
+	linuxBaseSHA256 = "https://cloud-images.ubuntu.com/resolute/current/SHA256SUMS"
+)
 
 // sandboxBaseReady reports whether the linux base rootfs is provisioned.
 func sandboxBaseReady(dataDir string) bool {
@@ -33,26 +41,61 @@ func sandboxBaseReady(dataDir string) bool {
 // <data>/sandboxes/base/root/. It is atomic: the archive + staging dir
 // live outside the final location, the result is verified, and only then
 // renamed into place — a canceled/failed run never leaves a broken base.
+// The VERIFIED archive is kept on disk after a successful run: the next
+// re-provision (if the base root is ever deleted) reuses it — verified
+// against the published digest — instead of re-downloading.
 func provisionSandboxBase(ctx context.Context, dataDir string, progress func(frac float64, detail string)) error {
 	baseRoot := sandbox.BaseRoot(dataDir)
 	staging := baseRoot + ".staging"
 	archive := filepath.Join(sandbox.SandboxRoot(dataDir), ".base.tar.xz")
+	keepArchive := false
 	_ = os.RemoveAll(staging)
-	defer os.RemoveAll(staging)
-	defer os.Remove(archive)
-
-	// 1. Download (60% of the progress budget).
-	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
-		return err
-	}
-	if err := sandboxDownload(ctx, linuxBaseURL, archive, func(frac float64, detail string) {
-		if progress != nil {
-			progress(frac*0.6, detail)
+	defer func() {
+		os.RemoveAll(staging)
+		if !keepArchive {
+			os.Remove(archive)
 		}
-	}); err != nil {
-		return fmt.Errorf("downloading the base image: %w", err)
+	}()
+
+	// 1. The published digest (a few KB, same host as the artifact).
+	want, err := publishedSHA256(ctx, linuxBaseSHA256, linuxBaseName)
+	if err != nil {
+		return fmt.Errorf("fetching the base image's published checksum: %w", err)
 	}
-	// 2. Extract (60-95%).
+	// 2. An already-downloaded archive that verifies is reused (skip the
+	// download); one that doesn't is stale/corrupt — re-download.
+	verified := false
+	if fi, err := os.Stat(archive); err == nil && fi.Size() > 0 {
+		if progress != nil {
+			progress(0.05, "verifying existing "+humanBytes(fi.Size())+" archive…")
+		}
+		if got, err := fileSHA256Hex(archive); err == nil && got == want {
+			verified = true
+			if progress != nil {
+				progress(0.6, "archive already downloaded and verified — skipping the download")
+			}
+		} else {
+			os.Remove(archive)
+		}
+	}
+	// 3. Download (0-60% of the progress budget) — fresh downloads are
+	// verified against the published digest too.
+	if !verified {
+		if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+			return err
+		}
+		if err := sandboxDownload(ctx, linuxBaseURL, archive, func(frac float64, detail string) {
+			if progress != nil {
+				progress(frac*0.6, detail)
+			}
+		}); err != nil {
+			return fmt.Errorf("downloading the base image: %w", err)
+		}
+		if got, err := fileSHA256Hex(archive); err != nil || got != want {
+			return fmt.Errorf("the downloaded base image's checksum does not match Canonical's published one")
+		}
+	}
+	// 4. Extract (60-95%).
 	if err := os.MkdirAll(staging, 0o755); err != nil {
 		return err
 	}
@@ -66,17 +109,18 @@ func provisionSandboxBase(ctx context.Context, dataDir string, progress func(fra
 	}); err != nil {
 		return fmt.Errorf("extracting the base image: %w", err)
 	}
-	// 3. Verify.
+	// 5. Verify.
 	if _, err := os.Stat(filepath.Join(staging, "etc", "os-release")); err != nil {
 		return fmt.Errorf("the downloaded base image is invalid (no /etc/os-release inside)")
 	}
-	// 4. Move into place (same filesystem → rename is atomic).
+	// 6. Move into place (same filesystem → rename is atomic).
 	if err := os.RemoveAll(baseRoot); err != nil {
 		return err
 	}
 	if err := os.Rename(staging, baseRoot); err != nil {
 		return err
 	}
+	keepArchive = true
 	if progress != nil {
 		progress(1, "base image ready")
 	}

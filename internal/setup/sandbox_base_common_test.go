@@ -4,6 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -163,6 +167,75 @@ func TestExtractTarLayerCrossLayerHardlink(t *testing.T) {
 	must(os.WriteFile(badPath, bad.Bytes(), 0o644))
 	if err := extractTarLayer(badPath, filepath.Join(dir, "upper2"), lower); err == nil {
 		t.Fatal("expected an error for a hardlink target missing from every layer")
+	}
+}
+
+// TestFileSHA256Hex: the streaming hash (a GB-size blob never loads into
+// memory) against a known vector.
+func TestFileSHA256Hex(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(p, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fileSHA256Hex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sha256("hello\n") — a known vector, not computed in-test.
+	want := "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+	if got != want {
+		t.Fatalf("sha256 = %s, want %s", got, want)
+	}
+	if _, err := fileSHA256Hex(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected an error for a missing file")
+	}
+}
+
+// TestBlobMatchesDigest: the skip-the-download predicate (an
+// already-fetched artifact is reused only when it verifies).
+func TestBlobMatchesDigest(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "layer.blob")
+	if err := os.WriteFile(p, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+	if !blobMatchesDigest(p, digest) {
+		t.Fatal("a matching blob must verify")
+	}
+	if blobMatchesDigest(p, "sha256:0000000000000000000000000000000000000000000000000000000000000000") {
+		t.Fatal("a mismatched blob must not verify")
+	}
+	if blobMatchesDigest(filepath.Join(t.TempDir(), "missing"), digest) {
+		t.Fatal("a missing blob must not verify")
+	}
+}
+
+// TestPublishedSHA256: the checksums-file lookup (the linux base's
+// published digest comes from a SHA256SUMS file next to the artifact).
+func TestPublishedSHA256(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 *want.tar.xz\n"+
+			"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  other.tar.xz\n")
+	}))
+	defer srv.Close()
+	got, err := publishedSHA256(context.Background(), srv.URL, "want.tar.xz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" {
+		t.Fatalf("digest = %s", got)
+	}
+	// no such entry
+	if _, err := publishedSHA256(context.Background(), srv.URL, "missing.tar.xz"); err == nil {
+		t.Fatal("expected an error for a missing entry")
+	}
+	// non-200
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	if _, err := publishedSHA256(context.Background(), bad.URL, "want.tar.xz"); err == nil {
+		t.Fatal("expected an error for a non-200 response")
 	}
 }
 
