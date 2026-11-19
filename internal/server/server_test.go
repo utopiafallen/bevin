@@ -347,6 +347,29 @@ func configApp(t *testing.T) (*App, *config.ServerConfig) {
 	return a, cfg
 }
 
+// TestAdminModelsPageRedirect pins the models-editor inlining: the dedicated
+// /admin/models page is gone (the editor lives on the dashboard's Models
+// page), so the old URL 303s to /admin#models — and a non-admin is rejected
+// rather than redirected.
+func TestAdminModelsPageRedirect(t *testing.T) {
+	a, _ := testApp(t, config.Email{})
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/models", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("admin GET /admin/models code = %d, want 303", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/admin#models" {
+		t.Fatalf("Location = %q, want /admin#models", loc)
+	}
+	// No session (a non-admin): rejected, not redirected.
+	r := httptest.NewRequest(http.MethodGet, "/admin/models", nil)
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated GET /admin/models code = %d, want 403", w.Code)
+	}
+}
+
 // TestAdminConfigEndpoints — the admin config pages' read/save API: admin
 // gating, the models save (persisted + hot-reloaded into the agent), the
 // nothing-to-save rejection, and the email placeholder defaults (a blank port

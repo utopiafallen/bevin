@@ -258,12 +258,15 @@ func (a *App) adminProfiles(w http.ResponseWriter, r *http.Request) {
 // config pages (static HTML; all data via the gated /admin/api/* endpoints).
 // The pages themselves are reachable at their static URLs too (like
 // /admin.html) — the APIs are what are gated.
+// The MODELS editor is inlined on the dashboard's Models page (admin.html
+// #models) — no dedicated page (the user hit the detour to /admin-models.html
+// as friction); this URL 303s there for old links/bookmarks.
 func (a *App) adminModelsPage(w http.ResponseWriter, r *http.Request) {
 	if role, ok := a.adminGate(r); !ok || role != "admin" {
 		http.Error(w, "admin required", http.StatusForbidden)
 		return
 	}
-	http.Redirect(w, r, "/admin-models.html", http.StatusFound)
+	http.Redirect(w, r, "/admin#models", http.StatusFound)
 }
 
 func (a *App) adminEmailPage(w http.ResponseWriter, r *http.Request) {

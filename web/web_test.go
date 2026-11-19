@@ -24,7 +24,6 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"favicon.svg",
 		"fonts/nunito-variable.woff2",
 		"admin.html",
-		"admin-models.html",
 		"admin-email.html",
 		"admin-users.html",
 	}
@@ -79,15 +78,16 @@ func TestModelProfileUISurface(t *testing.T) {
 			t.Errorf("config-forms.js missing the profile surface: %s", want)
 		}
 	}
-	// The admin page points the catalog at its own gated endpoint + loads it
-	// on init.
-	page := read("admin-models.html")
+	// The dashboard's Models page points the catalog at its own gated
+	// endpoint + loads it on init (the model editor is inlined there — the
+	// dedicated /admin/models page is gone, it redirects to /admin#models).
+	page := read("admin.html")
 	for _, want := range []string{
 		`const PROFILES_URL = "/admin/api/profiles"`,
 		`loadProfiles().then(render)`,
 	} {
 		if !bytes.Contains(page, []byte(want)) {
-			t.Errorf("admin-models.html missing: %s", want)
+			t.Errorf("admin.html missing: %s", want)
 		}
 	}
 }
@@ -97,17 +97,30 @@ func TestModelProfileUISurface(t *testing.T) {
 // hand-maintained shell logic — the sidebar/drawer wiring — so a typo there
 // would break the whole page silently). Skipped where node is unavailable.
 func TestIndexInlineJSValid(t *testing.T) {
+	checkInlineJSValid(t, "index.html")
+}
+
+// TestAdminInlineJSValid — same guard for the admin dashboard (its Models
+// page inlines the model editor: state, per-action commits, and the shared
+// form wiring, so a typo there breaks model management silently).
+func TestAdminInlineJSValid(t *testing.T) {
+	checkInlineJSValid(t, "admin.html")
+}
+
+// checkInlineJSValid syntax-checks every inline <script> block of an embedded
+// page with `node --check`. Skipped where node is unavailable.
+func checkInlineJSValid(t *testing.T, pageName string) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
-	f, err := FS.Open("static/index.html")
+	f, err := FS.Open("static/" + pageName)
 	if err != nil {
-		t.Fatalf("open index.html: %v", err)
+		t.Fatalf("open %s: %v", pageName, err)
 	}
 	defer f.Close()
 	var b bytes.Buffer
 	if _, err := io.Copy(&b, f); err != nil {
-		t.Fatalf("read index.html: %v", err)
+		t.Fatalf("read %s: %v", pageName, err)
 	}
 	page := b.String()
 
@@ -128,7 +141,7 @@ func TestIndexInlineJSValid(t *testing.T) {
 		i = s + e
 	}
 	if len(bodies) == 0 {
-		t.Fatal("no inline script blocks found in index.html")
+		t.Fatal("no inline script blocks found in " + pageName)
 	}
 	for i, body := range bodies {
 		tmp := filepath.Join(t.TempDir(), "inline.js")
@@ -137,9 +150,9 @@ func TestIndexInlineJSValid(t *testing.T) {
 		}
 		out, err := exec.Command("node", "--check", tmp).CombinedOutput()
 		if err != nil {
-			t.Errorf("inline script %d failed node --check: %v\n%s", i, err, out)
+			t.Errorf("%s: inline script %d failed node --check: %v\n%s", pageName, i, err, out)
 		} else {
-			t.Logf("inline script %d: OK", i)
+			t.Logf("%s: inline script %d: OK", pageName, i)
 		}
 	}
 }

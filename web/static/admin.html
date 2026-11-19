@@ -6,6 +6,10 @@
 <title>bevin — admin</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/brand.css">
+<!-- The model/aux editor components are shared with the setup wizard; the
+     Models page inlines them (see the editor state in the script below). -->
+<link rel="stylesheet" href="/config-forms.css">
+<script src="/config-forms.js"></script>
 <style>
   body { display:flex; min-height:100vh; margin:0; background:var(--bg); color:var(--text); font-family:var(--font-sans); }
   .side { width:220px; flex:0 0 220px; background:var(--surface); border-right:1px solid var(--border); padding:1.2rem .9rem; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
@@ -54,6 +58,8 @@
   .msg.ok { color:var(--ok); } .msg.err { color:var(--danger); }
   .blocked { text-align:center; padding:4rem 1rem; }
   .blocked .btn { margin-top:1rem; }
+  .toolbar { display:flex; gap:.6rem; align-items:center; margin:.4rem 0 1rem; }
+  .page-note { color:var(--text-muted); font-size:.85rem; margin:.2rem 0 .6rem; }
 </style>
 </head>
 <body>
@@ -130,7 +136,7 @@ function render() {
   m.innerHTML = "";
   switch (page()) {
     case "overview": renderOverview(); startPoll(loadStatus, 2000); break;
-    case "models": renderModels(); startPoll(loadStatus, 4000); break;
+    case "models": renderModels(); loadModelEditor(); break;
     case "sidecars": renderSidecars(); startPoll(loadSide, 5000); break;
     case "email": renderEmail(); loadMail(); loadSide(); break;
     case "server": renderServer(); loadStatus(); break;
@@ -198,31 +204,116 @@ function poolRow(p) {
   return d;
 }
 
+// ---- Models editor (inlined on this page) ----
+// The model/aux form components are SHARED with the setup wizard
+// (config-forms.js, loaded in the head). This page is a thin consumer: it
+// provides the state object S, api(), render(), the #msg element, the
+// endpoint constants, a no-op sync() (inp() calls it on every keystroke),
+// and onConfigChanged (per-action save to /admin/api/config — the wizard
+// leaves the hook unset and persists at step advance). The editor is INLINE
+// on the dashboard's Models page (no detour to a dedicated page —
+// /admin/models redirects here): "Add model" / "Add aux" are their own
+// buttons, and a specific model is edited from its row's Edit button in the
+// model table (the shared editModel loads it into the form).
+const PROBE_URL = "/admin/api/probe-model";
+const EMAIL_TEST_URL = "/admin/api/email/test"; // unused here; the shared email form references it
+const PROFILES_URL = "/admin/api/profiles"; // the build's model profile registry (the profile selects' options)
+let S = { models: [], modelDraft: freshModel(), editingIndex: -1, editOriginal: null, formError: null, aux: [], auxError: {}, showForm: false, loaded: false };
+
+// api — the fetch helper the shared components expect (parsed JSON; throws
+// with the server's error message on a non-2xx).
+async function api(method, path, body) { const opt = { method }; if (body) { opt.headers = { "Content-Type": "application/json" }; opt.body = JSON.stringify(body); } const r = await fetch(path, opt); let j = null; try { j = await r.json(); } catch (_) {} if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status)); return j; }
+// sync — the per-field keystroke hook config-forms.js's inp() invokes; the
+// per-field listeners sync the draft themselves, so this is a no-op (same
+// contract as the setup wizard).
+function sync(id, v) { /* handled by per-field listeners */ }
+
+// stripWorking — drop the per-draft working state (_models / _detecting /
+// _lastBase) before a payload crosses the wire (same rule as the wizard).
+function stripWorking(o) { if (!o || typeof o !== "object") return o; if (Array.isArray(o)) return o.map(stripWorking); const c = {}; for (const k of Object.keys(o)) if (!k.startsWith("_")) c[k] = o[k]; return c; }
+
+// commit — persist the current models + aux (per action, via the shared
+// components' onConfigChanged hook). A single in-flight guard: rapid actions
+// (e.g. reorder) queue at most one follow-up.
+let _committing = false, _commitPending = false;
+async function commit(area) {
+  if (_committing) { _commitPending = true; return; }
+  _committing = true;
+  try {
+    const r = await api("POST", "/admin/api/config", { models: stripWorking(S.models), aux: stripWorking(S.aux) });
+    msg(r.reloaded ? "Saved — the running agent picked up the changes." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
+  } catch (e) {
+    msg("Save failed: " + e.message, "err");
+  } finally {
+    _committing = false;
+    if (_commitPending) { _commitPending = false; commit(area); }
+  }
+}
+window.onConfigChanged = function (area) { commit(area); };
+
+// loadModelEditor — fetch the saved models + aux ONCE (disk is the commit of
+// record; after that S is the source of truth and re-renders never re-fetch
+// — a re-render under the admin's hands would paint the form mid-edit). The
+// profile catalog (the profile selects' options) loads with it.
+let _modelsLoading = false;
+async function loadModelEditor() {
+  if (S.loaded || _modelsLoading) return;
+  _modelsLoading = true;
+  try {
+    const d = await api("GET", "/admin/api/config");
+    S.models = d.models || [];
+    S.aux = d.aux || [];
+  } catch (e) { msg("Could not load the config: " + e.message, "err"); }
+  S.loaded = true;
+  render();
+  loadProfiles().then(render);
+}
+
+function modelFormVisible() { return S.showForm || S.editingIndex !== -1; }
+function scrollToModelForm() { const e = document.getElementById("mf_base"); if (e) e.scrollIntoView({ behavior: "smooth", block: "center" }); }
+function scrollToAuxTail() { const cards = document.querySelectorAll(".aux-block"); if (cards.length) cards[cards.length - 1].scrollIntoView({ behavior: "smooth", block: "center" }); }
+
 function renderModels() {
   const m = document.getElementById("main");
   m.innerHTML = "";
   const h = document.createElement("h1"); h.textContent = "Models"; m.append(h);
-  const c = document.createElement("div");
-  c.className = "card";
-  if (!STATUS) { c.append(elP("Loading…")); m.append(c); return; }
-  const t = document.createElement("table");
-  t.className = "q";
-  t.innerHTML = "<tr><th>Display name</th><th>Provider</th><th>Model</th><th>Slots</th><th>Busy</th><th>State</th></tr>";
-  STATUS.pools.forEach(p => {
-    const tr = document.createElement("tr");
-    const st = p.auto_disabled ? "<span class='badge bad'>unavailable</span>" : (p.enabled ? "<span class='badge ok'>enabled</span>" : "<span class='badge bad'>disabled</span>");
-    tr.innerHTML = "<td>" + esc(p.display_name || p.id) + "</td><td>" + esc(p.provider) + "</td><td class='kv'>" + esc(p.id) + "</td><td>" + p.slots + "</td><td>" + p.busy + "</td><td>" + st + "</td>";
-    t.append(tr);
-  });
-  c.append(t);
-  c.append(elP(""));
-  const note = elP("Change a model's slots, enable/disable models, or add providers in the models editor — the running agent picks the changes up immediately (no restart).");
-  c.append(note);
-  const btn = document.createElement("a");
-  btn.className = "btn"; btn.href = "/admin/models"; btn.textContent = "Open the models editor";
-  c.append(document.createElement("br"));
-  c.append(btn);
-  m.append(c);
+  const note = document.createElement("p");
+  note.className = "page-note";
+  note.textContent = "Each change saves immediately — the running agent picks it up without a restart.";
+  m.append(note);
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
+  if (!S.loaded) { const c = document.createElement("div"); c.className = "card"; c.append(elP("Loading…")); m.append(c); return; }
+  // Toolbar — "Add model" and "Add aux" are their own buttons: Add model
+  // reveals the model form (hidden until then; the page is list-centric),
+  // Add aux appends a new aux card.
+  const tb = document.createElement("div"); tb.className = "toolbar";
+  const bAdd = document.createElement("button"); bAdd.className = "btn"; bAdd.textContent = "+ Add model";
+  bAdd.onclick = () => { if (S.editingIndex !== -1) cancelEdit(); else resetDraft(); S.showForm = true; render(); scrollToModelForm(); };
+  const bAux = document.createElement("button"); bAux.className = "btn ghost"; bAux.textContent = "+ Add aux";
+  bAux.onclick = () => { addAux(); scrollToAuxTail(); };
+  tb.append(bAdd, bAux);
+  m.append(tb);
+  // The model form — revealed by "+ Add model" or a row's Edit (the shared
+  // editModel sets editingIndex, which shows the form; save/cancel hide it).
+  if (modelFormVisible()) { const c = document.createElement("div"); c.className = "card"; c.append(renderModelForm()); m.append(c); }
+  // Main models — the list; each row's Edit loads that model into the form
+  // above (while editing, the row is spliced out of the table — it comes
+  // back on save).
+  const cl = document.createElement("div"); cl.className = "card";
+  cl.innerHTML = "<h2>Main models</h2>";
+  cl.append(elP("The chat models users can switch between. List order is the order users see when choosing a model."));
+  cl.append(renderModelList());
+  m.append(cl);
+  // Aux perception models — listed as their own editable cards (the shared
+  // renderAuxSection is not used: its built-in add button would duplicate
+  // the toolbar's; the cards come from renderAuxCard).
+  const ca = document.createElement("div"); ca.className = "card";
+  ca.innerHTML = "<h2>Aux perception models</h2>";
+  ca.append(elP("Vision / audio / video comprehension models — used mid-conversation to read a non-text asset. Hidden from users. Leave empty to skip."));
+  if (!S.aux.length) ca.append(el("p", { class: "empty-list" }, "No aux models yet — press \u201c+ Add aux\u201d above."));
+  S.aux.forEach((mm, i) => ca.append(renderAuxCard(i)));
+  m.append(ca);
+  refreshScoreFills();
 }
 
 function renderSidecars() {
