@@ -400,7 +400,10 @@ func TestExecuteToolCallUnknown(t *testing.T) {
 
 // TestWebBrowserToolRegistered: the web_browser tool (WS5) is registered by
 // default with its command surface — the model's first look at the tool is
-// its schema, and the command enum must match the executor's cases.
+// its schema, and the command enum must match the executor's cases. The
+// security pin: NO evaluate / expression surface (model-controlled JS in
+// the page was removed 2026-11-19 — a prompt-injected page could route
+// attacker code into the user's logged-in profile).
 func TestWebBrowserToolRegistered(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -409,10 +412,13 @@ func TestWebBrowserToolRegistered(t *testing.T) {
 		t.Fatal("web_browser must be registered by default")
 	}
 	schema, _ := json.Marshal(tl.Parameters)
-	for _, want := range []string{`"openTab"`, `"navigate"`, `"read"`, `"click"`, `"type"`, `"select"`, `"waitFor"`, `"evaluate"`, `"listTabs"`, `"closeTab"`} {
+	for _, want := range []string{`"openTab"`, `"navigate"`, `"read"`, `"readItems"`, `"scroll"`, `"click"`, `"type"`, `"select"`, `"waitFor"`, `"listTabs"`, `"closeTab"`} {
 		if !strings.Contains(string(schema), want) {
 			t.Fatalf("web_browser schema missing command %s:\n%s", want, schema)
 		}
+	}
+	if strings.Contains(string(schema), `evaluate`) || strings.Contains(string(schema), `expression`) {
+		t.Fatalf("web_browser schema must NOT expose model-controlled JS (evaluate/expression):\n%s", schema)
 	}
 }
 

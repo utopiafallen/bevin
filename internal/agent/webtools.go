@@ -32,10 +32,9 @@ Commands:
 - click (element|selector) — click #N or a CSS selector
 - type (element|selector, text) — click + type (a trailing newline = Enter)
 - select (element|selector, value) — pick a <select> option (value or visible text)
-- waitFor (selector|expression, timeout_ms?) — wait for a selector (present+visible) or a truthy JS expression (default 10 s)
-- evaluate (expression) — run JS, return the result (last resort)
+- waitFor (selector, timeout_ms?) — wait until a selector is present+visible (default 10 s)
 - listTabs / closeTab (tab?)
-Workflow: openTab/navigate → read → act with #N → read again after each action (the page changes; stale #N ids fail). Lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached — do not evaluate-scroll + read.`
+Workflow: openTab/navigate → read → act with #N → read again after each action (the page changes; stale #N ids fail). Lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached.`
 
 // webBrowserWireDescription is the web_browser description for ONE turn's
 // wire request: the base + the search note matching this instance's
@@ -51,11 +50,14 @@ func webBrowserWireDescription(wsEnabled bool) string {
 
 // registerWebBrowser registers the web_browser tool (the plan's WS5): ONE
 // tool, a single `command` arg over a fixed surface (openTab, navigate,
-// read, readItems, scroll, click, type, select, waitFor, evaluate,
-// listTabs, closeTab). It is registered unconditionally — a host without a
-// desktop browser reports the tool as UNAVAILABLE at use time (the neutral
-// wording; the user is the one who installs a browser), which the model
-// relays to the user.
+// read, readItems, scroll, click, type, select, waitFor, listTabs,
+// closeTab). NO model-controlled JS execution (the evaluate command and
+// waitFor's expression mode were removed 2026-11-19 — a prompt-injected
+// page could route attacker code into the user's logged-in profile;
+// design log "evaluate REMOVED"). It is registered unconditionally — a
+// host without a desktop browser reports the tool as UNAVAILABLE at use
+// time (the neutral wording; the user is the one who installs a browser),
+// which the model relays to the user.
 func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 	return r.Register(Tool{
 		Name:        "web_browser",
@@ -65,14 +67,13 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type": "string",
-					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "evaluate", "listTabs", "closeTab"},
+					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "listTabs", "closeTab"},
 				},
 				"url":        map[string]any{"type": "string", "description": "openTab / navigate"},
 				"element":    map[string]any{"type": "string", "description": "click/type/select: #N id from the last read"},
 				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, drill-in scope for read, item selector for readItems, wait target for waitFor"},
 				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},
 				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
-				"expression": map[string]any{"type": "string", "description": "evaluate: JS expression; waitFor: truthy predicate"},
 				"direction":  map[string]any{"type": "string", "description": "scroll: down|up|top|bottom (default down)"},
 				"viewports":  map[string]any{"type": "number", "description": "scroll: viewport heights to move (default 1)"},
 				"tab":        map[string]any{"type": "string", "description": "tab id from listTabs (default: the current tab)"},
@@ -85,18 +86,19 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 }
 
 // webBrowserArgs is one web_browser call's arguments (the model's JSON).
+// There is deliberately NO expression/JS field: model-controlled JS
+// execution in the page was removed (security — see registerWebBrowser).
 type webBrowserArgs struct {
-	Command    string `json:"command"`
-	URL        string `json:"url"`
-	Element    string `json:"element"`
-	Selector   string `json:"selector"`
-	Text       string `json:"text"`
-	Value      string `json:"value"`
-	Expression string `json:"expression"`
-	Direction  string `json:"direction"`
-	Viewports  int    `json:"viewports"`
-	Tab        string `json:"tab"`
-	TimeoutMS  int    `json:"timeout_ms"`
+	Command   string `json:"command"`
+	URL       string `json:"url"`
+	Element   string `json:"element"`
+	Selector  string `json:"selector"`
+	Text      string `json:"text"`
+	Value     string `json:"value"`
+	Direction string `json:"direction"`
+	Viewports int    `json:"viewports"`
+	Tab       string `json:"tab"`
+	TimeoutMS int    `json:"timeout_ms"`
 }
 
 // executeWebBrowser is the web_browser executor bound to the browser manager.
@@ -104,7 +106,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 	return func(ctx context.Context, handle string, args json.RawMessage) (string, error) {
 		var a webBrowserArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			return fmt.Sprintf("invalid arguments: %v — the only required field is \"command\" (one of openTab, navigate, read, readItems, scroll, click, type, select, waitFor, evaluate, listTabs, closeTab).", err), nil
+			return fmt.Sprintf("invalid arguments: %v — the only required field is \"command\" (one of openTab, navigate, read, readItems, scroll, click, type, select, waitFor, listTabs, closeTab).", err), nil
 		}
 		// The per-user browser (lazy launch on first use). A host without a
 		// desktop browser lands here with the neutral unavailable report.
@@ -181,14 +183,13 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if err != nil {
 				return unavailable("scroll", err), nil
 			}
-			out := browser.ScrollReport(sr)
-			if n > 2 {
-				out += "\nNOTE: " + browser.LargeScrollNudge
-			}
-			return out, nil
+			return browser.ScrollReport(sr), nil
 		case "click", "type", "select":
 			return doElementAction(ctx, inst, a, handle)
 		case "waitFor":
+			if a.Selector == "" {
+				return "waitFor needs a selector (a CSS selector that should become present and visible).", nil
+			}
 			timeout := 10 * time.Second
 			if a.TimeoutMS > 0 {
 				timeout = time.Duration(a.TimeoutMS) * time.Millisecond
@@ -200,34 +201,14 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if err != nil {
 				return unavailable("waitFor", err), nil
 			}
-			ok, took, err := inst.Wait(ctx, tab, a.Selector, a.Expression, timeout)
+			ok, took, err := inst.Wait(ctx, tab, a.Selector, timeout)
 			if err != nil {
 				return unavailable("waitFor", err), nil
 			}
 			if ok {
-				return fmt.Sprintf("condition met after %s.", took.Round(time.Millisecond)), nil
+				return fmt.Sprintf("selector present and visible after %s.", took.Round(time.Millisecond)), nil
 			}
-			return fmt.Sprintf("the condition was not met within %s (the page state may be final — read to see what is actually there).", timeout), nil
-		case "evaluate":
-			if a.Expression == "" {
-				return "evaluate needs an expression.", nil
-			}
-			tab, err := inst.ResolveTab(ctx, a.Tab)
-			if err != nil {
-				return unavailable("evaluate", err), nil
-			}
-			session, err := inst.SessionFor(ctx, tab)
-			if err != nil {
-				return unavailable("evaluate", err), nil
-			}
-			// The large-scroll guard (the seatbelt — design log LAZY-LIST
-			// TIER): a move of more than two viewport heights appends the
-			// incremental-scrolling nudge to the result.
-			s, err := inst.EvaluateGuarded(ctx, session, a.Expression)
-			if err != nil {
-				return unavailable("evaluate", err), nil
-			}
-			return s, nil
+			return fmt.Sprintf("the selector was not present and visible within %s (the page state may be final — read to see what is actually there).", timeout), nil
 		case "listTabs":
 			tabs, err := inst.ListTabs(ctx)
 			if err != nil {
@@ -248,7 +229,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return fmt.Sprintf("closed tab %s.", id), nil
 		default:
-			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, readItems, scroll, click, type, select, waitFor, evaluate, listTabs, closeTab.", a.Command), nil
+			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, readItems, scroll, click, type, select, waitFor, listTabs, closeTab.", a.Command), nil
 		}
 	}
 }

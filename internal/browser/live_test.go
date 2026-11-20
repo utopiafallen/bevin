@@ -119,7 +119,7 @@ func TestWebBrowserLive(t *testing.T) {
 	if err := inst.ClickAt(ctx, session, x, y); err != nil {
 		t.Fatalf("ClickAt: %v", err)
 	}
-	ok, took, err := inst.Wait(ctx, tab.ID, "#after", "", 15*time.Second)
+	ok, took, err := inst.Wait(ctx, tab.ID, "#after", 15*time.Second)
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
@@ -202,7 +202,8 @@ func TestWebBrowserLive(t *testing.T) {
 // caused the original failure), readItems' visual order + in-call dedup,
 // the scroll command's one-viewport step + reached-bottom, the full
 // collection (a Go-side dedupe simulates the model's in-context diff),
-// and the evaluate large-scroll guard.
+// and the large-scroll nudge on a multi-viewport move (the seatbelt that
+// replaced the removed evaluate guard).
 func TestWebBrowserLazyListLive(t *testing.T) {
 	if os.Getenv("BEVIN_E2E_BROWSER") != "1" {
 		t.Skip("set BEVIN_E2E_BROWSER=1 to run the live browser e2e (needs a desktop host with a browser)")
@@ -405,17 +406,20 @@ for (let n = 1; n <= 20; n++) render(n);
 		t.Fatalf("fetches = %d, want >= 4 (the async lazy path must have been used)", f)
 	}
 
-	// The large-scroll guard: a big evaluate scroll (back to the top from
-	// the bottom) carries the incremental-scrolling nudge.
-	session, err := inst.SessionFor(ctx, tab.ID)
+	// The large-scroll nudge: a multi-viewport move (back to the top
+	// from the bottom of the lazy list) carries the step-one-viewport
+	// note. The assertion follows the MEASURED decision (the display
+	// height varies between boxes): the wiring is what this pins —
+	// Scroll sets Nudge from its own measurement and the report
+	// renders it.
+	sr2, err := inst.Scroll(ctx, tab.ID, "top", 1)
 	if err != nil {
-		t.Fatalf("SessionFor: %v", err)
+		t.Fatalf("scroll (top): %v", err)
 	}
-	out, err := inst.EvaluateGuarded(ctx, session, "window.scrollTo(0, 0); 'ok'")
-	if err != nil {
-		t.Fatalf("EvaluateGuarded: %v", err)
+	if want := largeScrollNudgeNeeded(sr2.Prev, sr2.Top, sr2.Vh); sr2.Nudge != want {
+		t.Fatalf("Nudge = %v, the decision says %v (prev=%.0f top=%.0f vh=%.0f)", sr2.Nudge, want, sr2.Prev, sr2.Top, sr2.Vh)
 	}
-	if !strings.Contains(out, "incremental scrolling") {
-		t.Fatalf("a big evaluate scroll must carry the nudge: %q", out)
+	if sr2.Nudge && !strings.Contains(ScrollReport(sr2), "step one viewport at a time instead") {
+		t.Fatalf("a nudged scroll must carry the nudge line: %q", ScrollReport(sr2))
 	}
 }

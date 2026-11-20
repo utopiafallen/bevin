@@ -284,22 +284,20 @@ func (i *Instance) waitForLoad(ctx context.Context, session string) error {
 	}
 }
 
-// Wait polls a condition until it holds or the timeout passes: a selector
-// (present + visible) or a JS expression (truthy). Returns how long it took.
-func (i *Instance) Wait(ctx context.Context, tabID, selector, expression string, timeout time.Duration) (bool, time.Duration, error) {
+// Wait polls until a selector is present + visible (or the timeout
+// passes). Returns how long it took. Selector-only: waitFor's expression
+// mode (model-controlled JS in the page) was removed 2026-11-19 —
+// security; the harness's own probes keep using Evaluate directly.
+func (i *Instance) Wait(ctx context.Context, tabID, selector string, timeout time.Duration) (bool, time.Duration, error) {
 	session, err := i.SessionFor(ctx, tabID)
 	if err != nil {
 		return false, 0, err
 	}
-	var probe string
-	if selector != "" {
-		sel, _ := json.Marshal(selector) // a JS string literal (quote-safe)
-		probe = fmt.Sprintf("(() => { const el = document.querySelector(%s); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()", sel)
-	} else if expression != "" {
-		probe = fmt.Sprintf("(() => { try { return !!(%s); } catch (e) { return false; } })()", expression)
-	} else {
-		return false, 0, fmt.Errorf("waitFor needs a selector or an expression")
+	if selector == "" {
+		return false, 0, fmt.Errorf("waitFor needs a selector")
 	}
+	sel, _ := json.Marshal(selector) // a JS string literal (quote-safe)
+	probe := fmt.Sprintf("(() => { const el = document.querySelector(%s); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()", sel)
 	start := time.Now()
 	deadline := start.Add(timeout)
 	for {

@@ -37,27 +37,26 @@ func TestSettleDecision(t *testing.T) {
 	}
 }
 
-// TestLargeScrollNote pins the guard's decision: the nudge when the move
-// exceeds two viewport heights (either direction), nothing below, and
-// nothing when the measurement itself is unusable (zero height).
-func TestLargeScrollNote(t *testing.T) {
-	start := scrollPos{Y: 0, H: 900}
-	if got := LargeScrollNote(start, scrollPos{Y: 1500, H: 900}); got != "" {
-		t.Errorf("1.67 viewports must not nudge: %q", got)
+// TestLargeScrollNudge pins the nudge's decision: the ACTUAL move
+// (not the requested count) exceeds two viewport heights, in either
+// direction, and a zero-height measurement never nudges.
+func TestLargeScrollNudge(t *testing.T) {
+	if largeScrollNudgeNeeded(0, 1500, 900) {
+		t.Errorf("1.67 viewports must not nudge")
 	}
-	if got := LargeScrollNote(start, scrollPos{Y: 1799, H: 900}); got != "" {
-		t.Errorf("just under two viewports must not nudge: %q", got)
+	if largeScrollNudgeNeeded(0, 1799, 900) {
+		t.Errorf("just under two viewports must not nudge")
 	}
-	if got := LargeScrollNote(start, scrollPos{Y: 2000, H: 900}); !strings.Contains(got, "incremental scrolling") {
-		t.Errorf("2.2 viewports must carry the nudge: %q", got)
+	if !largeScrollNudgeNeeded(0, 2000, 900) {
+		t.Errorf("2.2 viewports must nudge")
 	}
-	// Upward counts too.
-	if got := LargeScrollNote(scrollPos{Y: 3000, H: 900}, scrollPos{Y: 1000, H: 900}); !strings.Contains(got, "incremental scrolling") {
-		t.Errorf("a big upward move must nudge: %q", got)
+	// Upward counts too (a virtualized list unmounts above as well).
+	if !largeScrollNudgeNeeded(3000, 1000, 900) {
+		t.Errorf("a big upward move must nudge")
 	}
 	// A failed measurement (zero height) never nudges.
-	if got := LargeScrollNote(start, scrollPos{Y: 99999, H: 0}); got != "" {
-		t.Errorf("a zero-height measurement must not nudge: %q", got)
+	if largeScrollNudgeNeeded(0, 99999, 0) {
+		t.Errorf("a zero-height measurement must not nudge")
 	}
 }
 
@@ -85,6 +84,16 @@ func TestScrollReport(t *testing.T) {
 		if !strings.Contains(out2, want) {
 			t.Fatalf("ScrollReport (bottom) missing %q:\\n%s", want, out2)
 		}
+	}
+	if strings.Contains(out2, "NOTE:") {
+		t.Fatalf("a move that did not cover two viewports must not carry the nudge:\\n%s", out2)
+	}
+
+	// A large move (the nudge flag set by Scroll from the measured
+	// delta) carries the one-line seatbelt.
+	sr3 := &ScrollResult{Target: "document", Prev: 0, Top: 4500, Max: 4500, Vh: 900, Bottom: true, Nudge: true, Settled: true, Took: 600 * time.Millisecond}
+	if out3 := ScrollReport(sr3); !strings.Contains(out3, "step one viewport at a time instead") {
+		t.Fatalf("a nudged scroll must carry the nudge line:\\n%s", out3)
 	}
 }
 

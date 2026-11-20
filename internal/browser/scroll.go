@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 )
 
@@ -35,20 +34,24 @@ var scrollJS = `(() => {
   }
   const vh = el === de ? window.innerHeight : el.clientHeight;
   const max = el.scrollHeight - el.clientHeight;
+  const prev = el.scrollTop;
   let top;
   if (dir === "top") top = 0;
   else if (dir === "bottom") top = max;
   else top = Math.max(0, Math.min(max, el.scrollTop + (dir === "up" ? -1 : 1) * n * vh));
   if (el === de) window.scrollTo(0, top); else el.scrollTop = top;
-  return JSON.stringify({ target: name, top: el.scrollTop, max, vh });
+  return JSON.stringify({ target: name, top: el.scrollTop, prev, max, vh });
 })()`
 
 // ScrollResult is one scroll call's outcome (before the tool renders it).
 type ScrollResult struct {
 	Target  string // "document" or "<tag>#<id>"
+	Prev    float64 // the scroll position before the move
 	Top     float64 // the new scroll position
 	Max     float64 // the furthest scrollable position
+	Vh      float64 // the target's viewport height
 	Bottom  bool    // the bottom was reached (nothing more below)
+	Nudge   bool    // the move was large (>2 viewports) — the seatbelt line
 	Settled bool
 	Took    time.Duration
 }
@@ -77,7 +80,9 @@ func (i *Instance) Scroll(ctx context.Context, tabID, direction string, viewport
 		Error  string  `json:"error"`
 		Target string  `json:"target"`
 		Top    float64 `json:"top"`
+		Prev   float64 `json:"prev"`
 		Max    float64 `json:"max"`
+		Vh     float64 `json:"vh"`
 	}
 	if err := json.Unmarshal([]byte(body), &raw); err != nil {
 		return nil, fmt.Errorf("parsing the scroll result: %w", err)
@@ -93,11 +98,12 @@ func (i *Instance) Scroll(ctx context.Context, tabID, direction string, viewport
 	// read would race the fetch (the TOCTOU behind the original lazy-
 	// list failure, one tick later). Wait up to triggerGrace for in-
 	// flight activity to appear and hand off to the settle the moment it
-	// does; a trigger that never comes costs the full grace before the
-	// quiet window runs. Deliberately scoped to the scroll command — it
-	// is the one place the harness KNOWS the viewport moved; an
-	// evaluate-based scroll keeps best-effort settling (the big-scroll
-	// nudge exists for exactly this reason).
+	// it does; a trigger that never comes costs the full grace before
+	// the quiet window runs. Deliberately scoped to the scroll command
+	// — it is the one place the harness KNOWS the viewport moved (there
+	// is no model-controlled JS scroll path anymore — evaluate was
+	// removed 2026-11-19; the nudge covers its old job on a
+	// multi-viewport scroll command).
 	graceDeadline := time.Now().Add(triggerGrace)
 	for i.netCounterFor(session).count() == 0 {
 		if time.Now().After(graceDeadline) {
@@ -115,9 +121,12 @@ func (i *Instance) Scroll(ctx context.Context, tabID, direction string, viewport
 	}
 	return &ScrollResult{
 		Target:  raw.Target,
+		Prev:    raw.Prev,
 		Top:     raw.Top,
 		Max:     raw.Max,
+		Vh:      raw.Vh,
 		Bottom:  raw.Top >= raw.Max-2,
+		Nudge:   largeScrollNudgeNeeded(raw.Prev, raw.Top, raw.Vh),
 		Settled: settled,
 		Took:    took,
 	}, nil
@@ -132,60 +141,36 @@ func ScrollReport(sr *ScrollResult) string {
 		out += " (more content may be below)"
 	}
 	out += fmt.Sprintf(" — page %s", settleWord(sr.Settled, sr.Took))
+	if sr.Nudge {
+		out += "\nNOTE: " + LargeScrollNudge
+	}
 	return out
 }
 
-// scrollPos is the document scroll position + viewport height (the
-// large-scroll guard's measurement).
-type scrollPos struct {
-	Y float64 `json:"y"`
-	H float64 `json:"h"`
-}
-
-const scrollPosJS = `(() => {
-  const de = document.scrollingElement || document.documentElement;
-  return JSON.stringify({ y: de.scrollTop, h: window.innerHeight });
-})()`
-
-// ScrollPos reports the document scroll position + the viewport height
-// (the large-scroll guard's measurement). The probe returns a JSON STRING
-// (the pageCleanerJS pattern) — evaluateString unwraps it, then the inner
-// object is parsed.
-func (i *Instance) ScrollPos(ctx context.Context, session string) (scrollPos, error) {
-	s, err := i.evaluateString(ctx, session, scrollPosJS)
-	if err != nil {
-		return scrollPos{}, err
-	}
-	var p scrollPos
-	if err := json.Unmarshal([]byte(s), &p); err != nil {
-		return scrollPos{}, fmt.Errorf("parsing the scroll position: %w", err)
-	}
-	return p, nil
-}
-
 // LargeScrollNudge is the one-line seatbelt (the design log's LAZY-LIST
-// TIER): appended when a single move covered more than two viewport
-// heights — the move that skips un-rendered lazy content. One line, no
-// capability removed.
-const LargeScrollNudge = "large scroll on a page that may have lazy content — content between the start and end positions may not have rendered yet; incremental scrolling is recommended (the scroll command steps one viewport and settles)."
+// TIER): appended when a single scroll move covered more than two
+// viewport heights — the move that skips un-rendered lazy content (and
+// the unmounting of a virtualized list). One line, no capability removed.
+const LargeScrollNudge = "moved more than two viewports at once on a page that may have lazy content — content between the start and end positions may not have rendered; step one viewport at a time instead."
 
-// LargeScrollNote is the guard's decision (pure, unit-tested): the nudge
-// when |after - before| exceeds two viewport heights, else "" (a
+// largeScrollNudgeNeeded is the nudge's decision (pure, unit-tested): the
+// ACTUAL move (|top - prev|, measured by the scroll itself) exceeds two
+// viewport heights — in either direction. The requested count is not the
+// criterion (a five-viewport request at the bottom of the page moves
+// nothing and must not nudge; the same request on a deep page does). A
 // zero-height measurement never nudges — the guard must not fire on
-// itself).
-func LargeScrollNote(before, after scrollPos) string {
-	if after.H > 0 && math.Abs(after.Y-before.Y) > 2*after.H {
-		return "\nNOTE: " + LargeScrollNudge
+// itself.
+func largeScrollNudgeNeeded(prev, top, vh float64) bool {
+	d := top - prev
+	if d < 0 {
+		d = -d
 	}
-	return ""
+	return vh > 0 && d > 2*vh
 }
-
-// evaluateResultCapChars bounds an evaluate's returned value.
-const evaluateResultCapChars = 8000
 
 // scrollMaxViewports caps one scroll command's viewports (the loop is the
-// model's; a single call moving the whole list would be the big scroll the
-// guard warns about).
+// model's; a single call moving the whole list is the big scroll the
+// nudge warns about).
 const scrollMaxViewports = 10
 
 // triggerGrace bounds the post-scroll wait for lazy work to appear in the
@@ -195,25 +180,3 @@ const scrollMaxViewports = 10
 // scroll that triggers nothing pays only the grace before the settle's
 // quiet window runs.
 const triggerGrace = 250 * time.Millisecond
-
-// EvaluateGuarded runs an expression with the large-scroll guard: the
-// scroll position is captured before and after, and a move of more than
-// two viewport heights appends the nudge to the result. A guard
-// measurement that fails is SKIPPED (never fatal — the expression result
-// is what matters). The value is capped at evaluateResultCapChars.
-func (i *Instance) EvaluateGuarded(ctx context.Context, session, expression string) (string, error) {
-	before, berr := i.ScrollPos(ctx, session)
-	v, err := i.Evaluate(ctx, session, expression)
-	if err != nil {
-		return "", err
-	}
-	after, aerr := i.ScrollPos(ctx, session)
-	s := string(v)
-	if len(s) > evaluateResultCapChars {
-		s = s[:evaluateResultCapChars] + "…[truncated]"
-	}
-	if berr == nil && aerr == nil {
-		s += LargeScrollNote(before, after)
-	}
-	return s, nil
-}
