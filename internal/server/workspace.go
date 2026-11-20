@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +51,8 @@ import (
 
 // wsMaxUploadBytes caps a single upload (the per-workspace global cap is
 // the server config's MaxWorkspaceSize; this keeps one request bounded).
-const wsMaxUploadBytes = 256 << 20
+// A var (not a const) so the tests can shrink it.
+var wsMaxUploadBytes int64 = 256 << 20
 
 // wsWalkLimit caps how many entries a workspace walk returns (a personal
 // server will never get close; this is a runaway-symlink/clone guard).
@@ -161,6 +163,19 @@ func refreshWorkspaceSize(us *store.UserStore, ws *store.Workspace) {
 	}
 }
 
+// windowsPathOK rejects a path segment that, on Windows, would target an
+// alternate data stream: a colon in a name is the NTFS ADS separator
+// ("file.txt:evil" — content invisible to listings, retrievable by name).
+// Colons are legal filename characters on other OSes, so it is a no-op
+// there. (The agent's file tools carry the same check; the server package
+// is not importable from there, so each keeps its own copy.)
+func windowsPathOK(p string) error {
+	if runtime.GOOS == "windows" && strings.ContainsRune(p, ':') {
+		return errors.New("the name must not contain ':' (on Windows a colon is the NTFS data-stream separator)")
+	}
+	return nil
+}
+
 // safeRelPath validates a client-supplied workspace-relative path:
 // forward-slash, not absolute, no ".." escapes ("" = the workspace root).
 func safeRelPath(p string) (string, error) {
@@ -170,6 +185,9 @@ func safeRelPath(p string) (string, error) {
 	}
 	if strings.ContainsRune(p, '\x00') {
 		return "", errors.New("invalid path")
+	}
+	if err := windowsPathOK(p); err != nil {
+		return "", err
 	}
 	p = strings.ReplaceAll(p, "\\", "/")
 	if strings.HasPrefix(p, "/") {
@@ -368,6 +386,10 @@ func (a *App) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if maxSize <= 0 {
 		maxSize = config.DefaultMaxWorkspaceSize
 	}
+	if currentTotal >= maxSize {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "the workspace is at its size limit"})
+		return
+	}
 	h, fh, err := r.FormFile("file")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing file field (multipart form: file, path)"})
@@ -377,6 +399,10 @@ func (a *App) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	name := path.Base(filepath.Clean("/" + fh.Filename))
 	if name == "." || name == ".." || name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "the file has no name"})
+		return
+	}
+	if err := windowsPathOK(name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	target, err := joinSafe(ws.FolderPath, path.Join(dirRel, name))
@@ -401,35 +427,39 @@ func (a *App) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hasher := sha256.New()
+	// The caps are enforced MID-STREAM (security 2026-11-20): the declared
+	// ContentLength check at the top is only the fast path — a chunked
+	// request has none, so without this the copy could write unbounded
+	// bytes to disk. The per-file cap stops the source reader; the budget
+	// writer stops the moment the workspace would cross its limit
+	// (nothing past the crossing reaches disk).
+	src := io.LimitReader(h, wsMaxUploadBytes+1)
+	capW := &uploadCapWriter{w: out, limit: maxSize - currentTotal}
+	mw := io.MultiWriter(capW, hasher)
 	head := make([]byte, 512)
-	n, _ := h.Read(head)
+	n, _ := src.Read(head)
 	mimeDet := http.DetectContentType(head[:n])
-	var written int64
 	if n > 0 {
-		if _, err := out.Write(head[:n]); err != nil {
+		if _, err := mw.Write(head[:n]); err != nil {
 			out.Close()
 			os.Remove(tmp)
-			log.Printf("workspace upload: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "upload failed"})
+			finishUploadError(w, err)
 			return
 		}
-		hasher.Write(head[:n])
-		written += int64(n)
 	}
-	cw, cerr := io.Copy(io.MultiWriter(out, hasher), h)
+	cw, cerr := io.Copy(mw, src)
 	if cl := out.Close(); cerr == nil {
 		cerr = cl
 	}
 	if cerr != nil {
 		os.Remove(tmp)
-		log.Printf("workspace upload: %v", cerr)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "upload failed"})
+		finishUploadError(w, cerr)
 		return
 	}
-	written += cw
-	if written+currentTotal > maxSize {
+	written := int64(n) + cw
+	if written > wsMaxUploadBytes {
 		os.Remove(tmp)
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "upload would exceed the workspace size limit"})
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": fmt.Sprintf("upload too large (max %d bytes per file)", wsMaxUploadBytes)})
 		return
 	}
 	if err := os.Rename(tmp, target); err != nil {
@@ -453,6 +483,44 @@ func (a *App) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		"file": map[string]any{"name": name, "path": rel, "size": written, "mime": mimeDet, "kind": kind},
 		"size": currentTotal + written,
 	})
+}
+
+// errUploadBudgetExceeded is the mid-stream budget crossing (an uploadCap
+// writer stopped the copy): a 413, not a 500 — the request's fault.
+var errUploadBudgetExceeded = errors.New("upload would exceed the workspace size limit")
+
+// finishUploadError renders a failed upload copy: a budget crossing is a
+// 413 (the request's fault), anything else a 500 (logged).
+func finishUploadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errUploadBudgetExceeded) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "upload would exceed the workspace size limit"})
+		return
+	}
+	log.Printf("workspace upload: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "upload failed"})
+}
+
+// uploadCapWriter stops a workspace upload the moment a write would cross
+// the remaining budget (the incremental half of the upload cap — see the
+// mid-stream comment in uploadWorkspaceFile).
+type uploadCapWriter struct {
+	w        io.Writer
+	written  int64
+	limit    int64
+	exceeded bool
+}
+
+func (c *uploadCapWriter) Write(p []byte) (int, error) {
+	if c.exceeded {
+		return 0, errUploadBudgetExceeded
+	}
+	if c.limit <= 0 || c.written+int64(len(p)) > c.limit {
+		c.exceeded = true
+		return 0, errUploadBudgetExceeded
+	}
+	n, err := c.w.Write(p)
+	c.written += int64(n)
+	return n, err
 }
 
 // GET /api/workspaces/{id}/files/raw?path=... — download a workspace
