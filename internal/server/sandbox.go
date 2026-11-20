@@ -43,7 +43,7 @@ func (a *App) buildSandbox(cfg *config.ServerConfig) {
 }
 
 func sandboxConfigFrom(c config.Sandbox) sandbox.Config {
-	return sandbox.Config{Enabled: c.Enabled, Network: c.Network, Cores: c.Cores, MemoryMB: c.MemoryMB}
+	return sandbox.Config{Enabled: c.Enabled, Network: c.Network, Cores: c.Cores, MemoryMB: c.MemoryMB, DiskMB: c.DiskMB}
 }
 
 // sandboxBackend returns the live backend (nil = unsupported platform).

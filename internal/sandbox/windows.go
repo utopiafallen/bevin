@@ -64,6 +64,40 @@ func newWindows(dataDir string, cfg Config) *windowsBackend {
 	return &windowsBackend{dataDir: dataDir, cfg: cfg}
 }
 
+// windowsState is the per-user bookkeeping kept in state.json (next to the
+// rwlayer, mirroring the linux backend). It records the container-storage
+// baseline so the disk-usage cap counts GROWTH over it.
+type windowsState struct {
+	// BaseBytes is the rwlayer size captured at first creation — the
+	// baseline for the disk cap's growth-over-baseline. The rwlayer starts
+	// empty (the base OS lives in the read-only base layers), so this is ~0
+	// at creation and the cap effectively counts the whole rwlayer.
+	BaseBytes int64 `json:"base_bytes"`
+}
+
+func (b *windowsBackend) statePath(handle string) string {
+	return filepath.Join(UserSandboxDir(b.dataDir, handle), "state.json")
+}
+
+// captureBaseline records the rwlayer size in state.json, once, at first
+// creation — the baseline for the disk cap's growth-over-baseline.
+// Idempotency is by state.json EXISTENCE, NOT base_bytes != 0: the rwlayer
+// starts empty, so the baseline is legitimately 0 and a "!= 0" guard would
+// re-capture on every re-creation and reset the counter to the current
+// (grown) size. Remove deletes the whole per-user sandbox dir (state.json
+// included), so a Remove+re-create re-captures from scratch (correct).
+func (b *windowsBackend) captureBaseline(handle string) {
+	if _, err := os.Stat(b.statePath(handle)); err == nil {
+		return // already captured
+	}
+	st := windowsState{BaseBytes: DirSize(b.rwLayerDir(handle))}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(b.statePath(handle), data, 0o600)
+}
+
 // Runtime reports whether the windows container runtime is ready: bevin
 // elevated (HCS requires admin), the Host Compute Service running, the
 // hypervisor active (Hyper-V isolation). The base container image is a
@@ -257,6 +291,10 @@ func (b *windowsBackend) buildConfig(handle string) (*hcsshim.ContainerConfig, e
 	if err := os.MkdirAll(rw, 0o755); err != nil {
 		return nil, err
 	}
+	// Capture the container-storage baseline (the rwlayer, empty here) for
+	// the disk cap's growth-over-baseline. Best-effort (a failure leaves the
+	// baseline 0 → the cap counts the whole storage, a safe over-estimate).
+	b.captureBaseline(handle)
 	if err := os.MkdirAll(UserDataDir(b.dataDir, handle), 0o755); err != nil {
 		return nil, err
 	}

@@ -306,6 +306,9 @@ func (a *App) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = u
+	// A delete frees space — re-check immediately so the frozen state (and
+	// the disk page) reflect the new usage without waiting for the next scan.
+	a.recheckDisk(u.Handle)
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
@@ -500,7 +503,7 @@ func (a *App) workspaceFileRaw(w http.ResponseWriter, r *http.Request) {
 // directory from the workspace (disk first, then the metadata rows for
 // the path and everything beneath it).
 func (a *App) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	_, us, ok := a.workspaceStore(w, r)
+	u, us, ok := a.workspaceStore(w, r)
 	if !ok {
 		return
 	}
@@ -531,6 +534,9 @@ func (a *App) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		log.Printf("workspace file metadata delete: %v", err)
 	}
 	refreshWorkspaceSize(us, ws)
+	// A delete frees space — re-check immediately so the frozen state (and
+	// the disk page) reflect the new usage without waiting for the next scan.
+	a.recheckDisk(u.Handle)
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 

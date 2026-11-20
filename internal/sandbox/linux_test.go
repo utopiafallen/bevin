@@ -306,6 +306,32 @@ func TestLinuxEnsurePrivateNetwork(t *testing.T) {
 	}
 }
 
+// TestLinuxDropInSoftCaps locks in the resource-limit policy in the unit
+// drop-in: RAM is a SOFT cap (MemoryHigh — the kernel throttles + reclaims
+// above the threshold, but never OOM-kills the container), so a hard MemoryMax
+// must never appear; CPU is a quota (CPUQuota). At the 0 = platform-default
+// settings both directives are omitted.
+func TestLinuxDropInSoftCaps(t *testing.T) {
+	dir := t.TempDir()
+	// Full knobs: the soft RAM cap + the CPU quota are both present, and there
+	// is NO hard memory cap.
+	di := dropInContent(dir, "alice", "veth", 2048, 4)
+	if !strings.Contains(di, "MemoryHigh=2048M") {
+		t.Fatalf("drop-in =\n%s\nmissing the soft RAM cap MemoryHigh=2048M", di)
+	}
+	if strings.Contains(di, "MemoryMax") {
+		t.Fatalf("drop-in =\n%smust NOT set a hard MemoryMax (a soft cap must not OOM-kill the container)", di)
+	}
+	if !strings.Contains(di, "CPUQuota=400%") {
+		t.Fatalf("drop-in =\n%s\nmissing the CPU quota CPUQuota=400%% (4 cores)", di)
+	}
+	// Platform defaults (0/0): no resource directives at all.
+	plain := dropInContent(dir, "alice", "private", 0, 0)
+	if strings.Contains(plain, "MemoryHigh") || strings.Contains(plain, "CPUQuota") {
+		t.Fatalf("drop-in =\n%smust omit the resource directives at the 0 = platform-default settings", plain)
+	}
+}
+
 func TestLinuxSubnetAllocationIsUnique(t *testing.T) {
 	b, _, dataDir := newTestBackend(t)
 	ctx := context.Background()

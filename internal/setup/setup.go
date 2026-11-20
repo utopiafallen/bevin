@@ -247,7 +247,7 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 // derived embedder are preserved as-is and a model/email edit is a fast,
 // side-effect-free write. The caller hot-reloads the running agent with the
 // returned config (there is no in-memory wizard state involved).
-func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth, serverBase *string) (*config.ServerConfig, error) {
+func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth, serverBase *string, sandbox *config.Sandbox) (*config.ServerConfig, error) {
 	cfg, err := config.Load(m.dataDir)
 	if err != nil {
 		return nil, err
@@ -277,6 +277,14 @@ func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, ema
 	}
 	if serverBase != nil {
 		cfg.BaseURI = strings.TrimSpace(*serverBase)
+	}
+	if sandbox != nil {
+		// Only the resource knobs are admin-editable: Enabled is mandatory
+		// (there is no off switch) and Network is OS-specific — both are
+		// preserved, never overwritten by an edit.
+		cfg.Sandbox.Cores = sandbox.Cores
+		cfg.Sandbox.MemoryMB = sandbox.MemoryMB
+		cfg.Sandbox.DiskMB = sandbox.DiskMB
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

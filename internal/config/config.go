@@ -115,6 +115,14 @@ type Sandbox struct {
 	// MemoryMB is the per-container memory cap in MiB (0 = platform
 	// default).
 	MemoryMB int `toml:"memory_mb" json:"memory_mb"`
+	// DiskMB is the per-user DISK usage cap in MiB (0 = no cap). It covers
+	// the user's data dir (counted in full) + their container storage's
+	// GROWTH OVER a baseline captured at creation (the base OS image does
+	// not count). Enforced by a host-side periodic check (the DiskMonitor)
+	// + a server-side diskGate (a frozen user is blocked from work and the
+	// UI redirects to the disk cleanup page) — see the design log's
+	// "PER-CONTAINER RESOURCE LIMITS + DISK USAGE CAP" section.
+	DiskMB int `toml:"disk_mb" json:"disk_mb"`
 }
 
 // PublicURL derives an absolute public link for a server-relative path
@@ -417,6 +425,9 @@ func (c *ServerConfig) Validate() error {
 		}
 		if c.Sandbox.MemoryMB < 0 || c.Sandbox.MemoryMB > 1048576 {
 			return fmt.Errorf("sandbox.memory_mb: must be 0 (platform default) or 1-1048576 (got %d)", c.Sandbox.MemoryMB)
+		}
+		if c.Sandbox.DiskMB < 0 || c.Sandbox.DiskMB > 1048576 {
+			return fmt.Errorf("sandbox.disk_mb: must be 0 (no cap) or 1-1048576 (got %d)", c.Sandbox.DiskMB)
 		}
 	}
 	// Internal model IDs are what everything references (slot pools,

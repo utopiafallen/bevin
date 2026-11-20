@@ -57,7 +57,16 @@ func (a *App) adminStatus(w http.ResponseWriter, _ *http.Request) {
 		"time":   time.Now().UTC().Format(time.RFC3339),
 		"pools":  pools,
 		"totals": map[string]any{"slots": totalSlots, "busy": busy, "queued": queued},
-		"server": map[string]any{"data_dir": a.dataDir, "bind": a.liveCfg().Bind, "base_uri": a.liveCfg().BaseURI},
+		"server": map[string]any{
+			"data_dir": a.dataDir,
+			"bind":     a.liveCfg().Bind,
+			"base_uri": a.liveCfg().BaseURI,
+			"sandbox": map[string]any{
+				"cores":     a.liveCfg().Sandbox.Cores,
+				"memory_mb": a.liveCfg().Sandbox.MemoryMB,
+				"disk_mb":   a.liveCfg().Sandbox.DiskMB,
+			},
+		},
 	})
 }
 
@@ -175,6 +184,14 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"server": map[string]any{
 			"base_uri": cfg.BaseURI,
 		},
+		// The per-container resource knobs (the admin Server page's sandbox
+		// section). Only the resource knobs are editable — Enabled is
+		// mandatory and Network is OS-specific (both read-only here).
+		"sandbox": map[string]any{
+			"cores":     cfg.Sandbox.Cores,
+			"memory_mb": cfg.Sandbox.MemoryMB,
+			"disk_mb":   cfg.Sandbox.DiskMB,
+		},
 	})
 }
 
@@ -185,11 +202,12 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 // never given the stored secret to echo back).
 func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	var p struct {
-		Models *[]config.Model    `json:"models"`
-		Aux    *[]config.AuxModel `json:"aux"`
-		Email  *config.Email      `json:"email"`
-		OAuth  *config.OAuth      `json:"oauth"`
-		Server *struct {
+		Models  *[]config.Model    `json:"models"`
+		Aux     *[]config.AuxModel `json:"aux"`
+		Email   *config.Email      `json:"email"`
+		OAuth   *config.OAuth      `json:"oauth"`
+		Sandbox *config.Sandbox    `json:"sandbox"`
+		Server  *struct {
 			BaseURI *string `json:"base_uri"`
 		} `json:"server"`
 	}
@@ -201,7 +219,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	if p.Server != nil {
 		serverBase = p.Server.BaseURI // nil = area present but no key = no change
 	}
-	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && serverBase == nil {
+	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && p.Sandbox == nil && serverBase == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to save"})
 		return
 	}
@@ -215,7 +233,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 			p.OAuth.ClientSecret = cur.Auth.OAuth.ClientSecret // blank = keep the stored one
 		}
 	}
-	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase)
+	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

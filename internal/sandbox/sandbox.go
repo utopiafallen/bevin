@@ -24,8 +24,10 @@ package sandbox
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -84,6 +86,10 @@ type Config struct {
 	// MemoryMB is the per-container memory cap in MiB (0 = platform
 	// default).
 	MemoryMB int `toml:"memory_mb" json:"memory_mb"`
+	// DiskMB is the per-user disk usage cap in MiB (0 = no cap). It is
+	// enforced by the server's DiskMonitor + diskGate (host-side), not by
+	// the backends themselves — see the design log's disk cap section.
+	DiskMB int `toml:"disk_mb" json:"disk_mb"`
 }
 
 // Backend is a per-OS container runtime.
@@ -174,4 +180,41 @@ func MachineName(handle string) string {
 	}
 	sum := sha256.Sum256([]byte("bevin-" + handle))
 	return fmt.Sprintf("b%x", sum[:5])
+}
+
+// DirSize returns the total size in bytes of all regular files under dir
+// (recursive). Unreadable entries are skipped (a permission hiccup must not
+// fail the walk — it would poison a disk-cap baseline or a monitor pass).
+// Shared (all platforms): the sandbox backends use it to capture the
+// container-storage baseline, and the server's DiskMonitor uses it for the
+// per-user disk-usage check.
+func DirSize(dir string) int64 {
+	var total int64
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // unreadable entry: skip
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// ContainerBaseBytes returns the per-user container-storage baseline (bytes)
+// captured at creation, 0 if unknown. It reads the per-user state file
+// (written by the backend's Ensure, which records base_bytes on first
+// creation). The DiskMonitor uses it for the growth-over-baseline disk cap.
+// Platform-agnostic: both backends record base_bytes in state.json.
+func ContainerBaseBytes(dataDir, handle string) int64 {
+	data, err := os.ReadFile(filepath.Join(UserSandboxDir(dataDir, handle), "state.json"))
+	if err != nil {
+		return 0
+	}
+	var st struct{ BaseBytes int64 `json:"base_bytes"` }
+	if err := json.Unmarshal(data, &st); err != nil {
+		return 0
+	}
+	return st.BaseBytes
 }

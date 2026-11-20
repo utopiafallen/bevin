@@ -49,6 +49,10 @@ type Scheduler struct {
 	// slotsFor returns a model's current slot count from live config (the
 	// admin can change it while running), never below 1.
 	slotsFor func(modelID string) int
+	// frozen reports whether a user is over their disk cap (their queued work
+	// is deferred until they're back under it). Nil-safe (a nil callback
+	// defers no one) — installed by the host's disk monitor.
+	frozen func(handle string) bool
 }
 
 type pool struct {
@@ -90,15 +94,16 @@ func (s *Scheduler) Submit(ctx context.Context, info JobInfo, run func(context.C
 	j := &job{info: info, run: run, ctx: jobCtx, cancel: cancel, start: make(chan struct{}), queuedAt: time.Now()}
 	s.mu.Lock()
 	q := s.poolFor(info.ModelID)
-	if q.busy < s.slotsFor(info.ModelID) {
-		// A slot is free: take it now.
+	if q.busy < s.slotsFor(info.ModelID) && !s.isFrozen(info.Handle) {
+		// A slot is free AND the user is not frozen: take it now.
 		q.busy++
 		s.mu.Unlock()
 		defer s.release(info.ModelID)
 		defer cancel()
 		return run(jobCtx)
 	}
-	// The pool is full: wait in the FIFO queue.
+	// The pool is full OR the user is frozen (over their disk cap — their
+	// work stays queued until they're back under it): wait in the FIFO queue.
 	q.queue = append(q.queue, j)
 	s.mu.Unlock()
 	select {
@@ -140,13 +145,29 @@ func (s *Scheduler) release(modelID string) {
 }
 
 // startNextLocked starts queued jobs while slots are free. Callers hold s.mu.
+// A frozen user's job is DEFERRED (re-queued to the end) rather than granted a
+// slot — so their (rare) queued turn doesn't starve the pool's other users;
+// one full pass of deferrals caps the loop so an all-frozen queue can't spin.
 func (s *Scheduler) startNextLocked(modelID string) {
 	q := s.pools[modelID]
+	initial := len(q.queue)
+	deferred := 0
 	for q.busy < s.slotsFor(modelID) && len(q.queue) > 0 {
 		j := q.queue[0]
 		q.queue = q.queue[1:]
 		if j.started {
 			continue // canceled while waiting
+		}
+		if s.isFrozen(j.info.Handle) {
+			// Defer the frozen job to the end (keep it queued until the user
+			// is back under the cap). Cap deferrals to one full pass.
+			if deferred >= initial {
+				q.queue = append(q.queue, j) // all-frozen: put it back, stop
+				break
+			}
+			q.queue = append(q.queue, j)
+			deferred++
+			continue
 		}
 		j.started = true
 		q.busy++
@@ -164,6 +185,32 @@ func (s *Scheduler) Poke(modelID string) {
 		return
 	}
 	s.startNextLocked(modelID)
+}
+
+// PokeAll re-dispatches every pool (e.g. when a user unfreezes: their deferred
+// queued work can now run in any pool it's queued in). A no-op for pools with
+// nothing queued.
+func (s *Scheduler) PokeAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.pools {
+		s.startNextLocked(id)
+	}
+}
+
+// isFrozen reports whether a user is over their disk cap (their queued work is
+// deferred until they're back under it). Callers hold s.mu. Nil-safe.
+func (s *Scheduler) isFrozen(handle string) bool {
+	return s.frozen != nil && s.frozen(handle)
+}
+
+// SetFrozen installs the disk-cap callback (a user over their cap has their
+// queued work deferred). A nil callback defers no one. Installed by the host's
+// disk monitor; safe to call any time (read under s.mu on each dispatch).
+func (s *Scheduler) SetFrozen(f func(handle string) bool) {
+	s.mu.Lock()
+	s.frozen = f
+	s.mu.Unlock()
 }
 
 // Load returns the live load of every pool that has seen work (busy slots +

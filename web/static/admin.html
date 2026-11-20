@@ -749,6 +749,39 @@ function renderServer() {
   };
   c2.append(btn);
   m.append(c2);
+
+  // Per-container resource limits. RAM is a SOFT cap (the container is never
+  // killed on breach — the guest may page / kill its own processes); CPU is a
+  // per-container quota; disk is the per-user storage cap (0 = no cap, over
+  // which the user is blocked from new work until they clean up).
+  const c3 = document.createElement("div");
+  c3.className = "card";
+  c3.innerHTML = "<h2>Per-container limits</h2>";
+  const sb = STATUS.server.sandbox || { cores: 0, memory_mb: 0, disk_mb: 0 };
+  const num = (label, key, help) => {
+    const l = document.createElement("label"); l.textContent = label; c3.append(l);
+    const i = document.createElement("input"); i.type = "number"; i.min = "0"; i.value = sb[key] || 0; c3.append(i);
+    c3.append(elP(help));
+    return i;
+  };
+  const coresInp = num("CPU cores", "cores", "Per-container CPU quota (0 = platform default).");
+  const memInp = num("Memory (MiB)", "memory_mb", "Per-container RAM cap in MiB (0 = platform default). SOFT — the container is never killed on breach.");
+  const diskInp = num("Disk (MiB)", "disk_mb", "Per-user disk usage cap in MiB (0 = no cap). Over it, the user is blocked from new work until they clean up back under 90%.");
+  const sbtn = document.createElement("button");
+  sbtn.textContent = "Save";
+  sbtn.onclick = async () => {
+    sbtn.disabled = true;
+    try {
+      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sandbox: { cores: parseInt(coresInp.value, 10) || 0, memory_mb: parseInt(memInp.value, 10) || 0, disk_mb: parseInt(diskInp.value, 10) || 0 } }) });
+      await loadStatus();
+      renderServer();
+    } catch (e) {
+      alert("Save failed: " + e.message);
+      sbtn.disabled = false;
+    }
+  };
+  c3.append(sbtn);
+  m.append(c3);
 }
 
 function elP(txt) { const p = document.createElement("p"); p.className = "muted"; p.textContent = txt; return p; }

@@ -716,6 +716,18 @@
       }
     });
 
+    // diskRedirect sends the user to the disk cleanup page when the server
+    // blocks the request because they're over their disk cap (413 +
+    // disk_exceeded). Returns true if it redirected (the caller should stop).
+    // Only a 413 reads the body (to read the flag); any other status returns
+    // false with the body untouched.
+    async function diskRedirect(r) {
+      if (r.status !== 413) return false;
+      var j = {}; try { j = await r.json(); } catch (e) {}
+      if (j.disk_exceeded) { location.href = "/disk"; return true; }
+      return false;
+    }
+
     async function sendChat() {
       if (sending) return;
       var input = $("message");
@@ -747,6 +759,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: title })
           });
+          if (await diskRedirect(cr)) throw new Error("disk exceeded");
           if (!cr.ok) { var je = {}; try { je = await cr.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + cr.status)); }
           convID = (await cr.json()).id;
           try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
@@ -758,6 +771,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text })
         });
+        if (await diskRedirect(resp)) throw new Error("disk exceeded");
         if (!resp.ok) { var je2 = {}; try { je2 = await resp.json(); } catch (e) {} throw new Error(je2.error || ("HTTP " + resp.status)); }
 
         var reader = resp.body.getReader();
@@ -1532,6 +1546,7 @@
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title: title, description: desc })
         });
+        if (await diskRedirect(r)) throw new Error("disk exceeded");
         var d = await r.json();
         if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
         $("wsTitle").value = "";
@@ -1554,6 +1569,7 @@
       $("wsMsg").textContent = "Uploading " + f.name + "…";
       try {
         var r = await fetch("/api/workspaces/" + ws.current + "/files", { method: "POST", body: fd });
+        if (await diskRedirect(r)) throw new Error("disk exceeded");
         var d = await r.json();
         if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
         $("wsMsg").textContent = "";

@@ -68,7 +68,7 @@ func (m *Manager) SandboxStatus(ctx context.Context) SandboxStatus {
 	// always enabled (per-user containers are mandatory).
 	cfg := sandbox.Config{Enabled: true, Network: "veth"}
 	if c, err := config.Load(m.dataDir); err == nil {
-		cfg = sandbox.Config{Enabled: true, Network: c.Sandbox.Network, Cores: c.Sandbox.Cores, MemoryMB: c.Sandbox.MemoryMB}
+		cfg = sandbox.Config{Enabled: true, Network: c.Sandbox.Network, Cores: c.Sandbox.Cores, MemoryMB: c.Sandbox.MemoryMB, DiskMB: c.Sandbox.DiskMB}
 	}
 	rt := sandbox.Check(ctx, m.dataDir, cfg)
 	base := m.baseState()

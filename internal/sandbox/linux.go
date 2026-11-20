@@ -54,6 +54,11 @@ DNS=8.8.8.8
 type linuxState struct {
 	Subnet    int    `json:"subnet"` // veth subnet index: 10.42.<N>.0/24
 	CreatedAt string `json:"created_at"`
+	// BaseBytes is the container-storage size captured at first creation —
+	// the baseline for the disk cap's growth-over-baseline (the base OS
+	// image does not count against the user). 0 = not captured (pre-feature;
+	// the disk cap then counts the whole storage — a safe over-estimate).
+	BaseBytes int64 `json:"base_bytes"`
 }
 
 type linuxBackend struct {
@@ -195,6 +200,11 @@ func (b *linuxBackend) Ensure(ctx context.Context, handle string) (Info, error) 
 		// (systemd inside wants a machine-id of its own; the convention
 		// is a single newline = "generate on first boot").
 		_ = os.WriteFile(filepath.Join(rootfs, "etc", "machine-id"), []byte("\n"), 0o644)
+		// Capture the container-storage baseline (the disk cap counts GROWTH
+		// over this — the base OS image does not count against the user).
+		// Best-effort: a failure leaves the baseline 0 (the disk cap then
+		// counts the whole storage — a safe over-estimate).
+		b.captureBaseline(handle)
 	}
 
 	// 2. The user's data directory (mapped in below) must exist.
@@ -235,7 +245,7 @@ func (b *linuxBackend) Ensure(ctx context.Context, handle string) (Info, error) 
 	if err := b.ensureSymlink(rootfs, b.machineSymlink(handle)); err != nil {
 		return Info{}, err
 	}
-	dropIn := dropInContent(b.dataDir, handle, mode)
+	dropIn := dropInContent(b.dataDir, handle, mode, b.cfg.MemoryMB, b.cfg.Cores)
 	if err := os.MkdirAll(filepath.Dir(b.dropInPath(handle)), 0o755); err != nil {
 		return Info{}, err
 	}
@@ -285,18 +295,36 @@ func (b *linuxBackend) ensureSymlink(target, link string) error {
 // line CLEARS the distro template's command line (whose defaults — e.g.
 // --private-users — are not relied on); the following line pins the exact
 // invocation. --private-users=no keeps the container's root as the host's
-// root so the bind-mounted data dir keeps its real ownership.
-func dropInContent(dataDir, handle, mode string) string {
+// root so the bind-mounted data dir keeps its real ownership. The [Service]
+// resource directives (MemoryHigh / CPUQuota) bound the service's cgroup,
+// of which the nspawn container's cgroup is a descendant, so they bound the
+// container (cgroup v2 limits are hierarchical).
+func dropInContent(dataDir, handle, mode string, memMB, cores int) string {
 	var netFlag string
 	if mode == "private" {
 		netFlag = "--private-network"
 	} else {
 		netFlag = "--network-veth"
 	}
+	var limits string
+	// RAM = a SOFT limit (the container must not be killed on breach):
+	// MemoryHigh throttles + reclaims above the threshold with NO OOM-kill.
+	// MemoryMax is deliberately NOT set — a hard cap would OOM-kill the
+	// container on breach. (memMB 0 = platform default = no directive.)
+	if memMB > 0 {
+		limits += "MemoryHigh=" + fmt.Sprintf("%dM", memMB) + "\n"
+	}
+	// CPU = at-most-N-cores-of-time (a quota). Windows' equivalent Cores
+	// knob is a fixed vCPU count — close, not identical. (cores 0 = platform
+	// default = no directive.)
+	if cores > 0 {
+		limits += "CPUQuota=" + fmt.Sprintf("%d%%", cores*100) + "\n"
+	}
 	return "[Service]\n" +
 		"ExecStart=\n" +
 		"ExecStart=/usr/bin/systemd-nspawn %i --settings=trusted --boot --private-users=no --bind=" +
-		quoteArg(UserDataDir(dataDir, handle)) + ":/data " + netFlag + "\n"
+		quoteArg(UserDataDir(dataDir, handle)) + ":/data " + netFlag + "\n" +
+		limits
 }
 
 // quoteArg quotes a systemd unit-file command-line argument when it
@@ -527,6 +555,23 @@ func (b *linuxBackend) Remove(ctx context.Context, handle string) error {
 func isBtrfsSubvolume(ctx context.Context, run commandFunc, path string) bool {
 	_, _, code, err := run(ctx, "", "btrfs", "subvolume", "is-subvolume", path)
 	return err == nil && code == 0
+}
+
+// captureBaseline records the container-storage size (the per-user sandbox
+// dir: the rootfs + the small state.json) in the per-user state, once, at
+// first creation — the baseline for the disk cap's growth-over-baseline.
+// Idempotent (a non-zero baseline is left untouched). A 0 size leaves the
+// baseline 0 (the disk cap then counts the whole storage — a safe
+// over-estimate, never an under-count that lets a user over the cap).
+func (b *linuxBackend) captureBaseline(handle string) {
+	st := b.loadState(handle)
+	if st.BaseBytes != 0 {
+		return
+	}
+	if n := DirSize(UserSandboxDir(b.dataDir, handle)); n > 0 {
+		st.BaseBytes = n
+		_ = b.saveState(handle, st)
+	}
 }
 
 func randomHex(n int) (string, error) {

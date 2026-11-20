@@ -79,6 +79,12 @@ type App struct {
 	oauthStates map[string]time.Time
 	// supCancel stops the sidecar supervisor (started by NewNormal).
 	supCancel context.CancelFunc
+	// diskMon is the per-user disk-usage monitor (background walker +
+	// frozen state with hysteresis); the gate + scheduler read its cached
+	// frozen state. Nil-safe (a nil monitor never freezes anyone).
+	diskMon *diskMonitor
+	// diskCancel stops the disk monitor's periodic walk.
+	diskCancel context.CancelFunc
 }
 
 // NewNormal builds the normal-mode app from a loaded config.
@@ -109,6 +115,29 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	supCtx, supCancel := context.WithCancel(context.Background())
 	a.supCancel = supCancel
 	go sm.Supervise(supCtx, cfg)
+	// Start the disk-usage monitor: a background walker that tracks each
+	// user's storage against the per-user cap (a frozen state with
+	// hysteresis). Prime does a synchronous initial scan so the gate has
+	// data on the first request; Start runs the periodic walk. The cap is
+	// read LIVE from config (applyConfig swaps cfg), so an admin edit
+	// applies from the next scan without a restart.
+	a.diskMon = newDiskMonitor(dataDir,
+		func() int { return a.liveCfg().Sandbox.DiskMB },
+		a.userHandles,
+	)
+	// Wire the two-way link between the disk monitor + the scheduler:
+	// (1) the scheduler defers a user's queued work while they're over the
+	// cap (a disk-monitored frozen state), and (2) when a user gets back
+	// under the cap (unfreezes) the monitor re-dispatches the scheduler so
+	// their deferred work runs. The cap is read LIVE from config (an admin
+	// edit applies from the next scan without a restart).
+	dm := a.diskMon
+	a.ag.SetDiskFrozen(func(h string) bool { return dm.Frozen(h) })
+	a.diskMon.SetOnUnfreeze(func(string) { a.ag.PokeAll() })
+	a.diskMon.Prime()
+	diskCtx, diskCancel := context.WithCancel(context.Background())
+	a.diskCancel = diskCancel
+	a.diskMon.Start(diskCtx)
 	return a, nil
 }
 
@@ -119,6 +148,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTT
 func (a *App) Close() {
 	if a.supCancel != nil {
 		a.supCancel()
+	}
+	if a.diskCancel != nil {
+		a.diskCancel()
 	}
 	a.ag.Close()
 }
@@ -134,7 +166,7 @@ func (a *App) routes() {
 	// regular user, so it rejects admin sessions (GET / sends them to the
 	// dashboard instead; this also stops a stale user tab from chatting as
 	// the admin).
-	mux.HandleFunc("POST /api/conversations", a.chatGate(a.createConversation))
+	mux.HandleFunc("POST /api/conversations", a.chatGate(a.diskGate(a.createConversation)))
 	mux.HandleFunc("GET /api/conversations", a.chatGate(a.listConversations))
 	mux.HandleFunc("GET /api/conversations/{id}", a.chatGate(a.getConversation))
 	mux.HandleFunc("PATCH /api/conversations/{id}", a.chatGate(a.updateConversation))
@@ -142,8 +174,8 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /api/conversations/search", a.chatGate(a.searchConversations))
 	mux.HandleFunc("GET /api/search", a.chatGate(a.searchAll))
 	mux.HandleFunc("GET /api/conversations/{id}/messages", a.chatGate(a.getMessages))
-	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.sendMessage))
-	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.sendMessageStream))
+	mux.HandleFunc("POST /api/conversations/{id}/messages", a.chatGate(a.diskGate(a.sendMessage)))
+	mux.HandleFunc("POST /api/conversations/{id}/messages/stream", a.chatGate(a.diskGate(a.sendMessageStream)))
 	mux.HandleFunc("GET /api/email", a.requireAuth(a.emailAddress))
 	mux.HandleFunc("PUT /api/email", a.requireAuth(a.setEmail))
 	// The user's profile page: what bevin currently knows about them + their
@@ -165,12 +197,18 @@ func (a *App) routes() {
 	// endpoint — the agent manages execution (see workspace.go).
 	// chatGate: regular users only (same as everything above).
 	mux.HandleFunc("GET /api/workspaces", a.chatGate(a.listWorkspaces))
-	mux.HandleFunc("POST /api/workspaces", a.chatGate(a.createWorkspace))
+	mux.HandleFunc("POST /api/workspaces", a.chatGate(a.diskGate(a.createWorkspace)))
 	mux.HandleFunc("DELETE /api/workspaces/{id}", a.chatGate(a.deleteWorkspace))
 	mux.HandleFunc("GET /api/workspaces/{id}/files", a.chatGate(a.workspaceFiles))
-	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.uploadWorkspaceFile))
+	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.diskGate(a.uploadWorkspaceFile)))
 	mux.HandleFunc("GET /api/workspaces/{id}/files/raw", a.chatGate(a.workspaceFileRaw))
 	mux.HandleFunc("DELETE /api/workspaces/{id}/files", a.chatGate(a.deleteWorkspaceFile))
+	// Disk usage: the user's storage against their cap + the cleanup page.
+	// NOT behind diskGate (a frozen user must reach the disk page + the
+	// deletes to get back under the cap). chatGate: regular users only.
+	mux.HandleFunc("GET /disk", a.diskPage)
+	mux.HandleFunc("GET /api/disk", a.chatGate(a.diskStatus))
+	mux.HandleFunc("POST /api/disk/done", a.chatGate(a.diskDone))
 	// First-time onboarding (regular users only — the admin has no user UI).
 	mux.HandleFunc("GET /api/onboarding", a.chatGate(a.onboardingStatus))
 	mux.HandleFunc("POST /api/onboarding", a.chatGate(a.onboardingComplete))

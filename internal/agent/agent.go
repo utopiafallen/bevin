@@ -233,6 +233,20 @@ func (a *Agent) Reload(cfg *config.ServerConfig) error {
 	return nil
 }
 
+// SetDiskFrozen wires the disk-cap frozen check into the scheduler: a user
+// over their disk cap has their queued work deferred (kept in the queue) until
+// they're back under the cap. The host (the server's disk monitor) installs
+// this. Nil-safe: passing nil defers no one.
+func (a *Agent) SetDiskFrozen(f func(handle string) bool) {
+	a.sched.SetFrozen(f)
+}
+
+// PokeAll re-dispatches every model pool — used when a user unfreezes (their
+// deferred queued work can now run in any pool it's queued in).
+func (a *Agent) PokeAll() {
+	a.sched.PokeAll()
+}
+
 // Models returns the available models (admin-enabled and not auto-disabled) for
 // the user UI.
 func (a *Agent) Models() []config.Model {

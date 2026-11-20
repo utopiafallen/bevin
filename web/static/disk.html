@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disk usage · Bevin</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: "Nunito", system-ui, -apple-system, sans-serif; margin: 0; background: #fffdf5; color: #2a2620; }
+  @media (prefers-color-scheme: dark) { body { background: #1c1a15; color: #ece6d8; } }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 6px; }
+  .muted { color: #8a8375; font-size: .92rem; }
+  @media (prefers-color-scheme: dark) { .muted { color: #9a927f; } }
+  .card { background: #fff; border: 1px solid #ece4d2; border-radius: 12px; padding: 18px 20px; margin: 16px 0; }
+  @media (prefers-color-scheme: dark) { .card { background: #241f18; border-color: #3a332a; } }
+  .bar { height: 18px; border-radius: 9px; background: #efe8d8; overflow: hidden; position: relative; margin: 10px 0 6px; }
+  @media (prefers-color-scheme: dark) { .bar { background: #3a332a; } }
+  .fill { height: 100%; background: #f4b942; width: 0%; transition: width .3s; }
+  .fill.over { background: #d9534f; }
+  .thr { position: absolute; top: 0; bottom: 0; width: 2px; background: #7a7466; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #ece4d2; font-size: .95rem; }
+  @media (prefers-color-scheme: dark) { th, td { border-color: #3a332a; } }
+  button, a.btn { display: inline-block; background: #f4b942; color: #2a2620; border: 0; border-radius: 8px; padding: 8px 14px; font-size: .95rem; cursor: pointer; text-decoration: none; }
+  button:disabled { opacity: .5; cursor: default; }
+  .mini { padding: 4px 10px; font-size: .85rem; }
+  a.plain { color: #b9822a; text-decoration: none; }
+  .msg { margin: 10px 0; font-size: .95rem; min-height: 1.2em; }
+  .msg.err { color: #d9534f; }
+  .msg.ok { color: #4a8f4a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Disk usage</h1>
+  <p class="muted">How much of your storage limit you're using. Delete files to get under the limit, then press “Done cleaning up”.</p>
+
+  <div class="card">
+    <p id="usageLine">Loading…</p>
+    <div class="bar" id="bar"><div class="thr" id="thr" style="left:90%"></div><div class="fill" id="fill"></div></div>
+    <p class="muted" id="barLabels"></p>
+  </div>
+
+  <div class="card">
+    <h2>Your workspaces</h2>
+    <p class="muted">The biggest items are usually here. “delete” frees a whole workspace immediately; “open” takes you back to Bevin to delete individual files.</p>
+    <table>
+      <thead><tr><th>Workspace</th><th>Size</th><th>Files</th><th style="text-align:right"></th></tr></thead>
+      <tbody id="wsRows"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="msg" id="msg"></div>
+  <p>
+    <button id="doneBtn" disabled>Done cleaning up</button>
+    &nbsp;&nbsp;<a class="plain" href="/">Back to Bevin</a>
+  </p>
+</div>
+
+<script>
+  function fmt(b) {
+    if (b == null || isNaN(b)) return "—";
+    var u = ["B", "KB", "MB", "GB", "TB"];
+    var i = 0, n = Number(b);
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function setMsg(text, cls) { var m = document.getElementById("msg"); m.textContent = text || ""; m.className = "msg" + (cls ? " " + cls : ""); }
+  async function j(url, opts) {
+    var r = await fetch(url, opts);
+    var d = {}; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error(d.error || d.message || ("HTTP " + r.status));
+    return d;
+  }
+
+  async function loadDisk() {
+    try {
+      var s = await j("/api/disk");
+      var limit = s.limit_bytes, used = s.used_bytes;
+      var line, f = document.getElementById("fill");
+      if (!limit) {
+        line = "No disk limit is set on this server. You're using " + fmt(used) + ".";
+        document.getElementById("bar").style.display = "none";
+        document.getElementById("barLabels").textContent = "";
+      } else {
+        var pct = used / limit * 100;
+        line = "You're using " + fmt(used) + " of " + fmt(limit) + (s.frozen ? " — you're over the limit, so new work is blocked." : ".");
+        document.getElementById("bar").style.display = "";
+        f.style.width = Math.min(100, pct) + "%";
+        f.className = "fill" + (s.frozen ? " over" : "");
+        document.getElementById("barLabels").textContent = fmt(used) + " of " + fmt(limit) + "  ·  released once under " + fmt(limit * 0.9);
+      }
+      document.getElementById("usageLine").textContent = line;
+      document.getElementById("doneBtn").disabled = !limit;
+    } catch (e) {
+      document.getElementById("usageLine").textContent = "Could not load your disk usage: " + e.message;
+    }
+  }
+
+  async function loadWorkspaces() {
+    var tbody = document.getElementById("wsRows");
+    try {
+      var d = await j("/api/workspaces");
+      var list = (d.workspaces || []).slice().sort(function (a, b) { return (b.size || 0) - (a.size || 0); });
+      if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">No workspaces.</td></tr>'; return; }
+      tbody.innerHTML = list.map(function (w) {
+        return "<tr><td>" + esc(w.title) + "</td><td>" + fmt(w.size) + "</td><td>" + (w.files != null ? w.files : "—") + "</td>" +
+          '<td style="text-align:right"><a class="plain" href="/">open</a> &nbsp; ' +
+          '<button class="mini" data-del="' + esc(w.id) + '">delete</button></td></tr>';
+      }).join("");
+      Array.prototype.forEach.call(tbody.querySelectorAll("[data-del]"), function (b) {
+        b.onclick = async function () {
+          if (!confirm("Delete this workspace and everything in it? This can't be undone.")) return;
+          setMsg("Deleting…");
+          try {
+            await fetch("/api/workspaces/" + b.getAttribute("data-del"), { method: "DELETE" });
+            setMsg("Deleted. Rechecking…", "ok");
+            await Promise.all([loadDisk(), loadWorkspaces()]);
+          } catch (e) { setMsg("Delete failed: " + e.message, "err"); }
+        };
+      });
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="4" class="muted">Could not load workspaces: ' + esc(e.message) + "</td></tr>";
+    }
+  }
+
+  document.getElementById("doneBtn").onclick = async function () {
+    var b = document.getElementById("doneBtn");
+    b.disabled = true;
+    setMsg("Checking…");
+    try {
+      var d = await j("/api/disk/done", { method: "POST" });
+      await loadDisk();
+      if (d.frozen) { setMsg("Still over the limit — keep cleaning up.", "err"); b.disabled = false; }
+      else { setMsg("You're back under the limit — you can continue.", "ok"); setTimeout(function () { location.href = "/"; }, 900); }
+    } catch (e) {
+      await loadDisk();
+      setMsg(e.message, "err");
+      b.disabled = false;
+    }
+  };
+
+  (async function boot() {
+    try { await j("/api/me"); } catch (e) { location.href = "/login"; return; }
+    await Promise.all([loadDisk(), loadWorkspaces()]);
+  })();
+</script>
+</body>
+</html>

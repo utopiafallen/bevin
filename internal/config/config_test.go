@@ -195,6 +195,13 @@ func TestValidateSandbox(t *testing.T) {
 	if err := base(Sandbox{Enabled: true, MemoryMB: -1}).Validate(); err == nil {
 		t.Fatal("expected error for negative memory")
 	}
+	// Disk cap bounds (0 = no cap; 1-1048576 MiB).
+	if err := base(Sandbox{Enabled: true, DiskMB: -1}).Validate(); err == nil {
+		t.Fatal("expected error for a negative disk cap")
+	}
+	if err := base(Sandbox{Enabled: true, DiskMB: 1048577}).Validate(); err == nil {
+		t.Fatal("expected error for a disk cap above the bound")
+	}
 	// Per-user containers are not optional: Validate canonicalizes
 	// Enabled to true (a legacy enabled=false is turned on) and the
 	// values are ALWAYS validated — a typo fails loudly either way.
