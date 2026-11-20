@@ -241,7 +241,8 @@ func TestLinuxEnsureCreatesContainer(t *testing.T) {
 		t.Fatalf("networkd config = %s, want %q inside", net, want)
 	}
 	// 5. The unit drop-in pins the invocation (bind + veth + no private
-	//    users) — the exact line is what the container runs with.
+	//    users, NO settings files) — the exact line is what the container
+	//    runs with.
 	dropIn, err := os.ReadFile(b.dropInPath("alice"))
 	if err != nil {
 		t.Fatalf("drop-in missing: %v", err)
@@ -253,10 +254,16 @@ func TestLinuxEnsureCreatesContainer(t *testing.T) {
 		"--bind=" + UserDataDir(dataDir, "alice") + ":/data",
 		"--network-veth",
 		"--boot",
+		"--settings=off", // settings files are ignored (a compromised
+		// container must not be able to re-privilege via its own
+		// .nspawn file on the next restart)
 	} {
 		if !strings.Contains(di, want) {
 			t.Fatalf("drop-in =\n%s\nmissing %q", di, want)
 		}
+	}
+	if strings.Contains(di, "--settings=trusted") || strings.Contains(di, "--settings=custom") {
+		t.Fatalf("drop-in =\n%smust not trust settings files", di)
 	}
 	// 6. The image symlink points at the rootfs.
 	if tgt, err := os.Readlink(b.machineSymlink("alice")); err != nil || tgt != rootfs {

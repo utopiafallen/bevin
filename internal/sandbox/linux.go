@@ -295,11 +295,17 @@ func (b *linuxBackend) ensureSymlink(target, link string) error {
 // dropInContent is the per-instance unit drop-in. The empty ExecStart=
 // line CLEARS the distro template's command line (whose defaults — e.g.
 // --private-users — are not relied on); the following line pins the exact
-// invocation. --private-users=no keeps the container's root as the host's
-// root so the bind-mounted data dir keeps its real ownership. The [Service]
-// resource directives (MemoryHigh / CPUQuota) bound the service's cgroup,
-// of which the nspawn container's cgroup is a descendant, so they bound the
-// container (cgroup v2 limits are hierarchical).
+// invocation. --settings=off: nspawn ignores its settings files
+// (/etc/systemd/nspawn/<machine>.nspawn) ENTIRELY — with the default
+// "trusted" level a compromised container could rewrite its own settings
+// file and re-privilege on the next restart (extra mounts, capabilities,
+// dropped isolation); the command line here is the single source of
+// configuration. --private-users=no keeps the container's root as the
+// host's root so the bind-mounted data dir keeps its real ownership. The
+// [Service] resource directives (MemoryHigh / CPUQuota) bound the
+// service's cgroup, of which the nspawn container's cgroup is a
+// descendant, so they bound the container (cgroup v2 limits are
+// hierarchical).
 func dropInContent(dataDir, handle, mode string, memMB, cores int) string {
 	var netFlag string
 	if mode == "private" {
@@ -323,7 +329,7 @@ func dropInContent(dataDir, handle, mode string, memMB, cores int) string {
 	}
 	return "[Service]\n" +
 		"ExecStart=\n" +
-		"ExecStart=/usr/bin/systemd-nspawn %i --settings=trusted --boot --private-users=no --bind=" +
+		"ExecStart=/usr/bin/systemd-nspawn %i --settings=off --boot --private-users=no --bind=" +
 		quoteArg(UserDataDir(dataDir, handle)) + ":/data " + netFlag + "\n" +
 		limits
 }
