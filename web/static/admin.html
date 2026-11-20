@@ -130,7 +130,13 @@ function blocked(e) {
 
 async function loadStatus() {
   try { STATUS = await j("/admin/api/status"); } catch (e) { return blocked(e); }
+  // Re-render whichever STATUS-backed page is showing once the status
+  // arrives. A page opened BEFORE the first status landed (e.g. a refresh
+  // straight onto #server) would otherwise sit on its "Loading…" forever —
+  // the status is a fast in-memory GET, so there is nothing to spin on,
+  // just a missed re-render.
   if (page() === "overview") renderOverview();
+  else if (page() === "server") renderServer();
 }
 async function loadSide() {
   try { SIDE = await j("/admin/api/sidecars"); } catch (e) { return blocked(e); }
@@ -793,6 +799,7 @@ function renderServer() {
   const m = document.getElementById("main");
   m.innerHTML = "";
   const h = document.createElement("h1"); h.textContent = "Server"; m.append(h);
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
   const c = document.createElement("div");
   c.className = "card";
   if (!STATUS) { c.append(elP("Loading…")); m.append(c); return; }
@@ -819,17 +826,18 @@ function renderServer() {
   c2.append(input);
   c2.append(elP("The PUBLIC address of this instance behind your reverse proxy (https, with a subpath if bevin is served under one, e.g. https://bevin.example.com/bevin). Leave blank only for a local-only setup — it is required while external sign-in (OAuth) is enabled, because the redirect URI is derived from it."));
   const btn = document.createElement("button");
-  btn.textContent = "Save";
+  btn.className = "btn";
+  btn.textContent = "Save base URI";
   btn.onclick = async () => {
     const v = input.value.trim();
-    btn.disabled = true;
+    btn.disabled = true; btn.textContent = "Saving…";
     try {
-      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: { base_uri: v } }) });
-      await loadStatus();
-      renderServer();
+      const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: { base_uri: v } }) });
+      await loadStatus(); // refresh STATUS (re-renders this page)
+      msg(r.reloaded ? "Saved — applies immediately." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
     } catch (e) {
-      alert("Save failed: " + e.message);
-      btn.disabled = false;
+      msg("Save failed: " + e.message, "err");
+      btn.disabled = false; btn.textContent = "Save base URI";
     }
   };
   c2.append(btn);
@@ -852,17 +860,22 @@ function renderServer() {
   const coresInp = num("CPU cores", "cores", "Per-container CPU quota (0 = platform default).");
   const memInp = num("Memory (MiB)", "memory_mb", "Per-container RAM cap in MiB (0 = platform default). SOFT — the container is never killed on breach.");
   const diskInp = num("Disk (MiB)", "disk_mb", "Per-user disk usage cap in MiB (0 = no cap). Over it, the user is blocked from new work until they clean up back under 90%.");
+  c3.append(elP("The disk cap applies immediately (the monitor reads it live). CPU and RAM apply when each environment next starts — a running environment keeps its current limits until you stop and start it; new environments use the new limits right away."));
   const sbtn = document.createElement("button");
-  sbtn.textContent = "Save";
+  sbtn.className = "btn";
+  sbtn.textContent = "Save limits";
   sbtn.onclick = async () => {
-    sbtn.disabled = true;
+    sbtn.disabled = true; sbtn.textContent = "Saving…";
     try {
-      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sandbox: { cores: parseInt(coresInp.value, 10) || 0, memory_mb: parseInt(memInp.value, 10) || 0, disk_mb: parseInt(diskInp.value, 10) || 0 } }) });
-      await loadStatus();
-      renderServer();
+      const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sandbox: { cores: parseInt(coresInp.value, 10) || 0, memory_mb: parseInt(memInp.value, 10) || 0, disk_mb: parseInt(diskInp.value, 10) || 0 } }) });
+      await loadStatus(); // refresh STATUS (re-renders this page)
+      msg(r.reloaded
+        ? "Saved. The disk cap is live; CPU/RAM apply when each environment next starts (a running one keeps its limits until it is stopped and started)."
+        : "Saved (the agent reload failed — restart bevin to apply).",
+        r.reloaded ? "ok" : "err");
     } catch (e) {
-      alert("Save failed: " + e.message);
-      sbtn.disabled = false;
+      msg("Save failed: " + e.message, "err");
+      sbtn.disabled = false; sbtn.textContent = "Save limits";
     }
   };
   c3.append(sbtn);
