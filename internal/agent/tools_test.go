@@ -570,13 +570,13 @@ func TestParseElementID(t *testing.T) {
 // is an argument error the model must fix.
 func TestResolveTarget(t *testing.T) {
 	inst := &browser.Instance{} // zero value: no read yet
-	if _, err := resolveTarget(inst, "#3", ""); err == nil || !strings.Contains(err.Error(), "not in the last read") {
+	if _, err := resolveTarget(inst, "", "#3", ""); err == nil || !strings.Contains(err.Error(), "not in the last read") {
 		t.Fatalf("stale #N err = %v, want the read-again hint", err)
 	}
-	if _, err := resolveTarget(inst, "", ""); err == nil {
+	if _, err := resolveTarget(inst, "", "", ""); err == nil {
 		t.Fatal("no target must be an error")
 	}
-	if got, err := resolveTarget(inst, "", "body > a"); err != nil || got != "body > a" {
+	if got, err := resolveTarget(inst, "", "", "body > a"); err != nil || got != "body > a" {
 		t.Fatalf("raw selector = %q, %v", got, err)
 	}
 }

@@ -76,7 +76,7 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
 				"direction":  map[string]any{"type": "string", "description": "scroll: down|up|top|bottom (default down)"},
 				"viewports":  map[string]any{"type": "number", "description": "scroll: viewport heights to move (default 1)"},
-				"tab":        map[string]any{"type": "string", "description": "tab id from listTabs (default: the current tab)"},
+				"tab":        map[string]any{"type": "string", "description": "tab id from listTabs (default: this conversation's current tab — the last one it opened or used)"},
 				"timeout_ms": map[string]any{"type": "number", "description": "waitFor: ceiling (default 10000, max 120000)"},
 			},
 			"required": []string{"command"},
@@ -114,9 +114,16 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 		if err != nil {
 			return fmt.Sprintf("web_browser is not available on this host: %v.", err), nil
 		}
+		// The conversation this call belongs to (harness plumbing — runTurn
+		// sets it; see conversationFromContext in filetools.go). The browser
+		// INSTANCE is shared by all of the user's conversations, so the
+		// browser's conversation-scoped state (working tab + #N table) is
+		// keyed on it: one conversation never inherits another's tab or
+		// element table.
+		convID := conversationFromContext(ctx)
 		switch a.Command {
 		case "openTab":
-			t, err := inst.OpenTab(ctx, a.URL)
+			t, err := inst.OpenTab(ctx, convID, a.URL)
 			if err != nil {
 				if t.ID != "" {
 					// The tab exists (at about:blank) — the navigation failed
@@ -130,7 +137,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if a.URL == "" {
 				return "navigate needs a url.", nil
 			}
-			tab, err := inst.ResolveTab(ctx, a.Tab)
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("navigate", err), nil
 			}
@@ -139,17 +146,17 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return fmt.Sprintf("navigated to %s (loaded). read to see the page.", a.URL), nil
 		case "read":
-			tab, err := inst.ResolveTab(ctx, a.Tab)
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("read", err), nil
 			}
-			pr, err := inst.Read(ctx, tab, a.Selector)
+			pr, err := inst.Read(ctx, convID, tab, a.Selector)
 			if err != nil {
 				return unavailable("read", err), nil
 			}
 			return browser.BoundRead(pr), nil
 		case "readItems":
-			tab, err := inst.ResolveTab(ctx, a.Tab)
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("readItems", err), nil
 			}
@@ -175,7 +182,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if n > 10 {
 				n = 10
 			}
-			tab, err := inst.ResolveTab(ctx, a.Tab)
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("scroll", err), nil
 			}
@@ -185,7 +192,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return browser.ScrollReport(sr), nil
 		case "click", "type", "select":
-			return doElementAction(ctx, inst, a, handle)
+			return doElementAction(ctx, inst, convID, a, handle)
 		case "waitFor":
 			if a.Selector == "" {
 				return "waitFor needs a selector (a CSS selector that should become present and visible).", nil
@@ -197,7 +204,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if timeout > 120*time.Second {
 				timeout = 120 * time.Second
 			}
-			tab, err := inst.ResolveTab(ctx, a.Tab)
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("waitFor", err), nil
 			}
@@ -223,7 +230,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return strings.TrimRight(out, "\n"), nil
 		case "closeTab":
-			id, err := inst.CloseTab(ctx, a.Tab)
+			id, err := inst.CloseTab(ctx, convID, a.Tab)
 			if err != nil {
 				return unavailable("closeTab", err), nil
 			}
@@ -235,16 +242,17 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 }
 
 // resolveTarget turns a click/type/select's element-or-selector arg into a
-// CSS selector: a "#N" id resolves against the LATEST read's element table
-// (the server-side resolution — the model never guesses selectors); anything
-// else is taken as a raw selector (the advanced fallback).
-func resolveTarget(inst *browser.Instance, element, selector string) (string, error) {
+// CSS selector: a "#N" id resolves against the CALLING conversation's
+// LATEST read's element table (the server-side resolution — the model never
+// guesses selectors); anything else is taken as a raw selector (the
+// advanced fallback).
+func resolveTarget(inst *browser.Instance, convID, element, selector string) (string, error) {
 	if element != "" {
 		n, err := parseElementID(element)
 		if err != nil {
 			return "", err
 		}
-		ref, ok := inst.ElementByN(n)
+		ref, ok := inst.ElementByN(convID, n)
 		if !ok {
 			return "", fmt.Errorf("element #%d is not in the last read's table — the page may have changed; read again and use a fresh #N", n)
 		}
@@ -271,12 +279,12 @@ func parseElementID(s string) (int, error) {
 // doElementAction runs click/type/select: resolve the target, get its
 // viewport center, and drive it with real input events (click) or click +
 // insert (type) or a value set + events (select).
-func doElementAction(ctx context.Context, inst *browser.Instance, a webBrowserArgs, handle string) (string, error) {
-	selector, err := resolveTarget(inst, a.Element, a.Selector)
+func doElementAction(ctx context.Context, inst *browser.Instance, convID string, a webBrowserArgs, handle string) (string, error) {
+	selector, err := resolveTarget(inst, convID, a.Element, a.Selector)
 	if err != nil {
 		return err.Error(), nil
 	}
-	tab, err := inst.ResolveTab(ctx, a.Tab)
+	tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 	if err != nil {
 		return unavailable(a.Command, err), nil
 	}

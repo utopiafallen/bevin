@@ -64,7 +64,7 @@ func TestWebBrowserLive(t *testing.T) {
 	}
 
 	// openTab(url): a new tab, loaded.
-	tab, err := inst.OpenTab(ctx, srv.URL)
+	tab, err := inst.OpenTab(ctx, "", srv.URL)
 	if err != nil {
 		t.Fatalf("OpenTab: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestWebBrowserLive(t *testing.T) {
 
 	// read: the clean page — title/url, the markdown (heading + paragraph),
 	// and the element table with the expected entries.
-	pr, err := inst.Read(ctx, tab.ID, "")
+	pr, err := inst.Read(ctx, "", tab.ID, "")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestWebBrowserLive(t *testing.T) {
 	if toggle.N < 1 {
 		t.Fatalf("the toggle button is not in the element table:\n%s", BoundRead(pr))
 	}
-	if _, ok := inst.ElementByN(toggle.N); !ok {
+	if _, ok := inst.ElementByN("", toggle.N); !ok {
 		t.Fatal("the read's element table is not resolvable by #N")
 	}
 	if in := find("textbox", "search"); in.N < 1 {
@@ -128,7 +128,7 @@ func TestWebBrowserLive(t *testing.T) {
 	}
 
 	// read again: the revealed text is in the clean now (the page changed).
-	pr2, err := inst.Read(ctx, tab.ID, "")
+	pr2, err := inst.Read(ctx, "", tab.ID, "")
 	if err != nil {
 		t.Fatalf("Read (after click): %v", err)
 	}
@@ -174,7 +174,7 @@ func TestWebBrowserLive(t *testing.T) {
 	if len(tabs) != 2 {
 		t.Fatalf("tabs = %d (%v), want 2 (the launch tab + the opened one)", len(tabs), listing)
 	}
-	if _, err := inst.CloseTab(ctx, tab.ID); err != nil {
+	if _, err := inst.CloseTab(ctx, "", tab.ID); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	tabs, err = inst.ListTabs(ctx)
@@ -298,7 +298,7 @@ for (let n = 1; n <= 20; n++) render(n);
 	if err != nil {
 		t.Fatalf("ForUser (browser launch): %v", err)
 	}
-	tab, err := inst.OpenTab(ctx, srv.URL+"/lazy")
+	tab, err := inst.OpenTab(ctx, "", srv.URL+"/lazy")
 	if err != nil {
 		t.Fatalf("OpenTab: %v", err)
 	}

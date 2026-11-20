@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -40,16 +41,11 @@ func (i *Instance) ListTabs(ctx context.Context) ([]Tab, error) {
 		}
 		// Browser-INTERNAL pages (a sync prompt, a new-tab page, devtools,
 		// extension backgrounds): not browsable content for the tool —
-		// they would only clutter the tab list and the default-tab logic.
+		// they would only clutter the tab list.
 		if strings.HasPrefix(t.URL, "chrome://") || strings.HasPrefix(t.URL, "edge://") || strings.HasPrefix(t.URL, "devtools://") || strings.HasPrefix(t.URL, "chrome-extension://") {
 			continue
 		}
 		tabs = append(tabs, Tab{ID: t.ID, Title: t.Title, URL: t.URL})
-		i.mu.Lock()
-		if i.defaultTab == "" && len(tabs) == 1 {
-			i.defaultTab = t.ID
-		}
-		i.mu.Unlock()
 	}
 	return tabs, nil
 }
@@ -80,14 +76,17 @@ func allowedBrowseURL(raw string) (string, error) {
 }
 
 // OpenTab creates a new page target (about:blank when url is empty) and
-// makes it the instance's default tab. With a url it then navigates EXPLICITLY
+// makes it the CALLING conversation's working tab (the tab-less default for
+// that conversation — conversations of the same user share the instance, so
+// the working tab is per-conversation, never instance-global). With a url it
+// then navigates EXPLICITLY
 // (Page.navigate + the load wait): createTarget(url) opens the target at
 // about:blank first and the navigation lands asynchronously — trusting the
 // initial readyState would let the first read race the navigation (the
 // Chromium race seen in the live e2e). A failed navigation (DNS, etc.)
 // returns the tab (it exists, at about:blank) WITH the error — the model
 // can retry.
-func (i *Instance) OpenTab(ctx context.Context, url string) (Tab, error) {
+func (i *Instance) OpenTab(ctx context.Context, convID, url string) (Tab, error) {
 	if url == "" {
 		url = "about:blank"
 	}
@@ -107,7 +106,7 @@ func (i *Instance) OpenTab(ctx context.Context, url string) (Tab, error) {
 		return Tab{}, fmt.Errorf("Target.createTarget did not return a target id")
 	}
 	i.mu.Lock()
-	i.defaultTab = out.TargetID
+	i.convTab[convID] = out.TargetID
 	i.mu.Unlock()
 	tab := Tab{ID: out.TargetID, URL: url}
 	if url != "about:blank" {
@@ -119,14 +118,16 @@ func (i *Instance) OpenTab(ctx context.Context, url string) (Tab, error) {
 	return tab, nil
 }
 
-// CloseTab closes a page target (the default when id is empty).
-func (i *Instance) CloseTab(ctx context.Context, id string) (string, error) {
+// CloseTab closes a page target (the CALLING conversation's working tab when
+// id is empty). Closing a conversation's working tab unpins it — the
+// conversation's next tab-less command gets the open-a-tab-first signal.
+func (i *Instance) CloseTab(ctx context.Context, convID, id string) (string, error) {
 	if id == "" {
-		d, err := i.DefaultTab(ctx)
+		var err error
+		id, err = i.ResolveTab(ctx, convID, "")
 		if err != nil {
 			return "", err
 		}
-		id = d
 	}
 	res, err := i.cdp.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": id})
 	if err != nil {
@@ -141,45 +142,53 @@ func (i *Instance) CloseTab(ctx context.Context, id string) (string, error) {
 		delete(i.netState, s) // the tab's in-flight counter goes with it
 	}
 	delete(i.sessions, id)
-	if i.defaultTab == id {
-		i.defaultTab = ""
+	if i.convTab[convID] == id {
+		delete(i.convTab, convID)
 	}
 	i.mu.Unlock()
 	return id, nil
 }
 
-// DefaultTab returns the tab commands act on when none is named: the most
-// recently opened one, else the first page target, else a fresh about:blank.
-func (i *Instance) DefaultTab(ctx context.Context) (string, error) {
+// ResolveTab resolves a command's tab argument for the CALLING conversation
+// (the instance is shared by all of the user's conversations):
+//   - an explicit id is used as-is and PINS the conversation's working tab
+//     (an explicit choice is the conversation's own);
+//   - an empty id resolves to the conversation's working tab — the last tab
+//     IT opened or named — and errors when the conversation has none (a
+//     conversation never silently inherits another conversation's tab);
+//   - a pinned tab is verified live: one closed meanwhile (by another
+//     conversation, or by the user watching the window) is unpinned and
+//     reported as a clean error, not a raw CDP failure.
+func (i *Instance) ResolveTab(ctx context.Context, convID, id string) (string, error) {
+	pinned := false
 	i.mu.Lock()
-	id := i.defaultTab
+	if id == "" {
+		id = i.convTab[convID]
+		pinned = true
+		if id == "" {
+			i.mu.Unlock()
+			return "", errors.New("this conversation has no tab yet — openTab first (listTabs shows the existing tabs if you want to work in one)")
+		}
+	} else {
+		i.convTab[convID] = id
+	}
 	i.mu.Unlock()
-	if id != "" {
+	if !pinned {
 		return id, nil
 	}
 	tabs, err := i.ListTabs(ctx)
 	if err != nil {
 		return "", err
 	}
-	if len(tabs) > 0 {
-		i.mu.Lock()
-		i.defaultTab = tabs[0].ID
-		i.mu.Unlock()
-		return tabs[0].ID, nil
+	for _, t := range tabs {
+		if t.ID == id {
+			return id, nil
+		}
 	}
-	t, err := i.OpenTab(ctx, "")
-	if err != nil {
-		return "", err
-	}
-	return t.ID, nil
-}
-
-// ResolveTab maps a command's tab argument ("" = default) to a target id.
-func (i *Instance) ResolveTab(ctx context.Context, id string) (string, error) {
-	if id == "" {
-		return i.DefaultTab(ctx)
-	}
-	return id, nil
+	i.mu.Lock()
+	delete(i.convTab, convID)
+	i.mu.Unlock()
+	return "", errors.New("the tab this conversation was using was closed — openTab first (or name one from listTabs)")
 }
 
 // sessionFor returns the flattened CDP session for a tab target

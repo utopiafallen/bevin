@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,34 +17,118 @@ import (
 )
 
 // TestElementTable exercises the server-side #N resolution (the plan's WS5
-// element model): a fresh instance has no table, and a read's elements
-// become resolvable by #N (the previous read's table is REPLACED — stale
-// ids from an older page fail, they don't silently point at the wrong
-// element).
+// element model), which is PER-CONVERSATION (the security boundary): a
+// conversation with no reads has no table; a read's elements become
+// resolvable by #N (a newer read REPLACES that conversation's table —
+// stale ids from an older page fail, they don't silently point at the
+// wrong element); and one conversation's table never leaks into another's.
 func TestElementTable(t *testing.T) {
-	i := &Instance{}
-	if _, ok := i.ElementByN(1); ok {
+	i := &Instance{convRead: map[string]map[int]elementRef{}}
+	if _, ok := i.ElementByN("conv", 1); ok {
 		t.Fatal("a fresh instance must have no element table")
 	}
-	i.mu.Lock()
-	i.lastRead = map[int]elementRef{
+	i.convRead["conv"] = map[int]elementRef{
 		1: {N: 1, Role: "button", Name: "Save", Selector: "body > form > button", Tag: "BUTTON"},
 		2: {N: 2, Role: "link", Name: "Home", Selector: "body > a", Tag: "A"},
 	}
-	i.mu.Unlock()
-	e, ok := i.ElementByN(2)
+	e, ok := i.ElementByN("conv", 2)
 	if !ok || e.Selector != "body > a" || e.Role != "link" {
 		t.Fatalf("ElementByN(2) = %+v, %v", e, ok)
 	}
-	// A NEW read replaces the table: #1 from the old read is gone.
-	i.mu.Lock()
-	i.lastRead = map[int]elementRef{7: {N: 7, Role: "textbox", Name: "q", Selector: "#q", Tag: "INPUT"}}
-	i.mu.Unlock()
-	if _, ok := i.ElementByN(1); ok {
+	// A NEW read replaces the conversation's table: #1 from the old read is
+	// gone.
+	i.convRead["conv"] = map[int]elementRef{7: {N: 7, Role: "textbox", Name: "q", Selector: "#q", Tag: "INPUT"}}
+	if _, ok := i.ElementByN("conv", 1); ok {
 		t.Fatal("stale #N from a replaced read must not resolve")
 	}
-	if _, ok := i.ElementByN(7); !ok {
+	if _, ok := i.ElementByN("conv", 7); !ok {
 		t.Fatal("the new read's #N must resolve")
+	}
+	// Another conversation never sees this one's table.
+	if _, ok := i.ElementByN("other", 7); ok {
+		t.Fatal("one conversation's element table must not leak into another's")
+	}
+}
+
+// TestPerConversationBrowserState pins the per-conversation browser security
+// boundary (the audit finding: the browser instance is per-USER, shared by
+// all of the user's conversations): a conversation must not resolve another
+// conversation's #N table, and a tab-less command must never resolve to
+// another conversation's tab.
+func TestPerConversationBrowserState(t *testing.T) {
+	ctx := context.Background()
+
+	// A fake CDP /json endpoint: ResolveTab's live verification reads the
+	// tab list over HTTP (no real browser needed).
+	var mu sync.Mutex
+	openTabs := []map[string]string{{"id": "tabA", "url": "https://a.example/", "title": "A", "type": "page"}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		rows := make([]map[string]any, 0, len(openTabs))
+		for _, t := range openTabs {
+			rows = append(rows, map[string]any{"id": t["id"], "url": t["url"], "title": t["title"], "type": t["type"]})
+		}
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(rows)
+	}))
+	defer srv.Close()
+	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	i := &Instance{port: port, convTab: map[string]string{}, convRead: map[string]map[int]elementRef{}}
+
+	// 1. The #N table is per-conversation: each conversation resolves its
+	//    OWN last read; a conversation that never read has no table.
+	i.convRead["convA"] = map[int]elementRef{1: {N: 1, Role: "button", Name: "bank", Selector: "#bank", Tag: "BUTTON"}}
+	i.convRead["convB"] = map[int]elementRef{1: {N: 1, Role: "button", Name: "ad", Selector: "#ad", Tag: "BUTTON"}}
+	if e, ok := i.ElementByN("convA", 1); !ok || e.Selector != "#bank" {
+		t.Fatalf("convA #1 = %+v, %v — want convA's own element", e, ok)
+	}
+	if e, ok := i.ElementByN("convB", 1); !ok || e.Selector != "#ad" {
+		t.Fatalf("convB #1 = %+v, %v — want convB's own element", e, ok)
+	}
+	if _, ok := i.ElementByN("convC", 1); ok {
+		t.Fatal("convC never read — its #1 must not resolve")
+	}
+
+	// 2. A tab-less command never inherits another conversation's tab.
+	i.convTab["convA"] = "tabA" // convA opened tabA (OpenTab's pin)
+	if _, err := i.ResolveTab(ctx, "convB", ""); err == nil || !strings.Contains(err.Error(), "no tab yet") {
+		t.Fatalf("convB's tab-less resolution = %v — want the openTab-first error (never convA's tab)", err)
+	}
+	if id, err := i.ResolveTab(ctx, "convA", ""); err != nil || id != "tabA" {
+		t.Fatalf("convA's tab-less resolution = %q, %v — want its own tab tabA", id, err)
+	}
+
+	// 3. An explicit tab choice pins the conversation's working tab.
+	if id, err := i.ResolveTab(ctx, "convB", "tabA"); err != nil || id != "tabA" {
+		t.Fatalf("convB's explicit tab = %q, %v — want tabA", id, err)
+	}
+	if id, err := i.ResolveTab(ctx, "convB", ""); err != nil || id != "tabA" {
+		t.Fatalf("convB's tab-less resolution after an explicit choice = %q, %v — want tabA", id, err)
+	}
+
+	// 4. A pinned tab closed meanwhile (by another conversation, or by the
+	//    user watching the window) fails cleanly + unpins — not a raw CDP
+	//    error.
+	mu.Lock()
+	openTabs = nil
+	mu.Unlock()
+	if _, err := i.ResolveTab(ctx, "convA", ""); err == nil || !strings.Contains(err.Error(), "was closed") {
+		t.Fatalf("convA after tabA closed = %v — want the closed-tab error", err)
+	}
+	if _, err := i.ResolveTab(ctx, "convB", ""); err == nil {
+		t.Fatal("convB's pin for the closed tabA must fail cleanly too")
 	}
 }
 

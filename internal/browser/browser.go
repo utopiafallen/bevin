@@ -103,7 +103,13 @@ func (m *Manager) Instances() int {
 }
 
 // Instance is one user's dedicated browser: the child process + its CDP
-// connection + the per-user tab state.
+// connection + the per-user tab state. The instance is shared by ALL of the
+// user's conversations (one visible browser per user), so the
+// conversation-scoped state — each conversation's working tab (the tab-less
+// default) and its #N element table — is keyed by conversation id
+// (convTab/convRead), never instance-global: two conversations of the same
+// user must not see each other's element tables or silently act on each
+// other's tabs.
 type Instance struct {
 	browser    Detection
 	cmd        *exec.Cmd
@@ -111,11 +117,13 @@ type Instance struct {
 	cdp        *Client
 	profileDir string
 
-	mu         sync.Mutex
-	defaultTab string             // the tab commands use when none is named
-	sessions   map[string]string  // tab target id → CDP session id
-	lastRead   map[int]elementRef // the #N element table of the latest read
-	netState   map[string]*netCounter // session id → in-flight request counter (the settle signal)
+	mu sync.Mutex
+	// Per-conversation state (keyed by conversation id; "" = the shared
+	// bucket for callers outside a turn — tests, live e2e):
+	convTab  map[string]string             // conversation id → its working tab (the last tab it opened or named)
+	convRead map[string]map[int]elementRef // conversation id → its last Read's #N element table
+	sessions map[string]string             // tab target id → CDP session id
+	netState map[string]*netCounter        // session id → in-flight request counter (the settle signal)
 
 	closeOnce sync.Once
 }
@@ -164,6 +172,8 @@ func launchInstance(ctx context.Context, det Detection, profileDir string) (*Ins
 		port:       port,
 		cdp:        cdp,
 		profileDir: profileDir,
+		convTab:    map[string]string{},
+		convRead:   map[string]map[int]elementRef{},
 		sessions:   map[string]string{},
 		netState:   map[string]*netCounter{},
 	}

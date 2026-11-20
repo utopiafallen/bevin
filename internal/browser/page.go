@@ -212,9 +212,10 @@ var pageCleanerJS = `(() => {
 // actually delivered, design log LAZY-LIST TIER), then the deterministic
 // markdown (confined to selector when given — the drill-in path) + the
 // numbered interactive elements. The element table is remembered on the
-// instance (the #N ids of the LATEST read are what click/type/select
-// resolve).
-func (i *Instance) Read(ctx context.Context, tabID, selector string) (*PageRead, error) {
+// instance keyed by the CALLING conversation (the #N ids of the
+// conversation's LATEST read are what that conversation's click/type/select
+// resolve — one conversation's table never leaks into another's).
+func (i *Instance) Read(ctx context.Context, convID, tabID, selector string) (*PageRead, error) {
 	settled, took, err := i.Settle(ctx, tabID)
 	if err != nil {
 		return nil, err
@@ -244,10 +245,11 @@ func (i *Instance) Read(ctx context.Context, tabID, selector string) (*PageRead,
 		pr.Elements = []elementRef{}
 	}
 	i.mu.Lock()
-	i.lastRead = make(map[int]elementRef, len(pr.Elements))
+	table := make(map[int]elementRef, len(pr.Elements))
 	for _, e := range pr.Elements {
-		i.lastRead[e.N] = e
+		table[e.N] = e
 	}
+	i.convRead[convID] = table
 	i.mu.Unlock()
 	return &pr, nil
 }
@@ -286,12 +288,12 @@ func BoundRead(pr *PageRead) string {
 	return out
 }
 
-// ElementByN resolves a "#N" id from the latest read (the server-side
-// resolution of the plan's element model).
-func (i *Instance) ElementByN(n int) (elementRef, bool) {
+// ElementByN resolves a "#N" id from the CALLING conversation's latest read
+// (the server-side resolution of the plan's element model).
+func (i *Instance) ElementByN(convID string, n int) (elementRef, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	e, ok := i.lastRead[n]
+	e, ok := i.convRead[convID][n]
 	return e, ok
 }
 
