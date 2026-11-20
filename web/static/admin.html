@@ -62,6 +62,15 @@
   .page-note { color:var(--text-muted); font-size:.85rem; margin:.2rem 0 .6rem; }
   .row-actions { display:flex; gap:.35rem; }
   .row-actions .row-btn:disabled { opacity:.4; cursor:not-allowed; }
+  /* Users page (inlined): the origin/status badges + the per-row button (the
+     shared .row-btn visual is scoped to the model list, so the users table
+     carries its own copy) + the three-column form row. */
+  .badge.ext { background:var(--brand-softer); color:var(--brand-strong); }
+  .sub { display:block; font-size:.72rem; color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:180px; }
+  .row-actions .row-btn { font:inherit; font-size:.75rem; font-weight:700; padding:.22rem .55rem; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
+  .row-actions .row-btn:hover { background:var(--surface-2); }
+  .users-frow { display:flex; gap:.6rem; flex-wrap:wrap; }
+  .users-frow > div { flex:1; min-width:160px; }
 </style>
 </head>
 <body>
@@ -73,14 +82,14 @@
       <a href="#models" data-page="models"><span class="ic">◍</span>Models</a>
       <a href="#sidecars" data-page="sidecars"><span class="ic">⬡</span>Sidecars</a>
       <a href="#email" data-page="email"><span class="ic">✉</span>Email</a>
-      <a href="/admin/users"><span class="ic">☻</span>Users</a>
+      <a href="#users" data-page="users"><span class="ic">☻</span>Users</a>
       <a href="#server" data-page="server"><span class="ic">⚙</span>Server</a>
     </div>
     <div class="foot"><a href="#" id="signout">Sign out</a></div>
   </nav>
   <main class="main" id="main"></main>
 <script>
-let STATUS = null, SIDE = null, MAIL = null, ME = null;
+let STATUS = null, SIDE = null, MAIL = null, ME = null, USERS = null, OAUTH = null, OAUTH_ERR = null, OAUTH_HAS_SECRET = false, BASE_URI = "";
 let pollTimer = null;
 
 async function j(url, opt) {
@@ -141,6 +150,7 @@ function render() {
     case "models": renderModels(); loadModelEditor(); break;
     case "sidecars": renderSidecars(); startPoll(loadSide, 5000); break;
     case "email": renderEmail(); loadMail(); loadSide(); break;
+    case "users": renderUsers(); loadUsers(); break;
     case "server": renderServer(); loadStatus(); break;
     default: renderOverview(); startPoll(loadStatus, 2000);
   }
@@ -474,6 +484,154 @@ function renderModels() {
   ca.append(renderAuxList());
   m.append(ca);
   refreshScoreFills();
+}
+
+// ---- Users (inlined on this page) ----
+// Same pattern as the Models editor: the dedicated page is gone
+// (/admin/users redirects here), data lives in module state (USERS / OAUTH),
+// and everything renders into #main. The signed-in admin's row carries no
+// status control — the admin cannot disable themselves (locking the last
+// admin out is not a recovery path; the server enforces it too).
+async function loadUsers() {
+  if (!USERS) {
+    try { const d = await api("GET", "/admin/api/users"); USERS = d.users || []; }
+    catch (e) { if (page() === "users") msg("Could not load users: " + e.message, "err"); }
+  }
+  if (!OAUTH && !OAUTH_ERR) {
+    try {
+      const d = await api("GET", "/admin/api/config");
+      const o = d.oauth || {};
+      OAUTH = { enabled: !!o.enabled, name: o.name || "", client_id: o.client_id || "", client_secret: "", auth_url: o.auth_url || "", token_url: o.token_url || "", userinfo_url: o.userinfo_url || "", scopes: o.scopes || "" };
+      OAUTH_HAS_SECRET = !!o.has_secret;
+      BASE_URI = (d.server && d.server.base_uri) || "";
+    } catch (e) { OAUTH_ERR = "Could not load the OAuth settings: " + e.message; }
+  }
+  if (page() === "users") renderUsers();
+}
+function renderUsers() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Users"; m.append(h);
+  const note = document.createElement("p");
+  note.className = "page-note";
+  note.textContent = "Everyone bevin knows about — your own accounts (this server is always its own IdP) and the ones that sign in through the external provider.";
+  m.append(note);
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
+  if (!USERS && !OAUTH_ERR) { const c = document.createElement("div"); c.className = "card"; c.append(elP("Loading…")); m.append(c); return; }
+  // All users — the full registry (both IdPs).
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = "<h2>All users</h2>";
+  const originHelp = document.createElement("p"); originHelp.className = "muted";
+  originHelp.innerHTML = "Origin: <b>internal</b> = a bevin account with its own password (this server's own IdP); <b>OAuth</b> = created automatically from the external provider on first sign-in. Disabling a user stops both their sign-ins and their live sessions.";
+  c.append(originHelp);
+  if (USERS) c.append(renderUsersTable());
+  m.append(c);
+  m.append(renderAddUserCard());
+  m.append(renderOauthCard());
+}
+function renderUsersTable() {
+  const t = document.createElement("table");
+  t.className = "q";
+  t.innerHTML = "<tr><th>Handle</th><th>Name</th><th>Role</th><th>Origin</th><th>Email</th><th>Status</th><th></th></tr>";
+  for (const u of USERS) {
+    const tr = document.createElement("tr");
+    const origin = u.idp === "oauth" ? "<span class='badge ext'>OAuth</span>" : "internal";
+    const status = u.status === "active" ? "<span class='badge ok'>active</span>" : "<span class='badge bad'>disabled</span>";
+    let name = esc(u.display_name);
+    if (u.idp === "oauth" && u.idp_subject) name += "<span class='sub'>id: " + esc(u.idp_subject) + "</span>";
+    let action = "";
+    if (ME && u.handle !== ME.handle) {
+      const to = u.status === "active" ? "disabled" : "active";
+      action = "<div class='row-actions'><button class='row-btn' onclick=\"userStatus('" + esc(u.handle) + "', '" + to + "')\">" + (u.status === "active" ? "Disable" : "Enable") + "</button></div>";
+    }
+    tr.innerHTML = "<td class='kv'>" + esc(u.handle) + "</td><td>" + name + "</td><td>" + esc(u.role) + "</td><td>" + origin + "</td><td class='kv'>" + esc(u.email || "—") + "</td><td>" + status + "</td><td>" + action + "</td>";
+    t.append(tr);
+  }
+  return t;
+}
+function renderAddUserCard() {
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = "<h2>Add a user (internal)</h2>";
+  c.append(elP("Create an account on this server's own IdP — separate from the external provider (users you enable THERE sign in through OAuth and get created automatically; they never appear here until their first login)."));
+  const row = document.createElement("div"); row.className = "users-frow";
+  const handle = inp("nu_handle", "", "alice");
+  const name = inp("nu_name", "", "Alice Example");
+  row.append(field("Handle", handle), field("Display name", name), pwfield("Password", "nu_pw", "", "password (min 8 chars)"));
+  c.append(row);
+  const btn = document.createElement("button"); btn.className = "btn"; btn.textContent = "Add user";
+  btn.onclick = async () => {
+    try {
+      await api("POST", "/admin/api/users", { handle: handle.value, display_name: name.value, password: document.getElementById("nu_pw").value });
+      USERS = (await api("GET", "/admin/api/users")).users || [];
+      renderUsers();
+      msg("User added.", "ok");
+    } catch (err) { msg("Add failed: " + err.message, "err"); }
+  };
+  c.append(btn);
+  return c;
+}
+function renderOauthCard() {
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = "<h2>External sign-in (OAuth)</h2>";
+  c.append(elP("bevin is always its own IdP (the accounts above). Enable an external provider (authentik, Keycloak, Google — anything with an authorization-code + user-info flow) alongside it: users you enable in the provider sign in through it, and bevin creates their account automatically on first login — no need to add them here."));
+  if (OAUTH_ERR) { c.append(elP(OAUTH_ERR)); return c; }
+  if (!OAUTH) { c.append(elP("Loading…")); return c; }
+  const o = OAUTH;
+  const en = el("div", { class: "yesno" });
+  const yesB = el("button", { type: "button", class: o.enabled ? "sel" : "" }, "Yes");
+  const noB = el("button", { type: "button", class: !o.enabled ? "sel" : "" }, "No");
+  yesB.addEventListener("click", () => { o.enabled = true; renderUsers(); });
+  noB.addEventListener("click", () => { o.enabled = false; renderUsers(); });
+  en.append(yesB, noB);
+  c.append(field("Enable external sign-in (OAuth)", en));
+  if (!o.enabled) { c.append(elP("OAuth is off — bevin accepts its own logins only.")); return c; }
+  const nameI = inp("oa_name", o.name, "shown on the sign-in button, e.g. authentik");
+  const cidI = inp("oa_clientid", o.client_id, "the OAuth app's client id");
+  const csI = inp("oa_clientsecret", o.client_secret, OAUTH_HAS_SECRET ? "saved — leave blank to keep" : "the OAuth app's client secret");
+  const auI = inp("oa_authurl", o.auth_url, "https://idp.example.com/application/o/authorize/");
+  const tuI = inp("oa_tokenurl", o.token_url, "https://idp.example.com/application/o/token/");
+  const uuI = inp("oa_userinfourl", o.userinfo_url, "https://idp.example.com/application/o/user/");
+  const scI = inp("oa_scopes", o.scopes, "openid profile email");
+  const ruOut = inp("oa_redirectderived", "", ""); ruOut.readOnly = true;
+  nameI.addEventListener("input", () => { o.name = nameI.value; });
+  cidI.addEventListener("input", () => { o.client_id = cidI.value; });
+  csI.addEventListener("input", () => { o.client_secret = csI.value; });
+  auI.addEventListener("input", () => { o.auth_url = auI.value; });
+  tuI.addEventListener("input", () => { o.token_url = tuI.value; });
+  uuI.addEventListener("input", () => { o.userinfo_url = uuI.value; });
+  scI.addEventListener("input", () => { o.scopes = scI.value; });
+  const svBase = (BASE_URI || "").trim().replace(/\/+$/, "");
+  ruOut.value = svBase ? svBase + "/auth/oauth/callback" : "";
+  ruOut.placeholder = svBase ? "" : "set the public base URI on the Server page";
+  c.append(field("Provider name", nameI));
+  const row = document.createElement("div"); row.className = "users-frow";
+  row.append(field("Client ID", cidI), field("Client secret", csI));
+  c.append(row);
+  c.append(field("Authorization URL", auI));
+  c.append(field("Token URL", tuI));
+  c.append(field("User-info URL", uuI));
+  c.append(field("Scopes", scI));
+  c.append(field("Redirect URI — paste this into the OAuth app registration", ruOut));
+  c.append(elP("The public base URI is set on the SERVER page (the address of this instance behind the reverse proxy, so https). Bevin derives the redirect URI from it (base + /auth/oauth/callback) and sends it to the provider — the provider's identity maps to a handle from preferred_username (else the email's local part, else the subject)."));
+  const save = document.createElement("button"); save.className = "btn"; save.textContent = "Save OAuth settings";
+  save.onclick = async () => {
+    try {
+      const r = await api("POST", "/admin/api/config", { oauth: JSON.parse(JSON.stringify(o)) });
+      if (o.client_secret) { o.client_secret = ""; OAUTH_HAS_SECRET = true; }
+      renderUsers();
+      msg(r.reloaded ? "Saved — external sign-in changes apply immediately." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
+    } catch (err) { msg("Save failed: " + err.message, "err"); }
+  };
+  c.append(save);
+  return c;
+}
+async function userStatus(handle, status) {
+  try {
+    await api("POST", "/admin/api/users/status", { handle, status });
+    for (const u of USERS) if (u.handle === handle) u.status = status; // the server just applied it
+    renderUsers();
+    msg((status === "disabled" ? "Disabled" : "Enabled") + " " + handle + ".", "ok");
+  } catch (err) { msg("Change failed: " + err.message, "err"); }
 }
 
 function renderSidecars() {

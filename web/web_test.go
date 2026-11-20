@@ -25,7 +25,6 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"fonts/nunito-variable.woff2",
 		"admin.html",
 		"admin-email.html",
-		"admin-users.html",
 	}
 	for _, p := range want {
 		f, err := FS.Open("static/" + p)
@@ -70,7 +69,7 @@ func TestModelProfileUISurface(t *testing.T) {
 		`loadProfiles()`,
 		`profileField(`,
 		// The model list (card) shows each model's profile in its meta grid.
-		`metaItem("Profile", m.profile||"general")`,
+		`metaItem("Profile", m.profile || "general")`,
 		// The display-name lock inherits the profile (same model, same
 		// behavior — a locked decision, not a form detail).
 		`m.profile=match.profile`,

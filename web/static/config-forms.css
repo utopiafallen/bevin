@@ -66,6 +66,13 @@
   .meta-item { min-width:0; }
   .meta-item .meta-label { font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); }
   .meta-item .meta-val { font-family:var(--font-mono); font-size:.82rem; margin-top:.1rem; overflow-wrap:anywhere; }
+  /* the 1-10 model scores (Reasoning / Knowledge / Speed) in the card meta grid:
+     a mini progress bar (fill = score/10) + the exact value — strength at a
+     glance, the number keeps precision. Read-only; the form's sliders edit. */
+  .score-bar { display:flex; align-items:center; gap:.45rem; }
+  .score-track { flex:1; min-width:40px; height:7px; border-radius:4px; background:var(--surface-2); border:1px solid var(--border); overflow:hidden; }
+  .score-track i { display:block; height:100%; background:var(--brand); border-radius:3px 0 0 3px; }
+  .score-num { font-family:var(--font-mono); font-size:.72rem; color:var(--text-muted); flex:0 0 auto; }
   .badge-off { display:inline-block; font-size:.7rem; font-weight:700; color:var(--text-muted); background:color-mix(in srgb, var(--text-muted) 14%, transparent); padding:.08rem .42rem; border-radius:999px; }
   /* table (still used by the dashboard's AUX list) */
   .model-table-wrap { overflow-x:auto; } /* a too-wide table scrolls INSIDE the frame — it must never widen the page (the body is a centered fixed-width frame; an overflowing child widens the scrollable canvas and the frame reads as "narrower") */

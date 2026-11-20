@@ -277,12 +277,15 @@ func (a *App) adminEmailPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin-email.html", http.StatusFound)
 }
 
+// The USERS panel is inlined on the dashboard's Users page (admin.html
+// #users) — no dedicated page (same detour friction as the models editor
+// had); this URL 303s there for old links/bookmarks.
 func (a *App) adminUsersPage(w http.ResponseWriter, r *http.Request) {
 	if role, ok := a.adminGate(r); !ok || role != "admin" {
 		http.Error(w, "admin required", http.StatusForbidden)
 		return
 	}
-	http.Redirect(w, r, "/admin-users.html", http.StatusFound)
+	http.Redirect(w, r, "/admin#users", http.StatusFound)
 }
 
 // adminUsersList is the full user registry — every account the system knows

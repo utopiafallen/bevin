@@ -314,16 +314,23 @@ function renderModelList(opts){
     // meta grid: label/value pairs that reflow at any width (grid
     // auto-fit) — the numbers that used to be ellipsized table cells
     card.append(el("div",{class:"model-card-meta"},
-      metaItem("Context", m.max_context?String(m.max_context):"—"),
-      metaItem("Slots", String(m.slots||1)),
-      metaItem("Profile", m.profile||"general"),
-      metaItem("R/K/S", (m.metadata.reasoning||0)+"/"+(m.metadata.knowledge||0)+"/"+(m.metadata.speed||0))));
+      metaItem("Context", m.max_context ? String(m.max_context) : "—"),
+      metaItem("Slots", String(m.slots || 1)),
+      metaItem("Profile", m.profile || "general"),
+      metaItem("Reasoning", scoreBar(m.metadata.reasoning)),
+      metaItem("Knowledge", scoreBar(m.metadata.knowledge)),
+      metaItem("Speed", scoreBar(m.metadata.speed))));
     w.append(card);
   });
   return w;
 }
 // metaItem — one label/value pair in a model card's meta grid
 function metaItem(label, value){ return el("div",{class:"meta-item"}, el("div",{class:"meta-label"}, label), el("div",{class:"meta-val"}, value)); }
+// scoreBar — a 1-10 model score as a mini progress bar + the exact value
+// (a plain "8/7/9" string gives no sense of strength at a glance; the bar
+// length does, the number keeps precision). The form's sliders edit them;
+// this is the read-only card view.
+function scoreBar(score){ const s=Math.max(0,Math.min(10,Number(score)||0)); return el("div",{class:"score-bar"}, el("div",{class:"score-track"}, el("i",{style:"width:"+(s*10)+"%"})), el("span",{class:"score-num"}, s+"/10")); }
 
 // renderProviderHalf — the shared "Provider configuration" block used by BOTH
 // the main-model form and each aux model: a base URL (a combobox over the

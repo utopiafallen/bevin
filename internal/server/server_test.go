@@ -370,6 +370,28 @@ func TestAdminModelsPageRedirect(t *testing.T) {
 	}
 }
 
+// TestAdminUsersPageRedirect pins the users-panel inlining: the dedicated
+// /admin/users page is gone (the panel lives on the dashboard's Users page),
+// so the old URL 303s to /admin#users — and a non-admin is rejected rather
+// than redirected (same contract as the models redirect).
+func TestAdminUsersPageRedirect(t *testing.T) {
+	a, _ := testApp(t, config.Email{})
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/users", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("admin GET /admin/users code = %d, want 303", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/admin#users" {
+		t.Fatalf("Location = %q, want /admin#users", loc)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated GET /admin/users code = %d, want 403", w.Code)
+	}
+}
+
 // TestAdminConfigEndpoints — the admin config pages' read/save API: admin
 // gating, the models save (persisted + hot-reloaded into the agent), the
 // nothing-to-save rejection, and the email placeholder defaults (a blank port
