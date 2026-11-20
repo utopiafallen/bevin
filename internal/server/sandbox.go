@@ -24,6 +24,12 @@ import (
 // backend error) is still returned — to the ADMIN only, for server
 // maintenance; the admin is the one who enables the OS runtime.
 
+// newSandboxBackend is the backend factory (a test hook: the admin tests
+// override it to inject a fake instead of the real platform backend — the
+// save flow rebuilds the backend, so a directly-set a.sandboxBk would be
+// clobbered before the restart runs).
+var newSandboxBackend = sandbox.New
+
 // buildSandbox (re)builds the per-user container backend from the config.
 // Per-user containers are mandatory (there is no config off switch — the
 // config layer canonicalizes [sandbox] enabled to true), so the backend
@@ -32,7 +38,7 @@ import (
 // every config save.
 func (a *App) buildSandbox(cfg *config.ServerConfig) {
 	var bk sandbox.Backend
-	if b, err := sandbox.New(a.dataDir, sandboxConfigFrom(cfg.Sandbox)); err == nil {
+	if b, err := newSandboxBackend(a.dataDir, sandboxConfigFrom(cfg.Sandbox)); err == nil {
 		bk = b
 	} else if !errors.Is(err, sandbox.ErrDisabled) {
 		log.Printf("bevin: sandbox backend unavailable: %v", err)

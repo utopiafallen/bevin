@@ -68,6 +68,18 @@ type Result struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// Stats is the current resource usage of a container, as best the platform
+// can report it. CPUSec is cumulative CPU-seconds since the container
+// started; MemoryBytes is the current resident memory. Disk is deliberately
+// NOT here — the per-user disk footprint is the server's concern (the disk
+// monitor, which counts growth over the container-storage baseline), not the
+// container runtime's; the admin dashboard joins the two.
+type Stats struct {
+	Running     bool
+	CPUSec      float64
+	MemoryBytes uint64
+}
+
 // Config is the server-level sandbox configuration (server.toml
 // [sandbox]). Zero values mean the platform default.
 type Config struct {
@@ -124,8 +136,23 @@ type Backend interface {
 	// Status reports the current state of the user's container.
 	Status(ctx context.Context, handle string) (Info, error)
 
+	// Stats reports the container's current resource usage (CPU-seconds +
+	// resident memory), as best the platform can gather. A container that
+	// is absent (or that the runtime cannot query) reports Running=false +
+	// zero usage rather than an error, so the admin dashboard can list
+	// every user uniformly.
+	Stats(ctx context.Context, handle string) (Stats, error)
+
 	// Stop stops the user's container (the storage is preserved).
 	Stop(ctx context.Context, handle string) (Info, error)
+
+	// Restart stops + starts the user's container so it picks up the
+	// backend's CURRENT config limits (the per-container CPU/RAM caps —
+	// those are applied at (re)start, never to a running container).
+	// In-flight processes are killed (an accepted consequence of applying
+	// limit changes); the persistent container storage + the user data dir
+	// are preserved.
+	Restart(ctx context.Context, handle string) (Info, error)
 
 	// Remove stops the user's container and deletes its persistent
 	// storage (the user's data directory is untouched).

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -417,6 +418,43 @@ func (b *linuxBackend) currentState(handle string) State {
 	return StateAbsent
 }
 
+// Stats reports the container's current usage (CPU-seconds + resident
+// memory) from the service's cgroup (systemd tracks both for the
+// systemd-nspawn@ instance). Only a RUNNING container has live usage —
+// a stopped/absent one reports zero (the dashboard shows it as not running).
+func (b *linuxBackend) Stats(ctx context.Context, handle string) (Stats, error) {
+	ok, err := b.running(ctx, handle)
+	if err != nil {
+		return Stats{}, err
+	}
+	if !ok {
+		return Stats{}, nil // stopped or absent: no live usage
+	}
+	unit := "systemd-nspawn@" + b.machineName(handle)
+	out, err := b.runOut(ctx, "systemctl", "show", unit, "-p", "CPUUsageNSec", "-p", "MemoryCurrent")
+	if err != nil {
+		return Stats{Running: true}, nil // running, but the usage is unavailable
+	}
+	st := Stats{Running: true}
+	for _, line := range strings.Split(out, "\n") {
+		k, v, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		switch k {
+		case "CPUUsageNSec":
+			if ns, perr := strconv.ParseUint(v, 10, 64); perr == nil {
+				st.CPUSec = float64(ns) / 1e9
+			}
+		case "MemoryCurrent":
+			if mb, perr := strconv.ParseUint(v, 10, 64); perr == nil {
+				st.MemoryBytes = mb
+			}
+		}
+	}
+	return st, nil
+}
+
 // ContainerDataDir is where the user's data dir is mapped in (the
 // nspawn Bind= target).
 func (b *linuxBackend) ContainerDataDir() string { return "/data" }
@@ -527,6 +565,18 @@ func (b *linuxBackend) Stop(ctx context.Context, handle string) (Info, error) {
 		return Info{handle, b.currentState(handle)}, fmt.Errorf("stopping the container failed: %v (%s)", err, tail(errb))
 	}
 	return Info{handle, b.currentState(handle)}, nil
+}
+
+// Restart stops + starts the container so it picks up the backend's current
+// config limits (the CPU/RAM caps live in the unit drop-in, which Ensure
+// rewrites before the start). The persistent rootfs + the user data dir are
+// untouched; in-flight processes are killed (an accepted consequence of a
+// limit change).
+func (b *linuxBackend) Restart(ctx context.Context, handle string) (Info, error) {
+	if _, err := b.Stop(ctx, handle); err != nil {
+		return Info{}, err
+	}
+	return b.Ensure(ctx, handle)
 }
 
 // Remove stops the user's container and deletes its persistent storage

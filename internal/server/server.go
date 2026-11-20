@@ -242,6 +242,11 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /admin/api/users", a.requireAdmin(a.adminUsersList))
 	mux.HandleFunc("POST /admin/api/users", a.requireAdmin(a.adminUsersAdd))
 	mux.HandleFunc("POST /admin/api/users/status", a.requireAdmin(a.adminUsersStatus))
+	// Containers page: the live per-environment health (state + CPU/RAM/disk
+	// usage) + the restart-to-apply action. The per-container resource caps
+	// live on this page and are saved via the shared config endpoint.
+	mux.HandleFunc("GET /admin/api/containers", a.requireAdmin(a.adminContainers))
+	mux.HandleFunc("POST /admin/api/containers/restart", a.requireAdmin(a.adminContainersRestart))
 	if sub, err := fs.Sub(web.FS, "static"); err == nil {
 		mux.Handle("GET /", a.rootHandler(sub))
 	}

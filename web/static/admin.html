@@ -40,6 +40,8 @@
   .slot.busy { background:var(--brand); border-color:var(--brand-hover); }
   .util { height:5px; border-radius:3px; background:var(--surface-2); margin-top:.4rem; overflow:hidden; }
   .util i { display:block; height:100%; background:var(--brand); border-radius:3px; }
+  .util i.warn { background:#d97706; }
+  .util i.danger { background:var(--danger, #dc2626); }
   table.q { width:100%; border-collapse:collapse; font-size:.9rem; }
   table.q th { text-align:left; color:var(--text-muted); font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; padding:.3rem .5rem; }
   table.q td { padding:.45rem .5rem; border-top:1px solid var(--border); }
@@ -84,6 +86,7 @@
       <a href="#sidecars" data-page="sidecars"><span class="ic">⬡</span>Sidecars</a>
       <a href="#email" data-page="email"><span class="ic">✉</span>Email</a>
       <a href="#users" data-page="users"><span class="ic">☻</span>Users</a>
+      <a href="#containers" data-page="containers"><span class="ic">▣</span>Containers</a>
       <a href="#server" data-page="server"><span class="ic">⚙</span>Server</a>
     </div>
     <div class="foot"><a href="#" id="signout">Sign out</a></div>
@@ -220,6 +223,7 @@ function render() {
     case "sidecars": renderSidecars(); startPoll(loadSide, 5000); break;
     case "email": renderEmail(); loadMail(); loadSide(); break;
     case "users": renderUsers(); loadUsers(); break;
+    case "containers": renderContainers(); startPoll(loadContainers, 10000); break;
     case "server": renderServer(); loadStatus(); break;
     default: renderOverview(); startPoll(loadStatus, 2000);
   }
@@ -885,44 +889,164 @@ function renderServer() {
   };
   c2.append(btn);
   m.append(c2);
+}
 
-  // Per-container resource limits. RAM is a SOFT cap (the container is never
-  // killed on breach — the guest may page / kill its own processes); CPU is a
-  // per-container quota; disk is the per-user storage cap (0 = no cap, over
-  // which the user is blocked from new work until they clean up).
-  const c3 = document.createElement("div");
-  c3.className = "card";
-  c3.innerHTML = "<h2>Per-container limits</h2>";
-  const sb = STATUS.server.sandbox || { cores: 0, memory_mb: 0, disk_mb: 0 };
-  const num = (label, key, help) => {
-    const l = document.createElement("label"); l.textContent = label; c3.append(l);
-    const i = document.createElement("input"); i.type = "number"; i.min = "0"; i.value = sb[key] || 0; c3.append(i);
-    c3.append(elP(help));
+// ---- Containers (inlined on this page) ----
+// The dedicated container admin panel: the live per-environment health
+// dashboard (state + CPU/RAM/disk usage) + the per-container resource caps
+// (moved here from the Server page) + the restart-to-apply action. The
+// dashboard auto-refreshes every 10s; the cap form is rendered once and a
+// poll updates only the dashboard in place (never clobbering an in-progress
+// edit).
+let CONTAINERS = null;   // { limits: {cores, memory_mb, disk_mb}, runtime_ok, containers: [...] }
+const _cpuPrev = {};     // handle -> { sec, ts } (the previous poll, for the live CPU %)
+
+async function loadContainers() {
+  try { CONTAINERS = await j("/admin/api/containers"); } catch (_) { return; } // a poll hiccup is not fatal
+  if (page() !== "containers") return;
+  // First load (the "Loading…" card is showing) → full render; steady-state
+  // poll → update the dashboard in place (never re-render the cap form).
+  if (document.getElementById("cont-dash-body")) renderDashboard();
+  else renderContainers();
+}
+
+function renderContainers() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Containers"; m.append(h);
+  const note = document.createElement("p");
+  note.className = "page-note";
+  note.textContent = "Every user's environment + the per-container resource caps. Saving CPU or RAM restarts the running environments (their users are emailed to check in-flight work); the disk cap applies immediately.";
+  m.append(note);
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
+  if (!CONTAINERS) { const c = document.createElement("div"); c.className = "card"; c.append(elP("Loading…")); m.append(c); return; }
+  m.append(renderContainerDash());
+  m.append(renderLimitsCard());
+}
+
+// renderContainerDash — the health dashboard card: a per-environment table
+// (state + CPU + RAM + disk) + a "Restart all" action. The div#cont-dash-body
+// is the part the poll re-renders in place.
+function renderContainerDash() {
+  const c = document.createElement("div"); c.className = "card";
+  let head = "<h2>Environments</h2>";
+  if (CONTAINERS && !CONTAINERS.runtime_ok) head += "<p class='muted'>The container runtime is not ready on this server — per-environment state may be unavailable.</p>";
+  c.innerHTML = head;
+  const tb = document.createElement("div"); tb.id = "cont-dash-body";
+  c.append(tb);
+  const bar = document.createElement("div"); bar.className = "toolbar";
+  const ra = document.createElement("button"); ra.className = "btn ghost"; ra.textContent = "Restart all environments";
+  ra.onclick = () => restartAll(ra);
+  bar.append(elP("Restart bounces every running environment (to apply the current limits, or to recover a stuck one). In-flight work is interrupted — the affected users are emailed."), ra);
+  c.append(bar);
+  renderDashboard();
+  return c;
+}
+
+// renderDashboard — fill #cont-dash-body with the current per-environment
+// usage. CPU is a live % of the cap (computed across the 10s polls); RAM +
+// disk are usage / cap with a bar.
+function renderDashboard() {
+  const body = document.getElementById("cont-dash-body");
+  if (!body) return;
+  body.innerHTML = "";
+  const lim = (CONTAINERS && CONTAINERS.limits) || {};
+  const cores = lim.cores || 0, memCap = lim.memory_mb || 0, diskCap = lim.disk_mb || 0;
+  const list = (CONTAINERS && CONTAINERS.containers) || [];
+  if (!list.length) { body.append(elP("No environments yet — one is created for each user when they first sign in.")); return; }
+  const t = document.createElement("table"); t.className = "q";
+  t.innerHTML = "<tr><th>Environment</th><th>State</th><th>CPU</th><th>RAM</th><th>Disk</th></tr>";
+  const now = Date.now();
+  for (const c of list) {
+    // CPU — a live % of the cap (poll delta); "measuring…" on the first poll
+    // and right after a restart (the cumulative counter resets).
+    let cpuCell;
+    if (c.running) {
+      const prev = _cpuPrev[c.handle];
+      let pct = null;
+      if (prev && cores > 0 && c.cpu_seconds >= prev.sec) {
+        const dt = (now - prev.ts) / 1000;
+        if (dt > 0) pct = Math.max(0, Math.min(100, ((c.cpu_seconds - prev.sec) / dt / cores) * 100));
+      }
+      _cpuPrev[c.handle] = { sec: c.cpu_seconds, ts: now };
+      cpuCell = pct == null ? "<span class='muted'>measuring…</span>" : utilBar(pct) + "<br>" + esc(pct.toFixed(0) + "% of " + cores + " cores");
+    } else {
+      delete _cpuPrev[c.handle];
+      cpuCell = "<span class='muted'>—</span>";
+    }
+    // RAM — usage / cap (a bar) while running.
+    let ramCell = "<span class='muted'>—</span>";
+    if (c.running) ramCell = (memCap > 0 ? utilBar(c.ram_mb / memCap * 100) + "<br>" : "") + esc(fmtBytes(c.ram_mb * 1048576) + (memCap > 0 ? " / " + fmtBytes(memCap * 1048576) : " (no cap)"));
+    // Disk — usage / cap (a bar); tracked even when stopped.
+    let diskCell = "<span class='muted'>—</span>";
+    if (c.disk_mb > 0) diskCell = (diskCap > 0 ? utilBar(c.disk_mb / diskCap * 100) + "<br>" : "") + esc(fmtBytes(c.disk_mb * 1048576) + (diskCap > 0 ? " / " + fmtBytes(diskCap * 1048576) : " (no cap)"));
+    const state = c.running ? "<span class='badge ok'>running</span>" : "<span class='muted'>" + esc(c.state) + "</span>";
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td class='kv'>" + esc(c.handle) + "</td><td>" + state + "</td><td>" + cpuCell + "</td><td>" + ramCell + "</td><td>" + diskCell + "</td>";
+    t.append(tr);
+  }
+  body.append(t);
+}
+
+// utilBar — a usage bar (the shared .util style), 0-100% with a warn/danger
+// tint past 70%/90%.
+function utilBar(pct) {
+  const w = Math.max(0, Math.min(100, pct));
+  const cls = w >= 90 ? "danger" : (w >= 70 ? "warn" : "");
+  return "<div class='util' style='width:140px'><i class='" + cls + "' style='width:" + w + "%'></i></div>";
+}
+function fmtBytes(b) {
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + " GiB";
+  if (b >= 1048576) return Math.round(b / 1048576) + " MiB";
+  if (b >= 1024) return Math.round(b / 1024) + " KiB";
+  return Math.round(b) + " B";
+}
+
+// renderLimitsCard — the per-container resource caps (moved here from the
+// Server page). RAM is a SOFT cap; CPU a quota; disk the per-user storage cap.
+function renderLimitsCard() {
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = "<h2>Per-container limits</h2>";
+  const lim = (CONTAINERS && CONTAINERS.limits) || { cores: 0, memory_mb: 0, disk_mb: 0 };
+  const num = (id, label, val, help) => {
+    const l = document.createElement("label"); l.textContent = label; c.append(l);
+    const i = document.createElement("input"); i.type = "number"; i.min = "0"; i.id = id; i.value = val || 0; c.append(i);
+    c.append(elP(help));
     return i;
   };
-  const coresInp = num("CPU cores", "cores", "Per-container CPU quota (0 = platform default).");
-  const memInp = num("Memory (MiB)", "memory_mb", "Per-container RAM cap in MiB (0 = platform default). SOFT — the container is never killed on breach.");
-  const diskInp = num("Disk (MiB)", "disk_mb", "Per-user disk usage cap in MiB (0 = no cap). Over it, the user is blocked from new work until they clean up back under 90%.");
-  c3.append(elP("The disk cap applies immediately (the monitor reads it live). CPU and RAM apply when each environment next starts — a running environment keeps its current limits until you stop and start it; new environments use the new limits right away."));
-  const sbtn = document.createElement("button");
-  sbtn.className = "btn";
-  sbtn.textContent = "Save limits";
+  num("cont_cores", "CPU cores", lim.cores, "Per-container CPU quota (0 = platform default).");
+  num("cont_mem", "Memory (MiB)", lim.memory_mb, "Per-container RAM cap in MiB (0 = platform default). SOFT — the container is never killed on breach.");
+  num("cont_disk", "Disk (MiB)", lim.disk_mb, "Per-user disk usage cap in MiB (0 = no cap). Over it, the user is blocked from new work until they clean up back under 90%.");
+  c.append(elP("The disk cap applies immediately (the monitor reads it live). Changing CPU or RAM and saving restarts the running environments so they pick up the new caps — their users are emailed that their environment was restarted (in-flight work is interrupted). New environments use the saved limits right away."));
+  const sbtn = document.createElement("button"); sbtn.className = "btn"; sbtn.textContent = "Save limits";
   sbtn.onclick = async () => {
-    sbtn.disabled = true; sbtn.textContent = "Saving…";
+    sbtn.disabled = true; sbtn.textContent = "Saving + restarting…";
     try {
-      const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sandbox: { cores: parseInt(coresInp.value, 10) || 0, memory_mb: parseInt(memInp.value, 10) || 0, disk_mb: parseInt(diskInp.value, 10) || 0 } }) });
-      await loadStatus(); // refresh STATUS (re-renders this page)
+      const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sandbox: { cores: parseInt(document.getElementById("cont_cores").value, 10) || 0, memory_mb: parseInt(document.getElementById("cont_mem").value, 10) || 0, disk_mb: parseInt(document.getElementById("cont_disk").value, 10) || 0 } }) });
+      const n = (r.restarted || []).length;
       msg(r.reloaded
-        ? "Saved. The disk cap is live; CPU/RAM apply when each environment next starts (a running one keeps its limits until it is stopped and started)."
+        ? (n > 0 ? "Saved — " + n + " environment(s) restarted to apply the new limits; their users were emailed." : "Saved. No running environments to restart — new ones use the new limits.")
         : "Saved (the agent reload failed — restart bevin to apply).",
         r.reloaded ? "ok" : "err");
+      loadContainers(); // refresh the dashboard (the caps changed)
     } catch (e) {
       msg("Save failed: " + e.message, "err");
-      sbtn.disabled = false; sbtn.textContent = "Save limits";
-    }
+    } finally { sbtn.disabled = false; sbtn.textContent = "Save limits"; }
   };
-  c3.append(sbtn);
-  m.append(c3);
+  c.append(sbtn);
+  return c;
+}
+
+async function restartAll(btn) {
+  btn.disabled = true; btn.textContent = "Restarting…";
+  try {
+    const r = await j("/admin/api/containers/restart", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const n = (r.restarted || []).length;
+    msg(n > 0 ? "Restarted " + n + " environment(s) — their users were emailed." : "No running environments to restart.", "ok");
+    loadContainers(); // reflect the bounce
+  } catch (e) {
+    msg("Restart failed: " + e.message, "err");
+  } finally { btn.disabled = false; btn.textContent = "Restart all environments"; }
 }
 
 function elP(txt) { const p = document.createElement("p"); p.className = "muted"; p.textContent = txt; return p; }

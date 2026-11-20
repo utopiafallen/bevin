@@ -253,6 +253,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 			p.Tools.WebSearch.APIKey = cur.Tools.WebSearch.APIKey // blank = keep the stored one
 		}
 	}
+	oldSandbox := a.liveCfg().Sandbox
 	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox, p.Tools)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -260,7 +261,17 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("config: saved by admin (%s)", clientIP(r))
 	reloaded := a.applyConfig(cfg)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reloaded": reloaded})
+	// If the per-container CPU/RAM limits changed, restart the running
+	// environments (those caps apply at (re)start, never to a running
+	// container) + email the affected users. The disk cap needs no restart
+	// (the monitor reads it live); a disk-only change is a no-op here. The
+	// restart runs synchronously so the response reports the apply
+	// definitively (a few environments is a few seconds).
+	var restarted []string
+	if p.Sandbox != nil && (oldSandbox.Cores != cfg.Sandbox.Cores || oldSandbox.MemoryMB != cfg.Sandbox.MemoryMB) {
+		restarted = a.restartRunningContainers(r.Context())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reloaded": reloaded, "restarted": restarted})
 }
 
 // adminProbeModel detects the provider + lists the models for a base URL (the

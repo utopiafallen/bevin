@@ -26,6 +26,8 @@ type fakeRun struct {
 	copyFrom map[string]string
 	// dataDir is what the fake needs to simulate `cp -a base rootfs`.
 	dataDir string
+	// showOutput is what `systemctl show ...` returns (the Stats test).
+	showOutput string
 }
 
 func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([]byte, []byte, int, error) {
@@ -45,6 +47,9 @@ func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([
 	case "systemctl":
 		if len(argv) >= 1 && argv[0] == "daemon-reload" {
 			return nil, nil, 0, nil
+		}
+		if len(argv) >= 1 && argv[0] == "show" {
+			return []byte(f.showOutput), nil, 0, nil
 		}
 		if len(argv) >= 2 && argv[0] == "start" {
 			f.mu.Lock()
@@ -478,6 +483,79 @@ func TestLinuxStatus(t *testing.T) {
 	}
 	if info, err := b.Status(ctx, "alice"); err != nil || info.State != StateStopped {
 		t.Fatalf("Status(stopped) = %s, %v", info.State, err)
+	}
+}
+
+// TestLinuxStats checks the systemctl-show usage parsing (CPU-seconds from
+// CPUUsageNSec + resident memory from MemoryCurrent) for a running
+// container, and zero usage for an absent one.
+func TestLinuxStats(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	ctx := context.Background()
+	// Absent: no usage, no error.
+	st, err := b.Stats(ctx, "alice")
+	if err != nil {
+		t.Fatalf("Stats(absent): %v", err)
+	}
+	if st.Running || st.CPUSec != 0 || st.MemoryBytes != 0 {
+		t.Fatalf("Stats(absent) = %+v, want not-running + zero usage", st)
+	}
+	// Running: the canned cgroup values parse (1.5s of CPU, 5 GiB RAM).
+	fake.showOutput = "CPUUsageNSec=1500000000\nMemoryCurrent=5368709120\n"
+	if _, err := b.Ensure(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	st, err = b.Stats(ctx, "alice")
+	if err != nil {
+		t.Fatalf("Stats(running): %v", err)
+	}
+	if !st.Running {
+		t.Fatalf("Stats(running).Running = false, want true")
+	}
+	if st.CPUSec != 1.5 {
+		t.Fatalf("Stats.CPUSec = %v, want 1.5 (1500000000 ns)", st.CPUSec)
+	}
+	if st.MemoryBytes != 5368709120 {
+		t.Fatalf("Stats.MemoryBytes = %d, want 5368709120", st.MemoryBytes)
+	}
+}
+
+// TestLinuxRestart checks that a restart stops + starts the container so it
+// picks up the NEW limits (the drop-in is rewritten with the current config
+// at (re)start) while the persistent storage survives.
+func TestLinuxRestart(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	ctx := context.Background()
+	if _, err := b.Ensure(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Raise the limits (as a save would) — the running container must not
+	// pick them up until restarted.
+	b.cfg.Cores = 4
+	b.cfg.MemoryMB = 8192
+	info, err := b.Restart(ctx, "alice")
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if info.State != StateRunning {
+		t.Fatalf("after Restart = %s, want running", info.State)
+	}
+	// The restart ran a stop (the drop-in is only rewritten when the unit is
+	// not running).
+	if !fake.hadCall("systemctl", "stop", "systemd-nspawn@bevin-alice") {
+		t.Fatalf("Restart did not stop the container: %v", fake.calls)
+	}
+	// The new limits are in the drop-in now (4 cores, 8192M).
+	di, err := os.ReadFile(b.dropInPath("alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(di), "CPUQuota=400%") || !strings.Contains(string(di), "MemoryHigh=8192M") {
+		t.Fatalf("drop-in after Restart =\n%s\nmissing the new limits (CPUQuota=400%%, MemoryHigh=8192M)", di)
+	}
+	// The storage survives the restart (not wiped).
+	if _, err := os.Stat(b.rootfsDir("alice")); err != nil {
+		t.Fatal("rootfs vanished on restart")
 	}
 }
 

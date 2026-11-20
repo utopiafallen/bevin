@@ -214,6 +214,36 @@ func (b *windowsBackend) Status(_ context.Context, handle string) (Info, error) 
 	return Info{handle, b.diskState(handle)}, nil
 }
 
+// Stats reports the container's current usage (CPU-seconds + resident
+// memory) from HCS's container statistics. Only a RUNNING container has
+// live usage — a stopped/absent one reports zero.
+func (b *windowsBackend) Stats(ctx context.Context, handle string) (Stats, error) {
+	info, err := b.Status(ctx, handle)
+	if err != nil {
+		return Stats{}, err
+	}
+	if info.State != StateRunning {
+		return Stats{}, nil // stopped or absent: no live usage
+	}
+	c, err := hcsshim.OpenContainer(b.containerID(handle))
+	if err != nil {
+		if isNotFound(err) {
+			return Stats{}, nil
+		}
+		return Stats{}, err
+	}
+	defer c.Close()
+	stats, err := c.Statistics()
+	if err != nil {
+		return Stats{Running: true}, nil // running, but the stats are unavailable
+	}
+	return Stats{
+		Running:     true,
+		CPUSec:      float64(stats.Processor.TotalRuntime100ns) / 1e7,
+		MemoryBytes: stats.Memory.UsageCommitBytes,
+	}, nil
+}
+
 // Ensure creates (when needed) and starts the user's container. The
 // compute system is reattached when it still exists (its state lives in
 // the on-host layer folders, so a bevin restart does not lose anything).
@@ -439,6 +469,51 @@ func (b *windowsBackend) Stop(_ context.Context, handle string) (Info, error) {
 	_ = c.WaitTimeout(60 * time.Second)
 	c.Close()
 	return Info{handle, b.diskState(handle)}, nil
+}
+
+// Restart recreates the container so it picks up the backend's current
+// CPU/RAM limits. On HCS those are fixed at container creation (a plain
+// stop+start reattaches the existing compute system and keeps its original
+// vCPU/memory), so a limit change requires recreating the compute system.
+// The on-host read-write layer + the user data dir are REUSED (not deleted),
+// so the user's installed apps + data survive — only in-flight processes are
+// killed (an accepted consequence of a limit change).
+func (b *windowsBackend) Restart(ctx context.Context, handle string) (Info, error) {
+	id := b.containerID(handle)
+	// Destroy the existing compute system (keeping the on-host rwlayer +
+	// data dir intact).
+	if c, err := hcsshim.OpenContainer(id); err == nil {
+		if err := c.Terminate(); err != nil && !isAlreadyStopped(err) {
+			c.Close()
+			return Info{}, fmt.Errorf("terminating the container for restart failed: %w", err)
+		}
+		_ = c.WaitTimeout(60 * time.Second)
+		c.Close()
+	} else if !isNotFound(err) {
+		return Info{}, fmt.Errorf("looking up the container for restart failed: %w", err)
+	}
+	// Recreate + start with the backend's current limits. The read-write
+	// layer is reused (buildConfig references the same on-host path, so the
+	// user's installed apps survive the recreate).
+	cc, err := b.buildConfig(handle)
+	if err != nil {
+		return Info{}, err
+	}
+	c, err := hcsshim.CreateContainer(id, cc)
+	if err != nil {
+		return Info{}, fmt.Errorf("recreating the container failed: %w", err)
+	}
+	if err := c.Start(); err != nil {
+		_ = c.Terminate()
+		c.Close()
+		return Info{}, fmt.Errorf("starting the restarted container failed: %w", err)
+	}
+	if err := b.startKeepalive(ctx, c); err != nil {
+		c.Close()
+		return Info{}, err
+	}
+	c.Close()
+	return Info{handle, StateRunning}, nil
 }
 
 // Remove stops the user's container and deletes its persistent storage
