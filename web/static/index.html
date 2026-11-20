@@ -484,6 +484,7 @@
       a.raf = requestAnimationFrame(function () { paint(a); });
     }
     function pinScroll(el) {
+      if (!el) return false;
       var atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
       return atBottom;
     }
@@ -733,8 +734,17 @@
       var input = $("message");
       var text = input.value.trim();
       if (!text) return;
+      // Guard the whole send against a broken page state (a mid-transition
+      // DOM where the chat log is gone): bail WITHOUT consuming the text so
+      // the user can retry, instead of crashing into a stuck state.
+      if (!$("chatLog")) return;
       input.value = "";
-      addUserMsg(text, new Date().toISOString());
+      try {
+        addUserMsg(text, new Date().toISOString());
+      } catch (e) {
+        input.value = text;
+        return;
+      }
       sending = true;
       $("sendBtn").disabled = true;
 
@@ -745,13 +755,17 @@
       // Measure the follow state BEFORE the append (the append grows the
       // log and would trip the pinScroll threshold by itself), then scroll
       // the new bubble into view — without this, the Thinking… animation
-      // sits below the fold until the first content delta.
-      var wasAtBottom = pinScroll($("#chatLog"));
-      var asst = startAssistantMsg();
-      if (wasAtBottom) scrollChat();
-      asst.t0 = 0;
+      // sits below the fold until the first content delta. All of this DOM
+      // prep is INSIDE the try: a failure here must take the catch/finally
+      // path (error note + state reset), never an unhandled rejection that
+      // leaves sending=true and the Send button disabled forever.
+      var asst = null;
       var reasoning = "";
       try {
+        var wasAtBottom = pinScroll($("#chatLog"));
+        asst = startAssistantMsg();
+        if (wasAtBottom) scrollChat();
+        asst.t0 = 0;
         if (!convID) {
           var title = text.length > 40 ? text.slice(0, 40) + "…" : text;
           var cr = await fetch("/api/conversations", {
@@ -760,7 +774,12 @@
             body: JSON.stringify({ title: title })
           });
           if (await diskRedirect(cr)) throw new Error("disk exceeded");
-          if (!cr.ok) { var je = {}; try { je = await cr.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + cr.status)); }
+          if (!cr.ok) {
+            var je = {}; try { je = await cr.json(); } catch (e) {}
+            var e1 = new Error(je.error || ("HTTP " + cr.status));
+            e1.status = cr.status;
+            throw e1;
+          }
           convID = (await cr.json()).id;
           try { localStorage.setItem("bevin-conv", convID); } catch (e) {}
           loadConvMeta(); // the conversation exists now: the controls unlock
@@ -772,7 +791,12 @@
           body: JSON.stringify({ message: text })
         });
         if (await diskRedirect(resp)) throw new Error("disk exceeded");
-        if (!resp.ok) { var je2 = {}; try { je2 = await resp.json(); } catch (e) {} throw new Error(je2.error || ("HTTP " + resp.status)); }
+        if (!resp.ok) {
+          var je2 = {}; try { je2 = await resp.json(); } catch (e) {}
+          var e2 = new Error(je2.error || ("HTTP " + resp.status));
+          e2.status = resp.status;
+          throw e2;
+        }
 
         var reader = resp.body.getReader();
         var dec = new TextDecoder();
@@ -863,9 +887,14 @@
           addErrorMsg("⚠ The stream ended before the reply completed.");
         }
       } catch (err) {
-        if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
-        else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
-        addErrorMsg("⚠ " + err.message);
+        if (asst) {
+          if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
+          else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
+        }
+        // 401 = the session died mid-session (server restarted, cookie
+        // lost): re-auth instead of stranding the user on a dead page.
+        if (err && err.status === 401) { me = null; showLogin(); return; }
+        try { addErrorMsg("⚠ " + err.message); } catch (e) {}
       } finally {
         sending = false;
         $("sendBtn").disabled = false;
