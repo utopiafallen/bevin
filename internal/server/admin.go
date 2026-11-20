@@ -152,10 +152,10 @@ func (a *App) adminEmailTest(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminConfig is the current server config, the areas the admin config pages
-// edit: models + aux (full config) + email + oauth (both masked: a stored
-// password/secret is never returned — only whether one is set). Read from
-// disk: disk is the commit of record, so the page always sees the current
-// values (no staleness after a save).
+// edit: models + aux (API keys masked: never returned — only has_api_key) +
+// email + oauth (both masked: a stored password/secret is never returned —
+// only whether one is set). Read from disk: disk is the commit of record, so
+// the page always sees the current values (no staleness after a save).
 func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.Load(a.dataDir)
 	if err != nil {
@@ -163,8 +163,8 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models": cfg.Models,
-		"aux":    cfg.Aux,
+		"models": maskedModels(cfg.Models),
+		"aux":    maskedAux(cfg.Aux),
 		"email": map[string]any{
 			"enabled":      cfg.Email.Enabled,
 			"smtp_host":    cfg.Email.SMTPHost,
@@ -215,11 +215,36 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maskedModels / maskedAux blank the API keys for the admin config response
+// (the masked-secret pattern shared with email/oauth/web_search): the
+// browser never receives a stored key (only has_api_key), so a blank key on
+// save keeps the stored one (adminConfigSave).
+func maskedModels(models []config.Model) []config.Model {
+	out := make([]config.Model, len(models))
+	for i, m := range models {
+		m.HasAPIKey = m.APIKey != ""
+		m.APIKey = ""
+		out[i] = m
+	}
+	return out
+}
+
+func maskedAux(aux []config.AuxModel) []config.AuxModel {
+	out := make([]config.AuxModel, len(aux))
+	for i, a := range aux {
+		a.HasAPIKey = a.APIKey != ""
+		a.APIKey = ""
+		out[i] = a
+	}
+	return out
+}
+
 // adminConfigSave saves a config-area edit from the admin config pages (a
 // subset of {models, aux, email, oauth, tools}; a missing key is unchanged) +
 // hot-reloads the running agent so the change applies without a restart. A
-// blank email password / OAuth client secret / web_search API key keeps the
-// stored one (the UI is never given the stored secret to echo back).
+// blank email password / OAuth client secret / web_search API key / model or
+// aux API key keeps the stored one (the UI is never given the stored secret
+// to echo back).
 func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		Models  *[]config.Model    `json:"models"`
@@ -257,6 +282,39 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	if p.Tools != nil && p.Tools.WebSearch.APIKey == "" {
 		if cur, err := config.Load(a.dataDir); err == nil {
 			p.Tools.WebSearch.APIKey = cur.Tools.WebSearch.APIKey // blank = keep the stored one
+		}
+	}
+	// A blank model/aux API key keeps the stored one (the masked pattern —
+	// see maskedModels). Main models match by id; aux models have no id, so
+	// they match by provider+base+model (a key carries over only when the
+	// endpoint and model are unchanged — a changed pair is re-keyed).
+	if p.Models != nil || p.Aux != nil {
+		if cur, err := config.Load(a.dataDir); err == nil {
+			if p.Models != nil {
+				stored := make(map[string]string, len(cur.Models))
+				for _, m := range cur.Models {
+					stored[m.ID] = m.APIKey
+				}
+				for i := range *p.Models {
+					if (*p.Models)[i].APIKey == "" {
+						(*p.Models)[i].APIKey = stored[(*p.Models)[i].ID]
+					}
+				}
+			}
+			if p.Aux != nil {
+				key := func(x config.AuxModel) string {
+					return x.Provider + "\x00" + x.BaseURL + "\x00" + x.ModelID
+				}
+				stored := make(map[string]string, len(cur.Aux))
+				for _, x := range cur.Aux {
+					stored[key(x)] = x.APIKey
+				}
+				for i := range *p.Aux {
+					if (*p.Aux)[i].APIKey == "" {
+						(*p.Aux)[i].APIKey = stored[key((*p.Aux)[i])]
+					}
+				}
+			}
 		}
 	}
 	oldSandbox := a.liveCfg().Sandbox

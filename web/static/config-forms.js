@@ -357,7 +357,13 @@ function renderProviderHalf(prefix, draft, opts){
   base.setAttribute("list", prefix+"_base_urls");
   const baseDl = el("datalist", {id:prefix+"_base_urls"});
   [...new Set(knownBases.filter(Boolean))].forEach(u => baseDl.append(el("option", {value:u})));
-  const key = inp(prefix+"_key", draft.api_key, "blank for a local llama-server");
+  // The key is a secret: the admin config API never returns a stored key
+  // (only has_api_key), so editing an existing model loads the field
+  // blank — "leave blank to keep", enter to replace. A masked input
+  // (Show toggles) so a freshly typed key isn't sitting on screen.
+  const key = el("input", {id: prefix+"_key", type:"password", value: draft.api_key||"", placeholder: draft.has_api_key ? "saved — leave blank to keep" : "blank for a local llama-server"});
+  const keyShow = el("button", {type:"button", class:"pw-toggle"}, "Show");
+  keyShow.onclick = function(){ const show = key.type==="password"; key.type = show?"text":"password"; keyShow.textContent = show?"Hide":"Show"; keyShow.setAttribute("aria-pressed", show?"true":"false"); };
   const provLabel = draft.provider ? el("span", {class:"kv"}, draft.provider) : el("span", {class:"small"}, "— press Detect —");
   const btns = el("div", {class:"form-btns"});
   if(clearBtn){ const cb = el("button", {class:"ghost"}, clearBtn.label); cb.onclick = clearBtn.fn; btns.append(cb); }
@@ -369,7 +375,7 @@ function renderProviderHalf(prefix, draft, opts){
   if(draft._detecting){ db.setAttribute("disabled",""); db.style.opacity = ".6"; db.style.cursor = "default"; }
   btns.append(db);
   half.append(
-    el("div", {class:"row"}, field("Base URL", el("div",{}, base, baseDl)), field("API key", key)),
+    el("div", {class:"row"}, field("Base URL", el("div",{}, base, baseDl)), field("API key", el("div",{class:"pw-wrap"}, key, keyShow))),
     btns,
     field("Provider", provLabel)
   );

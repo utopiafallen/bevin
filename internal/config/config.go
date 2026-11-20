@@ -223,6 +223,11 @@ type Model struct {
 	Provider    string `toml:"provider" json:"provider"` // openai | anthropic | llama
 	BaseURL     string `toml:"base_url" json:"base_url"`
 	APIKey      string `toml:"api_key" json:"api_key"`
+	// HasAPIKey is the masked-secret flag for API responses: the admin
+	// config API never returns the key itself (only whether one is set),
+	// and a blank key on save keeps the stored one (the UI is never given
+	// a stored key to echo back). Derived at read time — not persisted.
+	HasAPIKey bool `toml:"-" json:"has_api_key"`
 	ModelID     string `toml:"model_id" json:"model_id"`
 	DisplayName string `toml:"display_name" json:"display_name"`
 	MaxContext  int    `toml:"max_context" json:"max_context"`
@@ -267,6 +272,8 @@ type AuxModel struct {
 	Provider string   `toml:"provider" json:"provider"`
 	BaseURL  string   `toml:"base_url" json:"base_url"`
 	APIKey   string   `toml:"api_key" json:"api_key"`
+	// HasAPIKey — the masked-secret flag (see Model.HasAPIKey).
+	HasAPIKey bool `toml:"-" json:"has_api_key"`
 	ModelID  string   `toml:"model_id" json:"model_id"`
 	// Profile is the model's MODEL PROFILE (internal/profile) — the same
 	// assignable surface as the main models (blank self-heals to general, a
