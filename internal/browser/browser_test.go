@@ -158,6 +158,15 @@ func fakeCDP(t *testing.T, got *sync.Mutex, bodies *[]string) *httptest.Server {
 			if err := c.Write(r.Context(), websocket.MessageText, []byte(resp)); err != nil {
 				return
 			}
+			// One event frame after each response (the shape of a
+			// flattened per-tab event). With no sink registered it is
+			// dropped (the v1 default — this also exercises the drop
+			// path in TestCDPClientAgainstFakeEndpoint);
+			// TestCDPEventRouting registers a sink and asserts delivery.
+			ev := `{"method":"Network.loadingFinished","sessionId":"SESS123","params":{"requestId":"1.1"}}`
+			if err := c.Write(r.Context(), websocket.MessageText, []byte(ev)); err != nil {
+				return
+			}
 		}
 	}))
 }

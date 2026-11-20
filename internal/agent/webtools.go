@@ -20,14 +20,16 @@ const webBrowserDescriptionBase = `Browse the web in a real desktop browser on t
 Commands:
 - openTab (url) — open a new tab (url optional; becomes the current tab)
 - navigate (url) — load url in the current tab and wait for it to finish loading
-- read (selector?) — the page's clean text as markdown + a numbered list of interactive elements (#N: role "name"). This is the only way to see page content. Pass selector to drill into a part of a truncated page.
+- read (selector?) — the page's clean text as markdown + a numbered list of interactive elements (#N: role "name"). This is how you see page content. Pass selector to drill into a part of a truncated page.
+- readItems (selector) — collect a list: the items matching selector, sorted by VISUAL position (top, left — not DOM order), deduped, text + first link per item, after the page has settled.
+- scroll (direction?, viewports?) — scroll the page one viewport (default; direction down|up|top|bottom, viewports >= 1) and wait for it to settle; reports the new position and whether the bottom was reached.
 - click (element or selector) — click element #N from the last read (or a raw CSS selector)
 - type (element or selector, text) — click the element, then type text into it (a trailing newline is sent as Enter)
 - select (element or selector, value) — pick an option of a <select> (by value or visible text)
 - waitFor (selector or expression, timeout_ms?) — wait until a selector is present+visible, or a JS expression is truthy (default 10 s)
 - evaluate (expression) — run JS in the page and return the result (last resort)
 - listTabs / closeTab (tab?) — manage tabs
-Workflow: openTab/navigate → read → act with the #N ids → read again after each action (the page changes; stale #N ids fail).`
+Workflow: openTab/navigate → read → act with the #N ids → read again after each action (the page changes; stale #N ids fail). On lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached — readItems returns items in visual (bounding-box) order, deduped, after the page has settled. Do not evaluate-scroll + read on such pages.`
 
 // webBrowserWireDescription is the web_browser description for ONE turn's
 // wire request: the base + the search note matching this instance's
@@ -43,10 +45,11 @@ func webBrowserWireDescription(wsEnabled bool) string {
 
 // registerWebBrowser registers the web_browser tool (the plan's WS5): ONE
 // tool, a single `command` arg over a fixed surface (openTab, navigate,
-// read, click, type, select, waitFor, evaluate, listTabs, closeTab). It is
-// registered unconditionally — a host without a desktop browser reports the
-// tool as UNAVAILABLE at use time (the neutral wording; the user is the one
-// who installs a browser), which the model relays to the user.
+// read, readItems, scroll, click, type, select, waitFor, evaluate,
+// listTabs, closeTab). It is registered unconditionally — a host without a
+// desktop browser reports the tool as UNAVAILABLE at use time (the neutral
+// wording; the user is the one who installs a browser), which the model
+// relays to the user.
 func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 	return r.Register(Tool{
 		Name:        "web_browser",
@@ -56,14 +59,16 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type": "string",
-					"enum": []string{"openTab", "navigate", "read", "click", "type", "select", "waitFor", "evaluate", "listTabs", "closeTab"},
+					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "evaluate", "listTabs", "closeTab"},
 				},
-				"url":        map[string]any{"type": "string", "description": "openTab / navigate"},
-				"element":    map[string]any{"type": "string", "description": "click / type / select: the #N id from the last read"},
-				"selector":   map[string]any{"type": "string", "description": "a raw CSS selector (advanced fallback for click/type/select; the drill-in scope for read; the wait target for waitFor)"},
-				"text":       map[string]any{"type": "string", "description": "type: what to type (a trailing newline = Enter)"},
-				"value":      map[string]any{"type": "string", "description": "select: the option value or visible text"},
+				"url":       map[string]any{"type": "string", "description": "openTab / navigate"},
+				"element":   map[string]any{"type": "string", "description": "click / type / select: the #N id from the last read"},
+				"selector":  map[string]any{"type": "string", "description": "a raw CSS selector (advanced fallback for click/type/select; the drill-in scope for read; the item selector for readItems; the wait target for waitFor)"},
+				"text":      map[string]any{"type": "string", "description": "type: what to type (a trailing newline = Enter)"},
+				"value":     map[string]any{"type": "string", "description": "select: the option value or visible text"},
 				"expression": map[string]any{"type": "string", "description": "evaluate: the JS expression; waitFor: the truthy predicate"},
+				"direction":  map[string]any{"type": "string", "description": "scroll: which way to move — down, up, top, or bottom (default down)"},
+				"viewports":  map[string]any{"type": "number", "description": "scroll: how many viewport heights to move (default 1)"},
 				"tab":        map[string]any{"type": "string", "description": "a tab id from listTabs (default: the current tab)"},
 				"timeout_ms": map[string]any{"type": "number", "description": "waitFor: the ceiling (default 10000, max 120000)"},
 			},
@@ -82,6 +87,8 @@ type webBrowserArgs struct {
 	Text       string `json:"text"`
 	Value      string `json:"value"`
 	Expression string `json:"expression"`
+	Direction  string `json:"direction"`
+	Viewports  int    `json:"viewports"`
 	Tab        string `json:"tab"`
 	TimeoutMS  int    `json:"timeout_ms"`
 }
@@ -91,7 +98,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 	return func(ctx context.Context, handle string, args json.RawMessage) (string, error) {
 		var a webBrowserArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			return fmt.Sprintf("invalid arguments: %v — the only required field is \"command\" (one of openTab, navigate, read, click, type, select, waitFor, evaluate, listTabs, closeTab).", err), nil
+			return fmt.Sprintf("invalid arguments: %v — the only required field is \"command\" (one of openTab, navigate, read, readItems, scroll, click, type, select, waitFor, evaluate, listTabs, closeTab).", err), nil
 		}
 		// The per-user browser (lazy launch on first use). A host without a
 		// desktop browser lands here with the neutral unavailable report.
@@ -133,6 +140,46 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 				return unavailable("read", err), nil
 			}
 			return browser.BoundRead(pr), nil
+		case "readItems":
+			tab, err := inst.ResolveTab(ctx, a.Tab)
+			if err != nil {
+				return unavailable("readItems", err), nil
+			}
+			pi, err := inst.ReadItems(ctx, tab, a.Selector)
+			if err != nil {
+				return unavailable("readItems", err), nil
+			}
+			return browser.BoundItems(pi), nil
+		case "scroll":
+			dir := strings.ToLower(a.Direction)
+			if dir == "" {
+				dir = "down"
+			}
+			switch dir {
+			case "down", "up", "top", "bottom":
+			default:
+				return fmt.Sprintf("scroll direction must be down, up, top, or bottom (got %q).", a.Direction), nil
+			}
+			n := a.Viewports
+			if n < 1 {
+				n = 1
+			}
+			if n > 10 {
+				n = 10
+			}
+			tab, err := inst.ResolveTab(ctx, a.Tab)
+			if err != nil {
+				return unavailable("scroll", err), nil
+			}
+			sr, err := inst.Scroll(ctx, tab, dir, n)
+			if err != nil {
+				return unavailable("scroll", err), nil
+			}
+			out := browser.ScrollReport(sr)
+			if n > 2 {
+				out += "\nNOTE: " + browser.LargeScrollNudge
+			}
+			return out, nil
 		case "click", "type", "select":
 			return doElementAction(ctx, inst, a, handle)
 		case "waitFor":
@@ -167,13 +214,12 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if err != nil {
 				return unavailable("evaluate", err), nil
 			}
-			v, err := inst.Evaluate(ctx, session, a.Expression)
+			// The large-scroll guard (the seatbelt — design log LAZY-LIST
+			// TIER): a move of more than two viewport heights appends the
+			// incremental-scrolling nudge to the result.
+			s, err := inst.EvaluateGuarded(ctx, session, a.Expression)
 			if err != nil {
 				return unavailable("evaluate", err), nil
-			}
-			s := string(v)
-			if len(s) > 8000 {
-				s = s[:8000] + "…[truncated]"
 			}
 			return s, nil
 		case "listTabs":
@@ -196,7 +242,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return fmt.Sprintf("closed tab %s.", id), nil
 		default:
-			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, click, type, select, waitFor, evaluate, listTabs, closeTab.", a.Command), nil
+			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, readItems, scroll, click, type, select, waitFor, evaluate, listTabs, closeTab.", a.Command), nil
 		}
 	}
 }

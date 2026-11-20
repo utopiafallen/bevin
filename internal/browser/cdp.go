@@ -33,6 +33,10 @@ type cdpMessage struct {
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *cdpError       `json:"error,omitempty"`
+	// SessionID is present on frames from a flattened per-tab session
+	// (the page-level events — the Network-domain events the settle
+	// counter consumes). Empty for browser-level frames.
+	SessionID string `json:"sessionId,omitempty"`
 }
 
 // cdpError is a CDP protocol-level error (method ran but failed — e.g. a
@@ -52,7 +56,9 @@ func (e *cdpError) Error() string {
 
 // Client is one CDP connection with in-flight call matching (each command
 // gets a unique id; the reader loop delivers its response on a per-call
-// channel). Events are dropped (v1 has no event consumers).
+// channel). Events (no id) go to the optional event sink — nil = dropped
+// (v1's default: waits poll, not on events; the settle counter is the
+// first consumer, see settle.go).
 type Client struct {
 	conn   *websocket.Conn
 	ctx    context.Context // the read context — canceled on Close
@@ -61,6 +67,9 @@ type Client struct {
 	mu      sync.Mutex
 	nextID  int
 	pending map[int]chan cdpMessage
+
+	eventMu   sync.Mutex
+	eventSink func(sessionID, method string, params json.RawMessage)
 
 	done     chan struct{} // closed when the connection is gone
 	doneOnce sync.Once
@@ -106,9 +115,30 @@ func (c *Client) readLoop() {
 			if ch != nil { // buffered(1) — never blocks, even if the caller gave up
 				ch <- msg
 			}
+			continue
 		}
-		// Events (no id): dropped — v1 waits by polling, not on events.
+		// Event (no id): deliver it to the sink when one is registered —
+		// with none, it is dropped (v1 waits by polling, not on events;
+		// the Network-domain counter is the first consumer).
+		if msg.Method == "" {
+			continue
+		}
+		c.eventMu.Lock()
+		sink := c.eventSink
+		c.eventMu.Unlock()
+		if sink != nil {
+			sink(msg.SessionID, msg.Method, msg.Params)
+		}
 	}
+}
+
+// SetEventSink installs the connection's event consumer (nil = drop all
+// events — the v1 default). At most one sink: the browser instance's
+// Network-domain counter (settle.go) is the sole consumer.
+func (c *Client) SetEventSink(fn func(sessionID, method string, params json.RawMessage)) {
+	c.eventMu.Lock()
+	c.eventSink = fn
+	c.eventMu.Unlock()
 }
 
 // finish marks the connection dead (first cause wins) and unblocks every

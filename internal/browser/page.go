@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // The page model the web_browser tool returns (the plan's WS5 contract):
@@ -29,6 +30,12 @@ type PageRead struct {
 	URL      string       `json:"url"`
 	Markdown string       `json:"markdown"`
 	Elements []elementRef `json:"elements"`
+	// The settle state (the read waits for stability before extracting —
+	// the mid-render fix, design log LAZY-LIST TIER): settled=false means
+	// the page was still churning at the cap and the content is a
+	// snapshot.
+	Settled bool          `json:"settled"`
+	Took    time.Duration `json:"took"`
 }
 
 // pageBudgetChars caps the markdown in a read result (~8k tokens).
@@ -200,11 +207,18 @@ var pageCleanerJS = `(() => {
   });
 })()`
 
-// Read returns the clean page model for the tab: the deterministic markdown
-// (confined to selector when given — the drill-in path) + the numbered
-// interactive elements. The element table is remembered on the instance (the
-// #N ids of the LATEST read are what click/type/select resolve).
+// Read returns the clean page model for the tab: it settles the page
+// FIRST (the mid-render fix — the content extracted is what the page
+// actually delivered, design log LAZY-LIST TIER), then the deterministic
+// markdown (confined to selector when given — the drill-in path) + the
+// numbered interactive elements. The element table is remembered on the
+// instance (the #N ids of the LATEST read are what click/type/select
+// resolve).
 func (i *Instance) Read(ctx context.Context, tabID, selector string) (*PageRead, error) {
+	settled, took, err := i.Settle(ctx, tabID)
+	if err != nil {
+		return nil, err
+	}
 	session, err := i.SessionFor(ctx, tabID)
 	if err != nil {
 		return nil, err
@@ -221,6 +235,8 @@ func (i *Instance) Read(ctx context.Context, tabID, selector string) (*PageRead,
 	if pr.Error != "" {
 		return nil, fmt.Errorf("%s", pr.Error)
 	}
+	pr.Settled = settled
+	pr.Took = took
 	if len(pr.Elements) > elementCap {
 		pr.Elements = pr.Elements[:elementCap]
 	}
@@ -255,6 +271,9 @@ func BoundRead(pr *PageRead) string {
 		els += fmt.Sprintf("#%d %s %q <%s>\n", e.N, e.Role, e.Name, e.Tag)
 	}
 	out := fmt.Sprintf("title: %s\nurl: %s\n", pr.Title, pr.URL)
+	if !pr.Settled {
+		out += fmt.Sprintf("(the page was still settling after %s — content is a snapshot; a later read may differ)\n", settleCap)
+	}
 	if truncated {
 		out += fmt.Sprintf("content (TRUNCATED at ~%d chars — the page is longer; re-read with a selector to drill in):\n", pageBudgetChars)
 	} else {

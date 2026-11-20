@@ -2,11 +2,15 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -189,4 +193,229 @@ func TestWebBrowserLive(t *testing.T) {
 		t.Fatalf("ForUser (relaunch): %v", err)
 	}
 	defer inst2.Close()
+}
+
+// TestWebBrowserLazyListLive is the LAZY-LIST TIER acceptance (design
+// log): a list that appends its items after an ASYNC fetch when scrolled
+// near the bottom. Pins: settle-before-extract (the first read after a
+// scroll includes the async-appended items — the mid-render case that
+// caused the original failure), readItems' visual order + in-call dedup,
+// the scroll command's one-viewport step + reached-bottom, the full
+// collection (a Go-side dedupe simulates the model's in-context diff),
+// and the evaluate large-scroll guard.
+func TestWebBrowserLazyListLive(t *testing.T) {
+	if os.Getenv("BEVIN_E2E_BROWSER") != "1" {
+		t.Skip("set BEVIN_E2E_BROWSER=1 to run the live browser e2e (needs a desktop host with a browser)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	const totalItems = 60
+	var mu sync.Mutex
+	fetches := 0
+	// The lazy-list page: 20 items synchronously (one viewport + a bit),
+	// the rest appended in batches of 10 after a 250 ms fetch when the
+	// page is scrolled near its bottom. A duplicate-text item (#dup)
+	// exercises the in-call dedup.
+	listPage := fmt.Sprintf(`<html><head><meta charset="utf-8"><title>Lazy List</title>
+<style>body{margin:0}.item{height:50px;line-height:50px;padding:0 8px;box-sizing:border-box;border-bottom:1px solid #ccc}</style>
+</head><body>
+<div id="list"></div>
+<div class="item" id="dup">Product 1 — some details about item 1</div>
+<script>
+const total = %d;
+let next = 21, busy = false, done = false;
+const list = document.getElementById("list");
+function render(n) {
+  const d = document.createElement("div");
+  d.className = "item";
+  d.textContent = "Product " + n + " — some details about item " + n;
+  list.appendChild(d);
+}
+async function more() {
+  if (busy || done) return;
+  busy = true;
+  try {
+    const res = await fetch("/more?from=" + next);
+    if (!res.ok) return;
+    const batch = await res.json();
+    if (batch.length) {
+      for (const n of batch) render(n);
+      next = batch[batch.length - 1] + 1;
+      if (next > total) done = true;
+    }
+  } finally { busy = false; }
+}
+window.addEventListener("scroll", () => {
+  const de = document.scrollingElement;
+  if (de.scrollTop + window.innerHeight >= de.scrollHeight - 100) {
+    // The 100 ms delay simulates a stalled scroll handler (the WSLg
+    // stall behind the original failure): the lazy fetch starts AFTER
+    // the scroll has returned — without the trigger grace, the settle
+    // declares stability before the fetch even begins and the next
+    // read sees only the original 20 items.
+    setTimeout(more, 100);
+  }
+});
+for (let n = 1; n <= 20; n++) render(n);
+</script>
+</body></html>`, totalItems)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/lazy":
+			fmt.Fprint(w, listPage)
+		case "/more":
+			from, err := strconv.Atoi(r.URL.Query().Get("from"))
+			if err != nil || from < 1 {
+				http.Error(w, "bad from", http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			fetches++
+			mu.Unlock()
+			time.Sleep(250 * time.Millisecond) // the render gap settle must bridge
+			batch := []int{}
+			for n := from; n <= totalItems && n < from+10; n++ {
+				batch = append(batch, n)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(batch)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dataDir := t.TempDir()
+	mgr := NewManager(dataDir)
+	t.Cleanup(func() {
+		mgr.Close()
+		time.Sleep(2 * time.Second) // let the process tree release the profile (see TestWebBrowserLive)
+	})
+	inst, err := mgr.ForUser(ctx, "e2e-lazy")
+	if err != nil {
+		t.Fatalf("ForUser (browser launch): %v", err)
+	}
+	tab, err := inst.OpenTab(ctx, srv.URL+"/lazy")
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+
+	numRe := regexp.MustCompile(`Product (\d+)`)
+	numOf := func(text string) int {
+		m := numRe.FindStringSubmatch(text)
+		if m == nil {
+			t.Fatalf("no item number in %q", text)
+		}
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+
+	// The initial read: 20 items in visual order, the duplicate dropped,
+	// the page settled.
+	pi, err := inst.ReadItems(ctx, tab.ID, ".item")
+	if err != nil {
+		t.Fatalf("ReadItems (initial): %v", err)
+	}
+	if len(pi.Items) != 20 {
+		t.Fatalf("initial items = %d, want 20:\n%s", len(pi.Items), BoundItems(pi))
+	}
+	if pi.Dups != 1 {
+		t.Fatalf("initial dups = %d, want 1 (the duplicate-text item)", pi.Dups)
+	}
+	if !pi.Settled {
+		t.Fatal("the initial read must settle (a static page settles within the quiet window)")
+	}
+	for i, it := range pi.Items {
+		if n := numOf(it.Text); n != i+1 {
+			t.Fatalf("initial order: position %d = item %d, want %d (visual order, not DOM order)", i+1, n, i+1)
+		}
+	}
+
+	// The model loop: scroll one viewport + readItems, until the bottom
+	// is reached with nothing new. The Go-side dedupe simulates the
+	// model's in-context diff (the only bookkeeping the stateless tier
+	// leaves to the model).
+	seen := map[string]bool{}
+	var order []int
+	add := func(pi *PageItems) int {
+		newItems := 0
+		for _, it := range pi.Items {
+			if !seen[it.Text] {
+				seen[it.Text] = true
+				order = append(order, numOf(it.Text))
+				newItems++
+			}
+		}
+		return newItems
+	}
+	add(pi)
+
+	var checkedFirst bool
+	for iter := 0; iter < 10; iter++ {
+		sr, err := inst.Scroll(ctx, tab.ID, "down", 1)
+		if err != nil {
+			t.Fatalf("scroll (iter %d): %v", iter+1, err)
+		}
+		pi, err := inst.ReadItems(ctx, tab.ID, ".item")
+		if err != nil {
+			t.Fatalf("ReadItems (iter %d): %v", iter+1, err)
+		}
+		// Visual order within every call (the geometry sort pin).
+		for i := 1; i < len(pi.Items); i++ {
+			if numOf(pi.Items[i].Text) < numOf(pi.Items[i-1].Text) {
+				t.Fatalf("iter %d: items not in visual order: %d before %d", iter+1, numOf(pi.Items[i].Text), numOf(pi.Items[i-1].Text))
+			}
+		}
+		if !checkedFirst {
+			checkedFirst = true
+			found30 := false
+			for _, it := range pi.Items {
+				if numOf(it.Text) == 30 {
+					found30 = true
+				}
+			}
+			// The first read after scrolling MUST include the async
+			// batch (21-30): settle waited for the fetch + the append.
+			// Without the settle, this read races the 250 ms fetch and
+			// sees only the original 20 (the original failure).
+			if !found30 {
+				last := pi.Items[len(pi.Items)-1].Text
+				t.Fatalf("the first read after scrolling missed the async-appended items (settle did not wait): %d items, last = %q", len(pi.Items), last)
+			}
+		}
+		if sr.Bottom && add(pi) == 0 {
+			break
+		}
+	}
+
+	if len(order) != totalItems {
+		t.Fatalf("collected %d items, want %d — content was dropped (the original failure): %v…", len(order), totalItems, order)
+	}
+	for i, n := range order {
+		if n != i+1 {
+			t.Fatalf("collection order: position %d = item %d, want %d", i+1, n, i+1)
+		}
+	}
+	mu.Lock()
+	f := fetches
+	mu.Unlock()
+	if f < 4 {
+		t.Fatalf("fetches = %d, want >= 4 (the async lazy path must have been used)", f)
+	}
+
+	// The large-scroll guard: a big evaluate scroll (back to the top from
+	// the bottom) carries the incremental-scrolling nudge.
+	session, err := inst.SessionFor(ctx, tab.ID)
+	if err != nil {
+		t.Fatalf("SessionFor: %v", err)
+	}
+	out, err := inst.EvaluateGuarded(ctx, session, "window.scrollTo(0, 0); 'ok'")
+	if err != nil {
+		t.Fatalf("EvaluateGuarded: %v", err)
+	}
+	if !strings.Contains(out, "incremental scrolling") {
+		t.Fatalf("a big evaluate scroll must carry the nudge: %q", out)
+	}
 }

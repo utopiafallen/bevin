@@ -115,6 +115,7 @@ type Instance struct {
 	defaultTab string             // the tab commands use when none is named
 	sessions   map[string]string  // tab target id → CDP session id
 	lastRead   map[int]elementRef // the #N element table of the latest read
+	netState   map[string]*netCounter // session id → in-flight request counter (the settle signal)
 
 	closeOnce sync.Once
 }
@@ -157,14 +158,19 @@ func launchInstance(ctx context.Context, det Detection, profileDir string) (*Ins
 		killBrowserTree(cmd, det, profileDir)
 		return nil, err
 	}
-	return &Instance{
+	inst := &Instance{
 		browser:    det,
 		cmd:        cmd,
 		port:       port,
 		cdp:        cdp,
 		profileDir: profileDir,
 		sessions:   map[string]string{},
-	}, nil
+		netState:   map[string]*netCounter{},
+	}
+	// The connection's event sink: the Network-domain counter the settle
+	// wait consumes (the flat CDP client's first event consumer).
+	cdp.SetEventSink(inst.handleNetEvent)
+	return inst, nil
 }
 
 // waitForCDPPort polls the profile dir's DevToolsActivePort (the browser

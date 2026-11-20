@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 )
@@ -105,6 +106,9 @@ func (i *Instance) CloseTab(ctx context.Context, id string) (string, error) {
 	}
 	_ = json.Unmarshal(res, &out)
 	i.mu.Lock()
+	if s, ok := i.sessions[id]; ok {
+		delete(i.netState, s) // the tab's in-flight counter goes with it
+	}
 	delete(i.sessions, id)
 	if i.defaultTab == id {
 		i.defaultTab = ""
@@ -170,6 +174,13 @@ func (i *Instance) SessionFor(ctx context.Context, tabID string) (string, error)
 	i.mu.Lock()
 	i.sessions[tabID] = out.SessionID
 	i.mu.Unlock()
+	// The Network domain from the first attach: the settle counter
+	// (in-flight requests) sees every request from then on. A failure is
+	// non-fatal — settling then relies on the mutation half only.
+	if _, err := i.cdp.Call(ctx, out.SessionID, "Network.enable", nil); err != nil {
+		log.Printf("bevin: Network.enable (settle counter): %v", err)
+	}
+	i.netCounterFor(out.SessionID) // route events from the first attach
 	return out.SessionID, nil
 }
 
