@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/utopiafallen/bevin/internal/config"
@@ -179,5 +182,114 @@ func TestConversationMessagesEmptyReply(t *testing.T) {
 	// The empty reply keeps its reasoning trace (the UI's thinking block).
 	if emptyReasoning != "the model thought but said nothing" {
 		t.Fatalf("empty reply's reasoning = %q, want the stored trace", emptyReasoning)
+	}
+}
+
+// TestCreateConversationModelAndEffort pins the new-conversation create
+// path: model resolution (a per-user agent.toml default beats the server
+// default while it is still available, and falls back when it is not),
+// the explicit model pin (an unavailable model is rejected), and the
+// reasoning-effort pin (validated against the model's profile levels and
+// persisted; a bad level is rejected with the supported ones named).
+func TestCreateConversationModelAndEffort(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.ServerConfig{
+		Version: config.ConfigVersion,
+		Auth:    config.Auth{Mode: "internal", SessionSecret: "test-secret"},
+		Models: []config.Model{
+			{ID: "m1", Provider: "openai", BaseURL: "http://u", ModelID: "x", DisplayName: "X", MaxContext: 1000, Slots: 1, Enabled: true},
+			{ID: "m2", Provider: "openai", BaseURL: "http://u", ModelID: "y", DisplayName: "Y", MaxContext: 1000, Slots: 1, Enabled: true, Profile: "qwen3.8"},
+		},
+	}
+	a, err := New(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	getModel := func(id string) (string, string) {
+		t.Helper()
+		us, err := a.userStore("u1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := us.GetConversation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.ActiveModelID, c.ReasoningEffort
+	}
+
+	// No user default: the server default (first available) is taken, no
+	// effort stored.
+	id, err := a.CreateConversation(context.Background(), "u1", "plain", "", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if m, e := getModel(id); m != "m1" || e != "" {
+		t.Fatalf("plain create = (%q, %q), want (m1, \"\")", m, e)
+	}
+
+	// An explicit model + an effort its profile supports: both are
+	// honored + persisted.
+	id, err = a.CreateConversation(context.Background(), "u1", "pinned", "m2", "medium")
+	if err != nil {
+		t.Fatalf("pinned create: %v", err)
+	}
+	if m, e := getModel(id); m != "m2" || e != "medium" {
+		t.Fatalf("pinned create = (%q, %q), want (m2, medium)", m, e)
+	}
+
+	// An unavailable model is rejected (nothing is created).
+	before := func() int {
+		us, _ := a.userStore("u1")
+		convos, _ := us.ListConversations()
+		return len(convos)
+	}()
+	if _, err := a.CreateConversation(context.Background(), "u1", "bad", "m-nope", ""); err == nil {
+		t.Fatal("create with an unavailable model should fail")
+	}
+	after := func() int {
+		us, _ := a.userStore("u1")
+		convos, _ := us.ListConversations()
+		return len(convos)
+	}()
+	if before != after {
+		t.Fatalf("a rejected create still wrote a conversation (%d -> %d)", before, after)
+	}
+
+	// An effort the model's profile doesn't support is rejected, naming
+	// the supported levels.
+	if _, err := a.CreateConversation(context.Background(), "u1", "bad-effort", "m2", "ultra"); err == nil || !strings.Contains(err.Error(), "low, medium, xhigh") {
+		t.Fatalf("bad effort err = %v, want a rejection naming the supported levels", err)
+	}
+	// ... and so is an effort for a model that takes none.
+	if _, err := a.CreateConversation(context.Background(), "u1", "bad-effort-2", "m1", "low"); err == nil {
+		t.Fatal("an effort for a model that takes none should fail")
+	}
+
+	// The per-user agent.toml default (m2) beats the server default while
+	// it is available.
+	if err := config.SaveAgent(filepath.Join(dir, "users", "u1"), &config.AgentConfig{DefaultModelID: "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.NewConversationModel("u1"); got != "m2" {
+		t.Fatalf("NewConversationModel = %q, want the user default m2", got)
+	}
+	id, err = a.CreateConversation(context.Background(), "u1", "user-default", "", "")
+	if err != nil {
+		t.Fatalf("create with user default: %v", err)
+	}
+	if m, _ := getModel(id); m != "m2" {
+		t.Fatalf("user-default create = %q, want m2", m)
+	}
+
+	// A user default that is no longer available falls back to the server
+	// default.
+	if err := config.SaveAgent(filepath.Join(dir, "users", "u1"), &config.AgentConfig{DefaultModelID: "m-gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.NewConversationModel("u1"); got != "m1" {
+		t.Fatalf("NewConversationModel with a dead default = %q, want the server default m1", got)
 	}
 }

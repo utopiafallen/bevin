@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -394,9 +395,25 @@ func (a *App) chatGate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// me is the client's boot identity check: is this session valid, and who is
+// it. The client renders the app from this (handle, display name, role —
+// the role gates the admin rail item) and drops to the login card on 401.
+// default_model_id is the user's per-user default (agent.toml, set in
+// onboarding): the chat's new-conversation preview preselects it exactly the
+// way the create endpoint resolves it ("" = none set — the preview falls
+// back to the /api/models "default" field).
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"handle": u.Handle, "display_name": u.DisplayName, "role": u.Role})
+	defaultModel := ""
+	if ac, err := config.LoadAgent(filepath.Join(a.dataDir, "users", u.Handle)); err == nil {
+		defaultModel = ac.DefaultModelID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"handle":           u.Handle,
+		"display_name":     u.DisplayName,
+		"role":             u.Role,
+		"default_model_id": defaultModel,
+	})
 }
 
 func (a *App) models(w http.ResponseWriter, _ *http.Request) {
@@ -422,13 +439,55 @@ func (a *App) models(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "default": a.ag.DefaultModelID()})
 }
 
+// createConversation is the chat's "new conversation" + first message: the
+// conversation row is created HERE (title = the first message's opening
+// words — the user has not seen a conversation before this moment), and the
+// send streams into it. The optional model_id + reasoning_effort pin the
+// choice the UI's new-conversation preview showed before the first send:
+// model_id "" = the user's preferred / server default; reasoning_effort ""
+// = the model's profile default. A pinned model must be available; a pinned
+// effort must be one of the (possibly resolved) model's profile levels —
+// both are validated BEFORE anything is written, so a rejection creates
+// nothing.
 func (a *App) createConversation(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	var req struct {
-		Title string `json:"title"`
+		Title           string `json:"title"`
+		ModelID         string `json:"model_id"`
+		ReasoningEffort string `json:"reasoning_effort"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	id, err := a.ag.EnsureConversation(r.Context(), u.Handle, "", req.Title)
+	if req.ModelID != "" && !a.ag.ModelAvailable(req.ModelID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model not available"})
+		return
+	}
+	if req.ReasoningEffort != "" {
+		// The effort is validated against the model the conversation will
+		// actually take: the pinned one, else the same resolution
+		// newUserConversation applies (user's preferred, then server
+		// default).
+		target := req.ModelID
+		if target == "" {
+			target = a.ag.NewConversationModel(u.Handle)
+		}
+		efforts := a.ag.ReasoningEffortsFor(target)
+		if len(efforts) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this model takes no reasoning effort"})
+			return
+		}
+		supported := false
+		for _, e := range efforts {
+			if e == req.ReasoningEffort {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unsupported reasoning effort %q (supported: %s)", req.ReasoningEffort, strings.Join(efforts, ", "))})
+			return
+		}
+	}
+	id, err := a.ag.CreateConversation(r.Context(), u.Handle, req.Title, req.ModelID, req.ReasoningEffort)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

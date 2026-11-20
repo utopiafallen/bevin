@@ -554,10 +554,13 @@
     // Fills the model select: every available model, pre-selected to the
     // conversation's active model (a model that fell out of the list —
     // auto-disabled, removed — shows its stored id so nothing is hidden).
-    // Disabled until the conversation exists: a brand-new conversation
-    // takes its model at creation (the user's default), so there is
-    // nothing to switch yet. effort is the conversation's stored reasoning-
-    // effort choice ("" = the model's own default).
+    // A brand-new chat (no conversation yet) pre-selects the model the
+    // server will take at create time (newChatModelID) — the selector and
+    // the effort control are then real BEFORE the first send, not after:
+    // the user sees, and can change, what the chat will actually run on
+    // (the choice rides on the create request). Disabled only when there
+    // are no models at all. effort is the conversation's stored
+    // reasoning-effort choice ("" = the model's own default).
     var currentModelID = null; // the active model shown in the select
     function buildModelSelect(activeID, effort) {
       var sel = $("modelSelect");
@@ -574,10 +577,25 @@
         o.textContent = activeID;
         sel.appendChild(o);
       }
-      sel.value = activeID || defaultModelID || (models.length ? models[0].id : "");
+      var shown = activeID || newChatModelID();
+      sel.value = shown || "";
       currentModelID = activeID || null; // the conversation's own model (null = not created yet)
-      sel.disabled = !convID || !models.length;
-      buildEffortSelect(activeID, effort || "");
+      sel.disabled = !models.length;
+      buildEffortSelect(shown, effort || "");
+    }
+
+    // newChatModelID is the client mirror of the server's
+    // NewConversationModel — the two MUST agree (the create endpoint
+    // re-resolves the same way when the request pins no model): the
+    // user's per-user default (from /api/me) while it is still in the
+    // available set (GET /api/models lists available models only), else
+    // the server default (the "default" field of /api/models).
+    function newChatModelID() {
+      if (!models.length) return "";
+      var dm = me && me.default_model_id;
+      if (dm) for (var i = 0; i < models.length; i++) if (models[i].id === dm) return dm;
+      if (defaultModelID) for (var j = 0; j < models.length; j++) if (models[j].id === defaultModelID) return defaultModelID;
+      return models[0].id;
     }
 
     // The reasoning-effort dropdown: populated from the active model's
@@ -610,7 +628,7 @@
       });
       sel.value = supported ? stored : "";
       currentEffort = sel.value;
-      sel.disabled = !convID;
+      sel.disabled = false; // visibility (not a conversation) gates relevance
     }
 
     // Reads the open conversation's row (title, active model, stored effort,
@@ -641,7 +659,13 @@
     // failure the select snaps back to the stored value.
     $("modelSelect").addEventListener("change", async function () {
       var sel = this;
-      if (!convID) return;
+      if (!convID) {
+        // A brand-new chat: no conversation to PATCH — the choice rides
+        // on the create when the first message is sent. Just mirror the
+        // effort dropdown to the model the chat will take.
+        buildEffortSelect(sel.value, "");
+        return;
+      }
       var before = currentModelID; // what to revert to on failure
       var next = sel.value;
       sel.disabled = true;
@@ -682,7 +706,7 @@
         sel.value = before;
         addErrorMsg("⚠ Could not switch model: " + err.message);
       } finally {
-        sel.disabled = !convID || !models.length;
+        sel.disabled = !models.length;
       }
     });
 
@@ -768,10 +792,18 @@
         asst.t0 = 0;
         if (!convID) {
           var title = text.length > 40 ? text.slice(0, 40) + "…" : text;
+          var effortSel = $("effortSelect");
           var cr = await fetch("/api/conversations", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: title })
+            // The model + effort the preview showed before this first send
+            // (the user may have changed either in the new chat): they pin
+            // the create, exactly like the PATCHes do for an open one.
+            body: JSON.stringify({
+              title: title,
+              model_id: $("modelSelect").value || "",
+              reasoning_effort: effortSel.hidden ? "" : (effortSel.value || "")
+            })
           });
           if (await diskRedirect(cr)) throw new Error("disk exceeded");
           if (!cr.ok) {
@@ -1047,6 +1079,11 @@
           else localStorage.removeItem("bevin-conv");
         } catch (e) {}
         if (j.display_name) me.display_name = j.display_name;
+        // The per-user default model just changed (onboarding wrote it to
+        // agent.toml — or left it blank on skip): refresh the identity so
+        // the new-conversation preview (newChatModelID) preselects the
+        // model the server will actually take, not the pre-onboarding one.
+        if (me) me.default_model_id = payload.model_id || "";
         $("chatLog").innerHTML = "";
         showChat();
         // Render the seeded welcome message as the first bubble (no

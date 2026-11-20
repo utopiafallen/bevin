@@ -408,11 +408,14 @@ func (a *Agent) UserStoreFor(handle string) (*store.UserStore, error) {
 	return a.userStore(handle)
 }
 
-// newUserConversation creates a conversation with the user's preferred model:
-// their per-user default from agent.toml (set in first-time onboarding) when
-// it is still configured + available, else the server default. The frozen
-// system prompt is set at creation.
-func (a *Agent) newUserConversation(us *store.UserStore, handle, title string) (*store.Conversation, error) {
+// NewConversationModel resolves the model a brand-new conversation for the
+// user takes when the request does not pin one: their per-user default from
+// agent.toml (set in first-time onboarding) while it is still configured +
+// available, else the server default ("" when no model is available at all).
+// The create endpoint and the chat's new-conversation preview (the client
+// mirrors it from /api/me + /api/models) MUST agree — this is the single
+// source of truth for the resolution.
+func (a *Agent) NewConversationModel(handle string) string {
 	modelID := a.DefaultModelID()
 	if ac, err := config.LoadAgent(filepath.Join(a.dataDir, "users", handle)); err == nil && ac.DefaultModelID != "" {
 		for _, m := range a.Models() {
@@ -422,8 +425,34 @@ func (a *Agent) newUserConversation(us *store.UserStore, handle, title string) (
 			}
 		}
 	}
+	return modelID
+}
+
+// newUserConversation creates a conversation with modelID + an optional
+// reasoning effort, the frozen system prompt set at creation. modelID "" =
+// the user's preferred model (NewConversationModel); a pinned modelID must
+// be available. effort "" = the model's profile default; a pinned effort
+// must be one of the model's profile levels.
+func (a *Agent) newUserConversation(us *store.UserStore, handle, title, modelID, effort string) (*store.Conversation, error) {
+	if modelID == "" {
+		modelID = a.NewConversationModel(handle)
+	} else if !a.ModelAvailable(modelID) {
+		return nil, fmt.Errorf("model %s is not available", modelID)
+	}
 	if modelID == "" {
 		return nil, fmt.Errorf("no available models to start a conversation")
+	}
+	if effort != "" {
+		supported := false
+		for _, e := range a.ReasoningEffortsFor(modelID) {
+			if e == effort {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return nil, fmt.Errorf("unsupported reasoning effort %q for this model (supported: %s)", effort, strings.Join(a.ReasoningEffortsFor(modelID), ", "))
+		}
 	}
 	if title == "" {
 		title = "New conversation"
@@ -438,7 +467,29 @@ func (a *Agent) newUserConversation(us *store.UserStore, handle, title string) (
 	if err := us.SetFrozenSystemPrompt(c.ID, prompt.Base); err != nil {
 		return nil, err
 	}
+	if effort != "" {
+		if err := us.SetConversationReasoningEffort(c.ID, effort); err != nil {
+			return nil, err
+		}
+	}
 	return c, nil
+}
+
+// CreateConversation creates a fresh conversation (the chat's "new
+// conversation" + first message — the conversation row exists only from the
+// first send onward): title + optional model + optional reasoning effort
+// ("" = the user's preferred / server default + the profile default).
+// Returns the new conversation id.
+func (a *Agent) CreateConversation(ctx context.Context, handle, title, modelID, effort string) (string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", err
+	}
+	c, err := a.newUserConversation(us, handle, title, modelID, effort)
+	if err != nil {
+		return "", err
+	}
+	return c.ID, nil
 }
 
 // EnsureConversation returns a conversation id, creating it (with the
@@ -449,7 +500,7 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 		return "", err
 	}
 	if convID == "" {
-		c, err := a.newUserConversation(us, handle, title)
+		c, err := a.newUserConversation(us, handle, title, "", "")
 		if err != nil {
 			return "", err
 		}

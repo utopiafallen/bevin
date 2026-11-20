@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -858,6 +860,183 @@ func TestConversationManagement(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &carol)
 	if len(carol.Conversations) != 0 {
 		t.Fatalf("carol sees %d conversations, want 0 (per-user isolation)", len(carol.Conversations))
+	}
+}
+
+// reasoningModelApp builds twoModelApp's setup with m2 under the qwen3.8
+// profile (the one with the low/medium/xhigh reasoning-effort control) —
+// the create-with-effort tests need a model with a real effort set.
+func reasoningModelApp(t *testing.T) (*App, *store.ServerStore) {
+	t.Helper()
+	dir := t.TempDir()
+	srv, err := store.OpenServer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { srv.Close() })
+	if _, err := srv.CreateUser("admin", "Admin", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.CreateUser("bob", "Bob", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-bob", "bob", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	prov := auth.NewInternalProvider(srv, time.Hour)
+	oai := fakeOAIStream(t)
+	t.Cleanup(oai.Close)
+	cfg := &config.ServerConfig{
+		DataDir: dir,
+		Auth:    config.Auth{SessionTTLSeconds: 3600},
+		Models: []config.Model{
+			{ID: "m1", Provider: "openai", BaseURL: oai.URL + "/v1", APIKey: "sk-test", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 1, Enabled: true},
+			{ID: "m2", Provider: "openai", BaseURL: oai.URL + "/v1", APIKey: "sk-test", ModelID: "gpt-4o-mini", DisplayName: "GPT-4o Mini", MaxContext: 128000, Slots: 1, Enabled: true, Profile: "qwen3.8"},
+		},
+	}
+	ag, err := agent.New(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	a := &App{cfg: cfg, prov: prov, ag: ag, srv: srv, ttl: time.Hour, dataDir: dir}
+	a.routes()
+	return a, srv
+}
+
+// TestCreateConversationWithModelAndEffort — the new-conversation create
+// carries the UI's pre-first-send choice: an explicit available model + a
+// supported effort are persisted to the row; an unavailable model and an
+// unsupported effort are 400s that create NOTHING (the create is the
+// moment the conversation comes into existence — a rejection must not
+// leave a phantom row).
+func TestCreateConversationWithModelAndEffort(t *testing.T) {
+	a, _ := reasoningModelApp(t)
+
+	listCount := func() int {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations", "tok-bob", nil))
+		var l struct {
+			Conversations []any `json:"conversations"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &l)
+		return len(l.Conversations)
+	}
+
+	// Pin model m2 + effort "medium": the row is created with both (read
+	// back through the single get).
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob",
+		map[string]any{"title": "pinned", "model_id": "m2", "reasoning_effort": "medium"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("pinned create code = %d body=%s", w.Code, w.Body.String())
+	}
+	var created map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	pinnedID := created["id"].(string)
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/"+pinnedID, "tok-bob", nil))
+	var one struct {
+		Conversation struct {
+			ActiveModelID   string `json:"active_model_id"`
+			ReasoningEffort string `json:"reasoning_effort"`
+		} `json:"conversation"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &one)
+	if one.Conversation.ActiveModelID != "m2" || one.Conversation.ReasoningEffort != "medium" {
+		t.Fatalf("pinned row = %+v, want m2 + medium", one.Conversation)
+	}
+
+	// A plain create (no model/effort): the server default + the profile
+	// default.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob", map[string]string{"title": "plain"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("plain create code = %d body=%s", w.Code, w.Body.String())
+	}
+	var plain map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &plain)
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/conversations/"+plain["id"].(string), "tok-bob", nil))
+	_ = json.Unmarshal(w.Body.Bytes(), &one)
+	if one.Conversation.ActiveModelID != "m1" || one.Conversation.ReasoningEffort != "" {
+		t.Fatalf("plain row = %+v, want m1 + no effort", one.Conversation)
+	}
+
+	// An unavailable model: 400, nothing created.
+	before := listCount()
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob",
+		map[string]any{"title": "bad", "model_id": "m-nope"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unavailable model code = %d, want 400", w.Code)
+	}
+	if got := listCount(); got != before {
+		t.Fatalf("a rejected create still wrote a conversation (%d -> %d)", before, got)
+	}
+
+	// An effort the model doesn't support: 400 naming the supported
+	// levels, nothing created.
+	before = listCount()
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob",
+		map[string]any{"title": "bad-effort", "model_id": "m2", "reasoning_effort": "ultra"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad effort code = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "low, medium, xhigh") {
+		t.Fatalf("bad effort body = %s, want the supported levels named", w.Body.String())
+	}
+	// ... and an effort for a model that takes none.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/conversations", "tok-bob",
+		map[string]any{"title": "bad-effort-2", "model_id": "m1", "reasoning_effort": "low"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("effort-for-no-effort-model code = %d, want 400", w.Code)
+	}
+	if got := listCount(); got != before {
+		t.Fatalf("a rejected create still wrote a conversation (%d -> %d)", before, got)
+	}
+}
+
+// TestMeDefaultModel — /api/me carries the user's per-user default model
+// (agent.toml): "" when unset, the stored id otherwise (the client's
+// new-conversation preview preselects it the same way the create endpoint
+// resolves it).
+func TestMeDefaultModel(t *testing.T) {
+	a, srv := testApp(t, config.Email{})
+	// A regular user (the admin is not a regular user — /api/me works for
+	// any session, but the user is who onboards a default).
+	if _, err := srv.CreateUser("bob", "Bob", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.CreateSession("tok-bob", "bob", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Unset: empty.
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/me", "tok-bob", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("me code = %d", w.Code)
+	}
+	var meBody map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &meBody)
+	if meBody["default_model_id"] != "" {
+		t.Fatalf("default_model_id = %v, want empty (no agent.toml)", meBody["default_model_id"])
+	}
+	// Set: the stored id (the file is read fresh — no restart needed).
+	if err := os.MkdirAll(filepath.Join(a.dataDir, "users", "bob"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.dataDir, "users", "bob", "agent.toml"), []byte("default_model_id = \"m2\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/me", "tok-bob", nil))
+	_ = json.Unmarshal(w.Body.Bytes(), &meBody)
+	if meBody["default_model_id"] != "m2" {
+		t.Fatalf("default_model_id = %v, want m2", meBody["default_model_id"])
 	}
 }
 

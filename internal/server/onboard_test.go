@@ -294,6 +294,10 @@ func TestOnboardingFailureDoesNotComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The swapped-in agent caches the user's store for the failed seeding
+	// attempt — close it so TempDir cleanup can unlink the file (Windows
+	// locks open DB files).
+	t.Cleanup(ag2.Close)
 	a.ag = ag2
 
 	w := httptest.NewRecorder()
