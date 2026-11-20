@@ -173,6 +173,42 @@ func fileJoinSafe(base, rel string) (string, error) {
 	return abs, nil
 }
 
+// fileResolveInside re-checks, with the disk consulted, that abs stays
+// inside the workspace root. The lexical checks (fileSafeRelPath +
+// fileJoinSafe) cannot see symlinks: a link inside the workspace (created
+// out-of-band, or by a sandboxed command) can point anywhere, and
+// os.Open/os.Create would follow it. The rule: the file target must not BE
+// a symlink (a read would follow it out), and the deepest existing ancestor
+// must resolve to at or under the resolved root (security 2026-11-20).
+func fileResolveInside(base, abs string) error {
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return fmt.Errorf("could not resolve the workspace root: %v", err)
+	}
+	if st, err := os.Lstat(abs); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return errors.New("path is a symlink — the file tools do not follow symlinks out of the workspace")
+	}
+	anc := abs
+	for {
+		if _, err := os.Lstat(anc); err == nil {
+			break
+		}
+		parent := filepath.Dir(anc)
+		if parent == anc {
+			break
+		}
+		anc = parent
+	}
+	realAnc, err := filepath.EvalSymlinks(anc)
+	if err != nil {
+		return fmt.Errorf("could not resolve %q: %v", abs, err)
+	}
+	if realAnc != realBase && !strings.HasPrefix(realAnc, realBase+string(filepath.Separator)) {
+		return errors.New("path escapes the workspace (a symlink points outside)")
+	}
+	return nil
+}
+
 // fileWriteTarget resolves the arguments to a workspace-confined absolute
 // path. The error text is model-facing.
 func (a *Agent) fileWriteTarget(handle string, ea *editArgs) (*store.Workspace, string, string, string, error) {
@@ -186,6 +222,9 @@ func (a *Agent) fileWriteTarget(handle string, ea *editArgs) (*store.Workspace, 
 	}
 	abs, err := fileJoinSafe(folder, rel)
 	if err != nil {
+		return nil, "", "", "", err
+	}
+	if err := fileResolveInside(folder, abs); err != nil {
 		return nil, "", "", "", err
 	}
 	return ws, folder, abs, rel, nil

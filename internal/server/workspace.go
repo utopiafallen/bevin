@@ -214,6 +214,42 @@ func joinSafe(base, rel string) (string, error) {
 	return abs, nil
 }
 
+// resolveInside re-checks, with the disk consulted, that abs stays inside
+// base, resolving symlinks (the lexical checks above cannot see a link
+// inside the workspace pointing anywhere — os.Open/os.Create would follow
+// it). The file target must not BE a symlink, and the deepest existing
+// ancestor must resolve to at or under the resolved root (security
+// 2026-11-20; the agent's file tools keep the mirror copy,
+// fileResolveInside).
+func resolveInside(base, abs string) error {
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return fmt.Errorf("could not resolve the workspace root: %v", err)
+	}
+	if st, err := os.Lstat(abs); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return errors.New("path is a symlink — it is not followed outside the workspace")
+	}
+	anc := abs
+	for {
+		if _, err := os.Lstat(anc); err == nil {
+			break
+		}
+		parent := filepath.Dir(anc)
+		if parent == anc {
+			break
+		}
+		anc = parent
+	}
+	realAnc, err := filepath.EvalSymlinks(anc)
+	if err != nil {
+		return fmt.Errorf("could not resolve %q: %v", abs, err)
+	}
+	if realAnc != realBase && !strings.HasPrefix(realAnc, realBase+string(filepath.Separator)) {
+		return errors.New("path escapes the workspace (a symlink points outside)")
+	}
+	return nil
+}
+
 // GET /api/workspaces — the user's workspaces, each with its live size
 // (walked from disk) and file count.
 func (a *App) listWorkspaces(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +446,10 @@ func (a *App) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if err := resolveInside(ws.FolderPath, target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if st, err := os.Stat(target); err == nil && st.IsDir() {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "a directory already exists at that path"})
 		return
@@ -541,6 +581,10 @@ func (a *App) workspaceFileRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := joinSafe(ws.FolderPath, rel)
 	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := resolveInside(ws.FolderPath, target); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
