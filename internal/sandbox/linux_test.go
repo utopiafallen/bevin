@@ -28,6 +28,12 @@ type fakeRun struct {
 	dataDir string
 	// showOutput is what `systemctl show ...` returns (the Stats test).
 	showOutput string
+	// ipAddrOutput is what `ip -o -4 addr show` returns (the isolation
+	// test).
+	ipAddrOutput string
+	// iptablesRules holds the rules added so far (real -C/-A semantics:
+	// -C reports existence, -A inserts).
+	iptablesRules map[string]bool
 }
 
 func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([]byte, []byte, int, error) {
@@ -72,7 +78,34 @@ func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([
 			}
 			return []byte("inactive\n"), nil, 3, nil
 		}
-	case "ip", "iptables":
+	case "ip":
+		// `ip -o -4 addr show` — the isolation test feeds canned output.
+		if len(argv) >= 4 && argv[0] == "-o" && argv[1] == "-4" && argv[2] == "addr" {
+			f.mu.Lock()
+			out := f.ipAddrOutput
+			f.mu.Unlock()
+			return []byte(out), nil, 0, nil
+		}
+		return nil, nil, 0, nil
+	case "iptables":
+		// Real -C/-A semantics: -C exits 0 iff the rule (table + args)
+		// was added, -A adds it.
+		if len(argv) >= 4 && (argv[2] == "-C" || argv[2] == "-A") {
+			key := strings.Join(append([]string{argv[1]}, argv[3:]...), " ")
+			f.mu.Lock()
+			if argv[2] == "-A" {
+				f.iptablesRules[key] = true
+			}
+			exists := f.iptablesRules[key]
+			f.mu.Unlock()
+			if argv[2] == "-C" {
+				if exists {
+					return nil, nil, 0, nil
+				}
+				return nil, nil, 1, nil
+			}
+			return nil, nil, 0, nil
+		}
 		return nil, nil, 0, nil
 	case "systemd-run":
 		// `systemd-run -M <m> --wait --unit <u> /bin/sh -c <wrapper>` —
@@ -123,6 +156,13 @@ func (f *fakeRun) writeExecFiles(wrapper string) {
 			}
 		}
 	}
+}
+
+// ruleCount is the number of distinct iptables rules added so far.
+func (f *fakeRun) ruleCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.iptablesRules)
 }
 
 func (f *fakeRun) hadCall(name string, sub ...string) bool {
@@ -191,7 +231,7 @@ func newTestBackend(t *testing.T) (*linuxBackend, *fakeRun, string) {
 	if err := os.WriteFile(filepath.Join(baseRoot, "etc", "machine-id"), []byte("fixed-template-id\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeRun{copyFrom: map[string]string{}, started: map[string]bool{}, dataDir: dataDir}
+	fake := &fakeRun{copyFrom: map[string]string{}, started: map[string]bool{}, dataDir: dataDir, iptablesRules: map[string]bool{}}
 	b := &linuxBackend{
 		dataDir:     dataDir,
 		cfg:         Config{Enabled: true, Network: "veth"},
@@ -341,6 +381,50 @@ func TestLinuxDropInSoftCaps(t *testing.T) {
 	plain := dropInContent(dir, "alice", "private", 0, 0)
 	if strings.Contains(plain, "MemoryHigh") || strings.Contains(plain, "CPUQuota") {
 		t.Fatalf("drop-in =\n%smust omit the resource directives at the 0 = platform-default settings", plain)
+	}
+}
+
+// TestLinuxHostIsolation installs the FORWARD isolation rules (no
+// container→container, no container→host-LAN) + checks they are
+// idempotent across a restart (check-before-add, no duplicate rules).
+func TestLinuxHostIsolation(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	// The host's addresses: loopback, two LAN interfaces, and the
+	// container veth (10.42/16).
+	fake.ipAddrOutput = "1: lo    inet 127.0.0.1/8 scope host lo\n" +
+		"2: eth0   inet 192.168.1.50/24 brd 192.168.1.255 scope global eth0\n" +
+		"3: wlan0  inet 10.0.0.7/24 brd 10.0.0.255 scope global wlan0\n" +
+		"4: ve-bevin-alice inet 10.42.1.1/24 scope global ve-bevin-alice\n"
+	if _, err := b.Ensure(context.Background(), "alice"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	// 1. The inter-container drop (covers the 10.42.N.1 gateways too).
+	if !fake.hadCall("iptables", "-t", "filter", "-A", "FORWARD",
+		"-s", "10.42.0.0/16", "-d", "10.42.0.0/16", "-j", "DROP") {
+		t.Fatalf("inter-container DROP missing: %v", fake.calls)
+	}
+	// 2. One drop per host LAN address.
+	for _, host := range []string{"192.168.1.50/32", "10.0.0.7/32"} {
+		if !fake.hadCall("iptables", "-t", "filter", "-A", "FORWARD",
+			"-s", "10.42.0.0/16", "-d", host, "-j", "DROP") {
+			t.Fatalf("container→host drop for %s missing: %v", host, fake.calls)
+		}
+	}
+	// 3. No individual drop for loopback or the 10.42 range (loopback is
+	//    not forwarded; 10.42 is covered by the range rule).
+	if fake.hadCall("iptables", "127.0.0.1") {
+		t.Fatalf("loopback address must not get its own drop: %v", fake.calls)
+	}
+	if fake.hadCall("iptables", "10.42.1.1") {
+		t.Fatalf("10.42 addresses must not get individual drops: %v", fake.calls)
+	}
+	// 4. A re-apply (restart) adds no duplicate rules (check-before-add).
+	nBefore := fake.ruleCount()
+	if _, err := b.Restart(context.Background(), "alice"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if n := fake.ruleCount(); n != nBefore {
+		t.Fatalf("restart changed the rule set: %d -> %d", nBefore, n)
 	}
 }
 

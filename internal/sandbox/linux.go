@@ -268,8 +268,12 @@ func (b *linuxBackend) Ensure(ctx context.Context, handle string) (Info, error) 
 	}
 
 	// 6. Host side of the veth (it exists only while the container runs):
-	//    static address + NATed outbound (idempotent).
+	//    isolation first (no container→container, no container→host-LAN),
+	//    then the static address + NATed outbound (idempotent).
 	if mode == "veth" {
+		if err := b.setupHostIsolation(ctx); err != nil {
+			return Info{}, fmt.Errorf("container is up but network isolation setup failed: %w", err)
+		}
 		if err := b.setupHostNAT(ctx, m, st.Subnet); err != nil {
 			return Info{}, fmt.Errorf("container is up but host networking setup failed: %w", err)
 		}
@@ -366,6 +370,79 @@ func (b *linuxBackend) setupHostNAT(ctx context.Context, m string, subnet int) e
 		return fmt.Errorf("adding the NAT rule failed: %v (%s)", err, tail(errb))
 	}
 	return nil
+}
+
+// setupHostIsolation installs the container-network isolation rules in the
+// FORWARD chain (global + idempotent, check-before-add — re-applied on
+// every ensure/restart like the NAT rule):
+//
+//  1. -s 10.42/16 -d 10.42/16 DROP: no inter-container traffic (this
+//     covers each host veth's gateway address 10.42.N.1 too — a container
+//     cannot reach the host over its own gateway).
+//  2. -s 10.42/16 -d <host-addr>/32 DROP for every IPv4 address the host
+//     currently carries (loopback + 10.42/16 excluded): a container cannot
+//     reach services on the host's LAN interfaces (SSH, file shares, bevin
+//     itself). The addresses are enumerated LIVE on every apply, so a
+//     changed LAN address is picked up at the next ensure/restart (a stale
+//     DROP for an old address is harmless).
+//
+// Everything else from 10.42/16 is left alone: outbound internet rides the
+// MASQUERADE rule, and RETURN traffic (destination 10.42) never matches
+// (the rules match only container-ORIGINATED packets). Without these rules
+// the traffic fell through the host's default FORWARD policy (usually
+// ACCEPT): every user's container root shell could scan every other
+// user's container and the host's LAN.
+func (b *linuxBackend) setupHostIsolation(ctx context.Context) error {
+	if err := b.forwardDrop(ctx, "-s", "10.42.0.0/16", "-d", "10.42.0.0/16"); err != nil {
+		return err
+	}
+	out, err := b.runOut(ctx, "ip", "-o", "-4", "addr", "show")
+	if err != nil {
+		return fmt.Errorf("enumerating the host addresses failed: %w", err)
+	}
+	for _, addr := range hostIPv4s(out) {
+		if strings.HasPrefix(addr, "127.") || strings.HasPrefix(addr, "10.42.") {
+			continue
+		}
+		if err := b.forwardDrop(ctx, "-s", "10.42.0.0/16", "-d", addr+"/32"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forwardDrop adds a FORWARD DROP rule with the given match args
+// (check-before-add, like the NAT rule).
+func (b *linuxBackend) forwardDrop(ctx context.Context, match ...string) error {
+	rule := append(append([]string{}, match...), "-j", "DROP")
+	check := append([]string{"-t", "filter", "-C", "FORWARD"}, rule...)
+	if _, _, code, err := b.run(ctx, "", "iptables", check...); err == nil && code == 0 {
+		return nil
+	}
+	add := append([]string{"-t", "filter", "-A", "FORWARD"}, rule...)
+	if _, errb, code, err := b.run(ctx, "", "iptables", add...); err != nil || code != 0 {
+		return fmt.Errorf("adding the FORWARD drop rule failed: %v (%s)", err, tail(errb))
+	}
+	return nil
+}
+
+// hostIPv4s parses `ip -o -4 addr show` output into the bare address of
+// each "inet <addr>/<prefix>" field (one line per address).
+func hostIPv4s(out string) []string {
+	var addrs []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f != "inet" || i+1 >= len(fields) {
+				continue
+			}
+			if addr, _, _ := strings.Cut(fields[i+1], "/"); addr != "" {
+				addrs = append(addrs, addr)
+			}
+			break
+		}
+	}
+	return addrs
 }
 
 // running reports whether the container's service instance is active.
