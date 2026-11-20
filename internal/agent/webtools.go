@@ -69,7 +69,7 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 					"type": "string",
 					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "listTabs", "closeTab"},
 				},
-				"url":        map[string]any{"type": "string", "description": "openTab / navigate"},
+				"url":        map[string]any{"type": "string", "description": "openTab / navigate (http/https only)"},
 				"element":    map[string]any{"type": "string", "description": "click/type/select: #N id from the last read"},
 				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, drill-in scope for read, item selector for readItems, wait target for waitFor"},
 				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},

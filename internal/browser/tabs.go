@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -53,6 +54,31 @@ func (i *Instance) ListTabs(ctx context.Context) ([]Tab, error) {
 	return tabs, nil
 }
 
+// allowedBrowseURL validates (and normalizes) the url web_browser points
+// the browser at: only http and https (plus about:blank). This is a
+// security gate — file:// would let a prompt-injected page (or the model
+// obeying one) read arbitrary local files into the remote model's context,
+// and data:/javascript:/view-source:/browser-internal schemes can execute
+// or smuggle content. A schemeless "host/path" is normalized to https://.
+func allowedBrowseURL(raw string) (string, error) {
+	if raw == "" || raw == "about:blank" {
+		return "about:blank", nil
+	}
+	if !strings.Contains(raw, ":") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid url %q: %v", raw, err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("url scheme %q is not allowed (only http and https pages can be opened)", u.Scheme)
+	}
+}
+
 // OpenTab creates a new page target (about:blank when url is empty) and
 // makes it the instance's default tab. With a url it then navigates EXPLICITLY
 // (Page.navigate + the load wait): createTarget(url) opens the target at
@@ -65,6 +91,11 @@ func (i *Instance) OpenTab(ctx context.Context, url string) (Tab, error) {
 	if url == "" {
 		url = "about:blank"
 	}
+	u, err := allowedBrowseURL(url)
+	if err != nil {
+		return Tab{}, err
+	}
+	url = u
 	res, err := i.cdp.Call(ctx, "", "Target.createTarget", map[string]any{"url": url})
 	if err != nil {
 		return Tab{}, err
@@ -243,6 +274,14 @@ func (i *Instance) evaluateString(ctx context.Context, sessionID, expression str
 // navigation that fails in the page (DNS, TLS, a hard 404 is still a load)
 // reports the page's errorText when the browser gives one.
 func (i *Instance) Navigate(ctx context.Context, tabID, url string) error {
+	if url == "" {
+		return fmt.Errorf("navigate needs a url")
+	}
+	u, err := allowedBrowseURL(url)
+	if err != nil {
+		return err
+	}
+	url = u
 	session, err := i.SessionFor(ctx, tabID)
 	if err != nil {
 		return err
