@@ -368,6 +368,29 @@ func (s *UserStore) AddWorkspaceFile(wsid, name, relPath, mime string, size int6
 	return &WorkspaceFile{ID: id, WorkspaceID: wsid, Name: name, RelativePath: relPath, Size: size, AddedAt: now, Source: source, Kind: kind}, nil
 }
 
+// UpsertWorkspaceFile records an AGENT-side file write (the file tools):
+// it refreshes the size + hash (and name) of the existing metadata row at
+// relative_path, or inserts one — so search/ingest sees the change without
+// a duplicate row. source/kind are recorded (agent writes are text docs).
+func (s *UserStore) UpsertWorkspaceFile(wsid, name, relPath string, size int64, hash, source, kind string) error {
+	if source == "" {
+		source = "agent"
+	}
+	if kind == "" {
+		kind = "doc"
+	}
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM workspace_files WHERE workspace_id = ? AND relative_path = ?`, wsid, relPath).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = s.AddWorkspaceFile(wsid, name, relPath, "", size, hash, source, kind)
+		return err
+	} else if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE workspace_files SET name = ?, size = ?, hash = ? WHERE id = ?`, name, size, hash, id)
+	return err
+}
+
 func (s *UserStore) ListWorkspaceFiles(wsid string) ([]WorkspaceFile, error) {
 	rows, err := s.db.Query(`SELECT `+wfCols+` FROM workspace_files WHERE workspace_id = ? ORDER BY relative_path`, wsid)
 	if err != nil {

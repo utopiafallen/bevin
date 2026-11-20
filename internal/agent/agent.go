@@ -104,6 +104,12 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerReportProgress(a.tools); err != nil {
 		return nil, fmt.Errorf("register report_progress: %w", err)
 	}
+	// edit_file (WS4): exact-match file edits over the user's workspaces —
+	// registered unconditionally like the other tools; a user without
+	// workspaces gets the structured "create one first" result at use time.
+	if err := registerEditTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register edit_file: %w", err)
+	}
 	return a, nil
 }
 
