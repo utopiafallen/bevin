@@ -92,10 +92,59 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerWebBrowser(a.tools, a.browserMgr); err != nil {
 		return nil, fmt.Errorf("register web_browser: %w", err)
 	}
+	// web_search is registered unconditionally, like web_browser: a turn
+	// offers it only while the live config has it enabled + configured
+	// (wireTools filters the wire list per turn), and a stray call (the
+	// model imitating it from its own history after an admin disabled it)
+	// gets the structured not-enabled result naming the web_browser
+	// fallback.
+	if err := registerWebSearch(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register web_search: %w", err)
+	}
 	if err := registerReportProgress(a.tools); err != nil {
 		return nil, fmt.Errorf("register report_progress: %w", err)
 	}
 	return a, nil
+}
+
+// webSearchState returns the live web_search settings (read fresh under
+// cfgMu, the npCfg pattern): an admin save applies from the next tool call
+// / turn, no restart. The zero value (the flat-v1 default for pre-existing
+// configs with no [tools] section) = disabled = the tool is not offered.
+func (a *Agent) webSearchState() config.WebSearch {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return a.cfg.Tools.WebSearch
+}
+
+// wireTools builds ONE turn's wire tool list from the registry: web_search
+// is FILTERED OUT while the live config has it disabled/unconfigured (a
+// turn never offers a tool it can't use — the model then has no reason to
+// call it, and the description note below tells it how to search anyway),
+// and the web_browser description carries a per-turn SEARCH note matching
+// the web_search state (prefer web_search when it is on the wire; when it
+// is not, search-engine tabs — user directive: the agent uses web_browser
+// to search). The registry entries are untouched — the wire copies carry
+// the note (Wire() returns fresh copies each turn).
+func (a *Agent) wireTools() []provider.Tool {
+	wsOn := a.webSearchState().Configured()
+	list := a.tools.Wire()
+	if !wsOn {
+		filtered := make([]provider.Tool, 0, len(list))
+		for _, t := range list {
+			if t.Name == "web_search" {
+				continue
+			}
+			filtered = append(filtered, t)
+		}
+		list = filtered
+	}
+	for i := range list {
+		if list[i].Name == "web_browser" {
+			list[i].Description = webBrowserWireDescription(wsOn)
+		}
+	}
+	return list
 }
 
 // buildVectorIndex assembles the conversation vector index from the config
@@ -906,7 +955,10 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// out with NO tools on the wire, forcing a plain-text answer from whatever
 	// the tool results showed (see the np state below). With an empty registry
 	// the loop body never fires and the turn is exactly today's single call.
-	wireTools := a.tools.Wire()
+	// wireTools (not tools.Wire) builds the per-turn list: web_search is
+	// filtered out while disabled/unconfigured, and web_browser carries the
+	// matching search note (see wireTools).
+	wireTools := a.wireTools()
 	var res *provider.Result
 	// The no-progress / stuck-detection state (the design log's TOOL LOOP
 	// NO-PROGRESS section): REPLACES the hard maxToolIterations cap. The turn

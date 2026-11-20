@@ -124,7 +124,7 @@ func TestCommitEditOAuth(t *testing.T) {
 		AuthURL: "https://idp.example.com/o/authorize/", TokenURL: "https://idp.example.com/o/token/",
 		UserinfoURL: "https://idp.example.com/o/user/", Scopes: "openid profile email",
 	}
-	got, err := m.CommitEdit(nil, nil, nil, &oauth, nil, nil)
+	got, err := m.CommitEdit(nil, nil, nil, &oauth, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestCommitEditOAuth(t *testing.T) {
 	// Disabling is a normal save.
 	off := oauth
 	off.Enabled = false
-	got, err = m.CommitEdit(nil, nil, nil, &off, nil, nil)
+	got, err = m.CommitEdit(nil, nil, nil, &off, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestCommitEditOAuth(t *testing.T) {
 	// An invalid enabled oauth is rejected (and does not clobber the saved one).
 	bad := oauth
 	bad.TokenURL = "not a url"
-	if _, err := m.CommitEdit(nil, nil, nil, &bad, nil, nil); err == nil {
+	if _, err := m.CommitEdit(nil, nil, nil, &bad, nil, nil, nil); err == nil {
 		t.Fatal("expected an error for an invalid oauth URL")
 	}
 	after, _ := config.Load(m.dataDir)

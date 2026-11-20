@@ -63,7 +63,44 @@ type ServerConfig struct {
 	Email            Email      `toml:"email" json:"email"`
 	Sandbox          Sandbox    `toml:"sandbox" json:"sandbox"`
 	NoProgress       NoProgress `toml:"no_progress" json:"no_progress"`
+	Tools            Tools      `toml:"tools" json:"tools"`
 	MaxWorkspaceSize int64      `toml:"max_workspace_size"`
+}
+
+// Tools is the admin's tool-level settings (server.toml [tools]): per-tool
+// configuration for the agent's tools (v1: web_search — see the design log's
+// "TOOLS ADMIN PANEL + web_search (Exa)" section). The admin's Tools page on
+// the dashboard edits this area; future tool settings live here too.
+type Tools struct {
+	WebSearch WebSearch `toml:"web_search" json:"web_search"`
+}
+
+// WebSearch is the web_search tool's settings (server.toml
+// [tools.web_search]): the third-party search API the agent uses to search
+// the web. v1 supports ONE provider: Exa (https://exa.ai — the Search API at
+// POST https://api.exa.ai/search, Bearer API key). Enabled=false (the
+// default) = the tool is NOT offered to the model: web searches then happen
+// by the agent opening a search-engine tab in web_browser (the model is
+// told so in the per-turn web_browser description — see the design log).
+// The API key is a secret (server.toml is written 0600); the admin API never
+// returns it (only has_api_key) and a blank key on save keeps the stored one
+// (the email-password / OAuth-secret masked pattern).
+type WebSearch struct {
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// Provider: the search API backing the tool. v1: "exa" only — an unknown
+	// or blank provider while enabled is a loud config error (the
+	// profile-name pattern: a typo must never silently break a tool at use
+	// time). A DISABLED entry may carry a stale provider/key — it is inert;
+	// enabling re-validates.
+	Provider string `toml:"provider" json:"provider"`
+	APIKey   string `toml:"api_key" json:"api_key"`
+}
+
+// Configured reports whether web_search is usable right now: enabled, a
+// known provider, and a key present. (Validate enforces provider + key
+// whenever Enabled — this is the runtime's defensive read of the same state.)
+func (w WebSearch) Configured() bool {
+	return w.Enabled && w.Provider != "" && strings.TrimSpace(w.APIKey) != ""
 }
 
 // NoProgress is the tool-loop no-progress / stuck-detection DETECTION tuning
@@ -405,6 +442,22 @@ func (c *ServerConfig) Validate() error {
 		}
 		if c.Email.FromAddress == "" {
 			c.Email.FromAddress = c.Email.Username
+		}
+	}
+	// Tools: the admin's per-tool settings. v1 = web_search (the Exa Search
+	// API): when ENABLED it requires the one known provider ("exa") + a
+	// non-blank API key — a typo'd provider or a missing key would otherwise
+	// break the tool the first time the model used it, so the failure is a
+	// loud config error at save/load instead. A DISABLED entry may carry
+	// stale provider/key values (inert — enabling re-validates), so nothing
+	// is enforced there.
+	c.Tools.WebSearch.Provider = strings.TrimSpace(c.Tools.WebSearch.Provider)
+	if c.Tools.WebSearch.Enabled {
+		if c.Tools.WebSearch.Provider != "exa" {
+			return fmt.Errorf("tools.web_search.provider: must be \"exa\" when web search is enabled (got %q)", c.Tools.WebSearch.Provider)
+		}
+		if strings.TrimSpace(c.Tools.WebSearch.APIKey) == "" {
+			return errors.New("tools.web_search.api_key: an Exa API key is required when web search is enabled")
 		}
 	}
 	// Sandbox: per-user containers are not optional (user directive) —

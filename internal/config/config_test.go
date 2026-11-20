@@ -611,3 +611,50 @@ func TestProfileRoundTrip(t *testing.T) {
 		t.Fatal("load accepted an unknown profile (must fail loudly)")
 	}
 }
+
+// TestValidateTools — [tools.web_search]: enabled ⇒ the known provider
+// ("exa") + a non-blank API key are required (loud errors); a disabled
+// entry is valid as-is (inert — the stale provider/key get re-validated on
+// re-enable), which is what makes the admin's disable action a safe
+// no-clobber.
+func TestValidateTools(t *testing.T) {
+	base := func(w WebSearch) *ServerConfig {
+		return &ServerConfig{
+			Models: []Model{testModel()},
+			Auth:   Auth{SessionSecret: "x"},
+			Tools:  Tools{WebSearch: w},
+		}
+	}
+	// Disabled (the default for a pre-[tools] config): valid as-is.
+	if err := base(WebSearch{}).Validate(); err != nil {
+		t.Fatalf("disabled (default): %v", err)
+	}
+	// Enabled + exa + key: valid.
+	if err := base(WebSearch{Enabled: true, Provider: "exa", APIKey: "exa-123"}).Validate(); err != nil {
+		t.Fatalf("a valid enabled entry: %v", err)
+	}
+	// Enabled with an unknown (typo) provider: loud.
+	if err := base(WebSearch{Enabled: true, Provider: "brave", APIKey: "k"}).Validate(); err == nil {
+		t.Fatal("an unknown provider while enabled must be rejected")
+	}
+	// Enabled with a blank provider: loud.
+	if err := base(WebSearch{Enabled: true, APIKey: "k"}).Validate(); err == nil {
+		t.Fatal("enabled with a blank provider must be rejected")
+	}
+	// Enabled without a key: loud.
+	if err := base(WebSearch{Enabled: true, Provider: "exa"}).Validate(); err == nil {
+		t.Fatal("enabled without an API key must be rejected")
+	}
+	// Disabled with stale values: valid (inert).
+	if err := base(WebSearch{Enabled: false, Provider: "exa", APIKey: "exa-old"}).Validate(); err != nil {
+		t.Fatalf("a disabled entry with stale values: %v", err)
+	}
+	// The provider is trimmed before validation.
+	c := base(WebSearch{Enabled: true, Provider: "  exa  ", APIKey: "k"})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a whitespace-padded provider: %v", err)
+	}
+	if c.Tools.WebSearch.Provider != "exa" {
+		t.Fatalf("provider = %q, want the trimmed exa", c.Tools.WebSearch.Provider)
+	}
+}

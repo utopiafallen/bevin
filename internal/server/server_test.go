@@ -928,3 +928,123 @@ func TestSendMessageStream(t *testing.T) {
 		t.Fatalf("done event missing the conversation id: %.300s", body)
 	}
 }
+
+// TestAdminToolsConfigEndpoints — the admin Tools page's read/save API:
+// GET returns the web_search settings with the API key masked (has_api_key;
+// the key itself never leaves the server) + the build's provider registry
+// (the UI's select renders from it); POST saves the area (persisted +
+// hot-reloaded) and a blank API key keeps the stored one (the masked-secret
+// pattern, same as email).
+func TestAdminToolsConfigEndpoints(t *testing.T) {
+	a, _ := configApp(t)
+
+	// Admin read: the tools area is present, the key is masked, the provider
+	// registry is exposed, and a fresh config reads as disabled.
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("config read code = %d", w.Code)
+	}
+	var got struct {
+		Tools map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	ws, ok := got.Tools["web_search"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools read missing web_search: %+v", got.Tools)
+	}
+	if _, has := ws["has_api_key"]; !has {
+		t.Fatalf("web_search read missing has_api_key: %+v", ws)
+	}
+	if _, has := ws["api_key"]; has {
+		t.Fatalf("web_search read must not return the API key: %+v", ws)
+	}
+	if _, has := got.Tools["providers"]; !has {
+		t.Fatalf("tools read missing the provider registry: %+v", got.Tools)
+	}
+	if ws["enabled"] != false {
+		t.Fatalf("a fresh config's web_search should read as disabled: %+v", ws)
+	}
+
+	// Save: enable + provider + key. It persists to disk AND hot-reloads the
+	// running agent (the next tool call / turn sees it — the npCfg pattern).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"tools": map[string]any{
+		"web_search": map[string]any{"enabled": true, "provider": "exa", "api_key": "exa-123"},
+	}}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("tools save code = %d body=%s", w.Code, w.Body.String())
+	}
+	var saveRes struct {
+		OK       bool `json:"ok"`
+		Reloaded bool `json:"reloaded"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &saveRes)
+	if !saveRes.OK || !saveRes.Reloaded {
+		t.Fatalf("save result = %+v, want ok+reloaded", saveRes)
+	}
+	onDisk, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onDisk.Tools.WebSearch.Enabled || onDisk.Tools.WebSearch.APIKey != "exa-123" {
+		t.Fatalf("the tools save did not persist: %+v", onDisk.Tools.WebSearch)
+	}
+	a.cfgMu.Lock()
+	live := a.cfg.Tools.WebSearch
+	a.cfgMu.Unlock()
+	if !live.Enabled || live.APIKey != "exa-123" {
+		t.Fatalf("the hot reload did not apply the tools save: %+v", live)
+	}
+
+	// Save again with a blank key + disabled: the stored key is preserved
+	// (masked-secret pattern) and the disable persists.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"tools": map[string]any{
+		"web_search": map[string]any{"enabled": false, "provider": "exa", "api_key": ""},
+	}}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("tools disable save code = %d body=%s", w.Code, w.Body.String())
+	}
+	after, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Tools.WebSearch.APIKey != "exa-123" {
+		t.Fatalf("a blank key should keep the stored one, got %q", after.Tools.WebSearch.APIKey)
+	}
+	if after.Tools.WebSearch.Enabled {
+		t.Fatal("the disable save should have persisted")
+	}
+
+	// The read now reports has_api_key=true (the form's "saved — leave blank
+	// to keep" placeholder).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/config", nil))
+	var got2 struct {
+		Tools map[string]any `json:"tools"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &got2)
+	if got2.Tools["web_search"].(map[string]any)["has_api_key"] != true {
+		t.Fatalf("has_api_key should be true once a key is saved: %+v", got2.Tools["web_search"])
+	}
+
+	// An invalid tools area (enabled, no provider/key) is rejected + does not
+	// clobber the saved one.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPost, "/admin/api/config", map[string]any{"tools": map[string]any{
+		"web_search": map[string]any{"enabled": true},
+	}}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("an invalid tools save code = %d, want 400", w.Code)
+	}
+	final, err := config.Load(a.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Tools.WebSearch.APIKey != "exa-123" {
+		t.Fatalf("a rejected tools save clobbered the saved key: %+v", final.Tools.WebSearch)
+	}
+}

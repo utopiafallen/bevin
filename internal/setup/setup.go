@@ -247,7 +247,7 @@ func (m *Manager) FinalizeEdit(ctx context.Context) (*config.ServerConfig, error
 // derived embedder are preserved as-is and a model/email edit is a fast,
 // side-effect-free write. The caller hot-reloads the running agent with the
 // returned config (there is no in-memory wizard state involved).
-func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth, serverBase *string, sandbox *config.Sandbox) (*config.ServerConfig, error) {
+func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, email *config.Email, oauth *config.OAuth, serverBase *string, sandbox *config.Sandbox, tools *config.Tools) (*config.ServerConfig, error) {
 	cfg, err := config.Load(m.dataDir)
 	if err != nil {
 		return nil, err
@@ -285,6 +285,9 @@ func (m *Manager) CommitEdit(models *[]config.Model, aux *[]config.AuxModel, ema
 		cfg.Sandbox.Cores = sandbox.Cores
 		cfg.Sandbox.MemoryMB = sandbox.MemoryMB
 		cfg.Sandbox.DiskMB = sandbox.DiskMB
+	}
+	if tools != nil {
+		cfg.Tools = *tools
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

@@ -18,6 +18,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
+	"github.com/utopiafallen/bevin/internal/websearch"
 )
 
 // requireAdmin wraps a handler so only an authenticated ADMIN may reach it.
@@ -192,14 +193,27 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"memory_mb": cfg.Sandbox.MemoryMB,
 			"disk_mb":   cfg.Sandbox.DiskMB,
 		},
+		// Tool settings the admin Tools page edits. The web_search API key
+		// is never returned (only has_api_key — the masked-secret pattern);
+		// providers is the build's search-provider registry (the UI's
+		// select source — like the profile registry, the UI never
+		// hardcodes the list).
+		"tools": map[string]any{
+			"web_search": map[string]any{
+				"enabled":     cfg.Tools.WebSearch.Enabled,
+				"provider":    cfg.Tools.WebSearch.Provider,
+				"has_api_key": cfg.Tools.WebSearch.APIKey != "",
+			},
+			"providers": websearch.Providers(),
+		},
 	})
 }
 
 // adminConfigSave saves a config-area edit from the admin config pages (a
-// subset of {models, aux, email, oauth}; a missing key is unchanged) +
+// subset of {models, aux, email, oauth, tools}; a missing key is unchanged) +
 // hot-reloads the running agent so the change applies without a restart. A
-// blank email password / OAuth client secret keeps the stored one (the UI is
-// never given the stored secret to echo back).
+// blank email password / OAuth client secret / web_search API key keeps the
+// stored one (the UI is never given the stored secret to echo back).
 func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		Models  *[]config.Model    `json:"models"`
@@ -207,6 +221,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 		Email   *config.Email      `json:"email"`
 		OAuth   *config.OAuth      `json:"oauth"`
 		Sandbox *config.Sandbox    `json:"sandbox"`
+		Tools   *config.Tools      `json:"tools"`
 		Server  *struct {
 			BaseURI *string `json:"base_uri"`
 		} `json:"server"`
@@ -219,7 +234,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	if p.Server != nil {
 		serverBase = p.Server.BaseURI // nil = area present but no key = no change
 	}
-	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && p.Sandbox == nil && serverBase == nil {
+	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && p.Sandbox == nil && p.Tools == nil && serverBase == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to save"})
 		return
 	}
@@ -233,7 +248,12 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 			p.OAuth.ClientSecret = cur.Auth.OAuth.ClientSecret // blank = keep the stored one
 		}
 	}
-	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox)
+	if p.Tools != nil && p.Tools.WebSearch.APIKey == "" {
+		if cur, err := config.Load(a.dataDir); err == nil {
+			p.Tools.WebSearch.APIKey = cur.Tools.WebSearch.APIKey // blank = keep the stored one
+		}
+	}
+	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox, p.Tools)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

@@ -80,6 +80,7 @@
     <div class="nav" id="nav">
       <a href="#overview" data-page="overview"><span class="ic">▦</span>Overview</a>
       <a href="#models" data-page="models"><span class="ic">◍</span>Models</a>
+      <a href="#tools" data-page="tools"><span class="ic">⌕</span>Tools</a>
       <a href="#sidecars" data-page="sidecars"><span class="ic">⬡</span>Sidecars</a>
       <a href="#email" data-page="email"><span class="ic">✉</span>Email</a>
       <a href="#users" data-page="users"><span class="ic">☻</span>Users</a>
@@ -89,7 +90,7 @@
   </nav>
   <main class="main" id="main"></main>
 <script>
-let STATUS = null, SIDE = null, MAIL = null, ME = null, USERS = null, OAUTH = null, OAUTH_ERR = null, OAUTH_HAS_SECRET = false, BASE_URI = "";
+let STATUS = null, SIDE = null, MAIL = null, ME = null, USERS = null, OAUTH = null, OAUTH_ERR = null, OAUTH_HAS_SECRET = false, BASE_URI = "", TOOLS = null;
 let pollTimer = null;
 
 async function j(url, opt) {
@@ -139,6 +140,13 @@ async function loadMail() {
   try { MAIL = await j("/admin/api/email"); } catch (e) { return blocked(e); }
   if (page() === "email") renderEmail();
 }
+async function loadTools() {
+  // The config read is the same endpoint every config page uses; this page
+  // only consumes its tools area (the masked web_search settings + the
+  // build's provider list).
+  try { TOOLS = (await j("/admin/api/config")).tools; } catch (e) { return blocked(e); }
+  if (page() === "tools") renderTools();
+}
 
 function render() {
   renderNav();
@@ -148,6 +156,7 @@ function render() {
   switch (page()) {
     case "overview": renderOverview(); startPoll(loadStatus, 2000); break;
     case "models": renderModels(); loadModelEditor(); break;
+    case "tools": renderTools(); loadTools(); break;
     case "sidecars": renderSidecars(); startPoll(loadSide, 5000); break;
     case "email": renderEmail(); loadMail(); loadSide(); break;
     case "users": renderUsers(); loadUsers(); break;
@@ -702,6 +711,63 @@ function renderEmail() {
     c2.append(off);
   }
   m.append(c2);
+}
+
+function renderTools() {
+  const m = document.getElementById("main");
+  m.innerHTML = "";
+  const h = document.createElement("h1"); h.textContent = "Tools"; m.append(h);
+  m.append(elP("Settings for the agent's tools. A save applies from the next turn — no restart."));
+
+  // Web search — the admin-configured search API behind the web_search
+  // tool. Disabled = the tool is not offered to the model at all; the
+  // agent then searches the web by opening a search-engine tab in
+  // web_browser (the tool description tells it so).
+  const c = document.createElement("div");
+  c.className = "card";
+  c.innerHTML = "<h2>Web search</h2>";
+  if (!TOOLS) { c.append(elP("Loading…")); m.append(c); return; }
+  const ws = TOOLS.web_search || {};
+  const cb = document.createElement("label");
+  const cbIn = document.createElement("input");
+  cbIn.type = "checkbox";
+  cbIn.checked = !!ws.enabled;
+  cb.append(cbIn, document.createTextNode(" Enable web search (the web_search tool)"));
+  c.append(cb);
+  c.append(elP("When enabled, bevin answers web searches with the web_search tool (a search API). When disabled, the agent searches the web the browser way — it opens a search-engine results page with web_browser, reads the results, and opens the pages that look useful."));
+  const pl = document.createElement("label"); pl.textContent = "Search provider"; c.append(pl);
+  const psel = document.createElement("select");
+  const providers = (TOOLS.providers && TOOLS.providers.length) ? TOOLS.providers : ["exa"];
+  const labels = { exa: "Exa (api.exa.ai)" };
+  providers.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p;
+    o.textContent = labels[p] || p;
+    if ((ws.provider || "exa") === p) o.selected = true;
+    psel.append(o);
+  });
+  c.append(psel);
+  const kl = document.createElement("label"); kl.textContent = "API key"; c.append(kl);
+  const k = document.createElement("input");
+  k.type = "password";
+  k.autocomplete = "new-password";
+  k.placeholder = ws.has_api_key ? "saved — leave blank to keep" : "your provider API key";
+  c.append(k);
+  c.append(elP("The key is stored in server.toml (mode 0600) and never returned by the API — leaving the field blank keeps the stored key. Get an Exa key at https://dashboard.exa.ai/api-keys."));
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tools: { web_search: { enabled: cbIn.checked, provider: psel.value, api_key: k.value.trim() } } }) });
+      await loadTools();
+    } catch (e) {
+      alert("Save failed: " + e.message);
+      save.disabled = false;
+    }
+  };
+  c.append(save);
+  m.append(c);
 }
 
 function renderServer() {

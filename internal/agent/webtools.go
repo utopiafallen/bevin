@@ -10,17 +10,13 @@ import (
 	"github.com/utopiafallen/bevin/internal/browser"
 )
 
-// registerWebBrowser registers the web_browser tool (the plan's WS5): ONE
-// tool, a single `command` arg over a fixed surface (openTab, navigate,
-// read, click, type, select, waitFor, evaluate, listTabs, closeTab). It is
-// registered unconditionally — a host without a desktop browser reports the
-// tool as UNAVAILABLE at use time (the neutral wording; the user is the one
-// who installs a browser), which the model relays to the user. web_search /
-// web_fetch (third-party API tools) stay DEFERRED per the decision.
-func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
-	return r.Register(Tool{
-		Name: "web_browser",
-		Description: `Browse the web in a real desktop browser on the user's machine (a visible window the user can watch and step into; logins made in it persist).
+// webBrowserDescriptionBase is the web_browser tool's base description (the
+// registry entry, and the wire copy's base). The per-turn WIRE copy carries
+// a SEARCH note appended on top (webBrowserWireDescription — the model is
+// pointed at web_search for a plain search when it is enabled, and at
+// search-engine tabs when it is not). The registry entry itself never
+// carries the note (it is per-instance state, not part of the tool).
+const webBrowserDescriptionBase = `Browse the web in a real desktop browser on the user's machine (a visible window the user can watch and step into; logins made in it persist).
 Commands:
 - openTab (url) — open a new tab (url optional; becomes the current tab)
 - navigate (url) — load url in the current tab and wait for it to finish loading
@@ -31,7 +27,30 @@ Commands:
 - waitFor (selector or expression, timeout_ms?) — wait until a selector is present+visible, or a JS expression is truthy (default 10 s)
 - evaluate (expression) — run JS in the page and return the result (last resort)
 - listTabs / closeTab (tab?) — manage tabs
-Workflow: openTab/navigate → read → act with the #N ids → read again after each action (the page changes; stale #N ids fail).`,
+Workflow: openTab/navigate → read → act with the #N ids → read again after each action (the page changes; stale #N ids fail).`
+
+// webBrowserWireDescription is the web_browser description for ONE turn's
+// wire request: the base + the search note matching this instance's
+// web_search state (user directive: when web_search is off, the agent
+// searches the web by opening a search-engine tab here — the model needs
+// the pointer to act on it).
+func webBrowserWireDescription(wsEnabled bool) string {
+	if wsEnabled {
+		return webBrowserDescriptionBase + "\nSearching: for a plain web search prefer the web_search tool (faster, cleaner results); use this browser to read or interact with a specific page."
+	}
+	return webBrowserDescriptionBase + "\nSearching: this instance has no web_search tool — to search the web, openTab a search-engine results page (e.g. https://www.bing.com/search?q=your+query), read the results, then openTab the pages that look useful."
+}
+
+// registerWebBrowser registers the web_browser tool (the plan's WS5): ONE
+// tool, a single `command` arg over a fixed surface (openTab, navigate,
+// read, click, type, select, waitFor, evaluate, listTabs, closeTab). It is
+// registered unconditionally — a host without a desktop browser reports the
+// tool as UNAVAILABLE at use time (the neutral wording; the user is the one
+// who installs a browser), which the model relays to the user.
+func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
+	return r.Register(Tool{
+		Name:        "web_browser",
+		Description: webBrowserDescriptionBase,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
