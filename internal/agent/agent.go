@@ -54,6 +54,13 @@ type Agent struct {
 	tools      *ToolRegistry
 	browserMgr *browser.Manager
 
+	// llmWork counts the per-user running LLM works (turns) — the gate
+	// behind the idle learning pass's "no other LLM work running" condition
+	// (the scheduler pools are per-model and shared; see learning.go).
+	// learn is the idle learning loop (the memory model's idle reflection).
+	llmWork *llmWorkTracker
+	learn   *learningMgr
+
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
 
@@ -65,6 +72,7 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		providers: map[string]provider.Provider{},
 		users:     map[string]*store.UserStore{},
 	}
+	a.llmWork = newLLMWorkTracker()
 	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
 		if !m.Enabled {
@@ -110,6 +118,14 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerEditTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register edit_file: %w", err)
 	}
+	// The memory tools (the memory model's on-demand surface: recall /
+	// remember / forget over the user's P5 memories).
+	if err := registerMemoryTools(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register memory tools: %w", err)
+	}
+	// The idle learning loop (armed per conversation at turn completion;
+	// the pass itself runs on the timer's goroutine, never in a turn).
+	a.learn = newLearningMgr(a)
 	return a, nil
 }
 
@@ -977,6 +993,10 @@ func stoppedNotice(np *noProgress) string {
 // (the reply is already persisted) — it is logged + the next turn retries.
 // Returns the reply text + the conversation id.
 func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
+	// The conversation id rides the ctx for the memory tools'
+	// per-conversation state (remember's provenance) — harness plumbing,
+	// see memorytools.go.
+	ctx = context.WithValue(ctx, ctxConversationKey, convID)
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", "", err
@@ -1296,6 +1316,9 @@ func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText strin
 	if err != nil {
 		return "", "", err
 	}
+	// The turn is this user's LLM work for its full duration (queue + run) —
+	// the idle learning pass's "no other LLM work running" gate reads this.
+	a.llmWork.enter(handle)
 	var (
 		reply  string
 		retErr error
@@ -1310,7 +1333,15 @@ func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText strin
 		if retErr == nil {
 			retErr = jerr
 		}
+		a.llmWork.leave(handle)
 		return conv.ID, reply, retErr
 	}
+	if retErr == nil {
+		// A clean turn: arm this conversation's idle learning pass (the
+		// memory model's idle reflection — see learning.go). A canceled
+		// turn never arms (its messages may be incomplete).
+		a.learn.onTurnComplete(handle, convID)
+	}
+	a.llmWork.leave(handle)
 	return conv.ID, reply, retErr
 }

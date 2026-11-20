@@ -133,6 +133,19 @@ func (s *UserStore) SetMemoryConfidence(id int64, confidence float64) error {
 	return err
 }
 
+// ForgetMemory marks a memory superseded WITHOUT a replacement (a deliberate
+// forget): the row is retained, like all supersession — never deleted.
+func (s *UserStore) ForgetMemory(id int64) error {
+	res, err := s.db.Exec(`UPDATE memories SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'active'`, nowUTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetMemoryProvenance replaces the set of messages that a memory was derived
 // from.
 func (s *UserStore) SetMemoryProvenance(memoryID int64, messageIDs []int64) error {
