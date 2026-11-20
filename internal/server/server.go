@@ -859,8 +859,8 @@ func (a *App) setEmail(w http.ResponseWriter, r *http.Request) {
 		target = req.Handle
 	}
 	req.Email = strings.TrimSpace(req.Email)
-	if req.Email != "" && !strings.Contains(req.Email, "@") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email is not valid"})
+	if req.Email != "" && !email.ValidAddress(req.Email) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email address is not valid"})
 		return
 	}
 	if err := a.srv.SetUserEmail(target, req.Email); err != nil {

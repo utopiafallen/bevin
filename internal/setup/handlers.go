@@ -399,9 +399,14 @@ func handleTestEmail(w http.ResponseWriter, r *http.Request, m *Manager) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	to := strings.TrimSpace(p.To)
+	if to != "" && !email.ValidAddress(to) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid email address"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := m.TestEmail(ctx, p.SMTP, strings.TrimSpace(p.To)); err != nil {
+	if err := m.TestEmail(ctx, p.SMTP, to); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/email"
 )
 
 // First-time user onboarding ("Meet Bevin"). A regular user's first sign-in
@@ -71,7 +72,7 @@ func (a *App) onboardingComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown or unavailable model"})
 		return
 	}
-	if req.Email != "" && !strings.Contains(req.Email, "@") {
+	if req.Email != "" && !email.ValidAddress(req.Email) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid email address"})
 		return
 	}

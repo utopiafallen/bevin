@@ -65,6 +65,15 @@ func (s *Sender) Send(ctx context.Context, to, subject, body string) error {
 	if to == "" {
 		return fmt.Errorf("email: no recipient")
 	}
+	if !ValidAddress(to) {
+		return fmt.Errorf("email: invalid recipient address (a CRLF in a stored address would inject headers into the sent message)")
+	}
+	if s.cfg.FromAddress != "" && !NoControl(s.cfg.FromAddress) {
+		return fmt.Errorf("email: invalid from address (control characters in the email config's from address)")
+	}
+	if s.cfg.FromName != "" && !NoControl(s.cfg.FromName) {
+		return fmt.Errorf("email: invalid from name (control characters in the email config's from name)")
+	}
 	host := s.cfg.SMTPHost
 	addr := net.JoinHostPort(host, strconv.Itoa(s.cfg.SMTPPort))
 	d := net.Dialer{Timeout: 15 * time.Second}
@@ -160,6 +169,40 @@ func encodeHeader(s string) string {
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidAddress reports whether addr is a plausible plain-text email address
+// for bevin's notification flow: 1-254 chars, exactly one @, a non-empty
+// local + domain part, and — the security property — no control characters,
+// spaces, or quote/bracket characters. The To: header is written VERBATIM
+// into the message (buildMessage), so a CRLF in a stored address would
+// inject arbitrary headers (Bcc/Cc/Subject) when bevin notifies the user;
+// the SMTP commands themselves are %q-escaped by net/smtp, so the header is
+// the vector. Deliberately not a full RFC 5322 parser — bevin only sends
+// plain-text notices to addresses its users (or the admin) type in.
+func ValidAddress(addr string) bool {
+	if len(addr) == 0 || len(addr) > 254 {
+		return false
+	}
+	at := strings.IndexByte(addr, '@')
+	if at <= 0 || at > 64 || at != strings.LastIndexByte(addr, '@') || len(addr)-at-1 == 0 || len(addr)-at-1 > 190 {
+		return false
+	}
+	return NoControl(addr) && !strings.ContainsAny(addr, " <>\"`")
+}
+
+// NoControl reports whether s is free of control characters (anything below
+// 0x20, including CR/LF, plus DEL). The From header's address and display
+// name are written verbatim into the message, so a CRLF there would inject
+// headers; from addresses are intentionally NOT required to be full RFC
+// addresses (the placeholder is the SMTP username, which may lack an @).
+func NoControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
 			return false
 		}
 	}

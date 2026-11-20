@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/setup"
 	"github.com/utopiafallen/bevin/internal/store"
@@ -132,9 +133,14 @@ func (a *App) adminEmailTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	to := strings.TrimSpace(p.To)
+	if to != "" && !email.ValidAddress(to) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid email address"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := a.edit.TestEmail(ctx, p.SMTP, strings.TrimSpace(p.To)); err != nil {
+	if err := a.edit.TestEmail(ctx, p.SMTP, to); err != nil {
 		code := http.StatusBadGateway
 		if strings.Contains(err.Error(), "not configured") {
 			code = http.StatusServiceUnavailable

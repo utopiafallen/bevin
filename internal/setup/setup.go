@@ -17,6 +17,7 @@ import (
 
 	"github.com/utopiafallen/bevin/internal/auth"
 	"github.com/utopiafallen/bevin/internal/config"
+	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/store"
@@ -636,6 +637,13 @@ func validateEmail(e config.Email) (config.Email, error) {
 	}
 	if e.FromAddress == "" {
 		return e, errors.New("email: a from address (or username) is required when email is enabled")
+	}
+	// The From header is written verbatim into the sent message: a CRLF in
+	// the display name or address would inject arbitrary headers (Bcc/Cc/
+	// Subject). The address is not required to be a full RFC address (the
+	// placeholder is the SMTP username), only control-char-free.
+	if !email.NoControl(e.FromName) || !email.NoControl(e.FromAddress) {
+		return e, errors.New("email: the from name/address must not contain control characters")
 	}
 	return e, nil
 }

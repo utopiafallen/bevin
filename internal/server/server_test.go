@@ -208,6 +208,18 @@ func TestEmailAddressEndpoint(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid email code = %d, want 400", w.Code)
 	}
+
+	// A CRLF in the address (header injection into the notification's To:
+	// header) is rejected with a 400, not stored (security 2026-11-20).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodPut, "/api/email", map[string]string{"email": "evil@example.com\r\nBcc: leak@evil.com"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("CRLF email code = %d, want 400", w.Code)
+	}
+	u, _ = srv.GetUser("admin")
+	if u.Email != "admin@example.com" {
+		t.Fatalf("a rejected CRLF address clobbered the stored email: %q", u.Email)
+	}
 }
 
 func TestNotifySendsToFakeSMTP(t *testing.T) {

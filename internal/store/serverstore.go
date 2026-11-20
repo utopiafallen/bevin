@@ -9,6 +9,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/utopiafallen/bevin/internal/email"
 )
 
 // ServerStore is server-level state (server.db): the user registry (S1),
@@ -191,7 +193,13 @@ func (s *ServerStore) FindOAuthUserBySubject(subject string) (*User, error) {
 }
 
 // SetUserEmail sets (or clears) a user's email address ("" clears it).
+// Addresses that fail email.ValidAddress are rejected: the address is written
+// verbatim into the To: header of notifications (a CRLF would inject headers),
+// so this is the backstop behind the HTTP-level validation (400s there).
 func (s *ServerStore) SetUserEmail(handle, emailAddr string) error {
+	if emailAddr != "" && !email.ValidAddress(emailAddr) {
+		return fmt.Errorf("invalid email address %q", emailAddr)
+	}
 	res, err := s.db.Exec(`UPDATE users SET email = ? WHERE handle = ?`, emailAddr, handle)
 	if err != nil {
 		return err
