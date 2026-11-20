@@ -24,7 +24,6 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"favicon.svg",
 		"fonts/nunito-variable.woff2",
 		"admin.html",
-		"admin-email.html",
 		"disk.html",
 	}
 	for _, p := range want {

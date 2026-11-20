@@ -392,6 +392,29 @@ func TestAdminUsersPageRedirect(t *testing.T) {
 	}
 }
 
+// TestAdminEmailPageRedirect pins the email-editor inlining: the dedicated
+// /admin/email page is gone (the editor lives on the dashboard's Email
+// page, built from the shared setup-wizard email form), so the old URL 303s
+// to /admin#email — and a non-admin is rejected rather than redirected
+// (same contract as the models/users redirects).
+func TestAdminEmailPageRedirect(t *testing.T) {
+	a, _ := testApp(t, config.Email{})
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/email", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("admin GET /admin/email code = %d, want 303", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/admin#email" {
+		t.Fatalf("Location = %q, want /admin#email", loc)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/admin/email", nil)
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthenticated GET /admin/email code = %d, want 403", w.Code)
+	}
+}
+
 // TestAdminConfigEndpoints — the admin config pages' read/save API: admin
 // gating, the models save (persisted + hot-reloaded into the agent), the
 // nothing-to-save rejection, and the email placeholder defaults (a blank port

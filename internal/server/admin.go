@@ -307,12 +307,15 @@ func (a *App) adminModelsPage(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin#models", http.StatusFound)
 }
 
+// The EMAIL editor is inlined on the dashboard's Email page (admin.html
+// #email) — no dedicated page (same detour friction as the models editor
+// had); this URL 303s there for old links/bookmarks.
 func (a *App) adminEmailPage(w http.ResponseWriter, r *http.Request) {
 	if role, ok := a.adminGate(r); !ok || role != "admin" {
 		http.Error(w, "admin required", http.StatusForbidden)
 		return
 	}
-	http.Redirect(w, r, "/admin-email.html", http.StatusFound)
+	http.Redirect(w, r, "/admin#email", http.StatusFound)
 }
 
 // The USERS panel is inlined on the dashboard's Users page (admin.html

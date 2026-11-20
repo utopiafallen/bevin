@@ -90,7 +90,7 @@
   </nav>
   <main class="main" id="main"></main>
 <script>
-let STATUS = null, SIDE = null, MAIL = null, ME = null, USERS = null, OAUTH = null, OAUTH_ERR = null, OAUTH_HAS_SECRET = false, BASE_URI = "", TOOLS = null;
+let STATUS = null, SIDE = null, ME = null, USERS = null, OAUTH = null, OAUTH_ERR = null, OAUTH_HAS_SECRET = false, BASE_URI = "", TOOLS = null, EMAIL = null, EMAIL_ORIG = null;
 let pollTimer = null;
 
 async function j(url, opt) {
@@ -143,8 +143,62 @@ async function loadSide() {
   if (page() === "sidecars") renderSidecars();
 }
 async function loadMail() {
-  try { MAIL = await j("/admin/api/email"); } catch (e) { return blocked(e); }
+  // The email page consumes the config read's email area (the prefill
+  // values + has_password — the stored password is never returned). Seed
+  // S.email ONLY on the first load: the shared form's toggle re-renders
+  // call the page's render(), which re-fetches through here, and those
+  // must never clobber in-flight edits.
+  try { EMAIL = (await j("/admin/api/config")).email; } catch (e) { return blocked(e); }
+  if (!S.email._loaded) seedEmailFrom(EMAIL);
   if (page() === "email") renderEmail();
+}
+// seedEmailFrom — build the form state from a fetched (saved) config email
+// area. The password is never among them (masked), so the field starts
+// blank; _hasPassword drives the "leave blank to keep" placeholder.
+// EMAIL_ORIG (what Cancel restores) is the saved state, deep-copied.
+function seedEmailFrom(e) {
+  e = e || {};
+  S.email = {
+    enabled: !!e.enabled,
+    smtp_host: e.smtp_host || "",
+    smtp_port: e.smtp_port ? String(e.smtp_port) : "",
+    username: e.username || "",
+    password: "",
+    from_address: e.from_address || "",
+    from_name: e.from_name || "",
+    use_starttls: e.use_starttls !== false,
+    _hasPassword: !!e.has_password,
+    _loaded: true,
+  };
+  EMAIL_ORIG = deepCopy(S.email);
+}
+// saveEmail — persist the email area (a blank password keeps the stored
+// one, server-side). Then re-fetch and re-seed: the saved config is the
+// normalized current state (the server fills blanks — port 587, from_name
+// "bevin", from_address ← username — so the re-fetched values, not the
+// form's, are what "current" and Cancel now mean).
+async function saveEmail() {
+  try {
+    const e = Object.assign({}, S.email);
+    delete e._hasPassword; delete e._loaded;
+    const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: e }) });
+    const d = await j("/admin/api/config");
+    EMAIL = d.email;
+    seedEmailFrom(EMAIL);
+    renderEmail();
+    msg(r.reloaded ? "Saved — the email settings apply immediately." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
+  } catch (err) {
+    msg("Save failed: " + err.message, "err");
+  }
+}
+// cancelEmail — the admin panel's addition to the shared form: undo the
+// edits in the form (client-side only — nothing was committed, so there
+// is nothing to roll back server-side) and show the saved settings.
+function cancelEmail() {
+  if (!EMAIL_ORIG) return;
+  S.email = deepCopy(EMAIL_ORIG);
+  renderEmail();
+  msg("Changes discarded — showing the saved settings.", "");
 }
 async function loadTools() {
   // The config read is the same endpoint every config page uses; this page
@@ -248,9 +302,9 @@ function poolRow(p) {
 // save). Both model kinds are LIST-CENTRIC tables; the forms are
 // on-demand (hidden by default), and only one form is open at a time.
 const PROBE_URL = "/admin/api/probe-model";
-const EMAIL_TEST_URL = "/admin/api/email/test"; // unused here; the shared email form references it
+const EMAIL_TEST_URL = "/admin/api/email/test"; // the Email page's shared form tests the draft against it
 const PROFILES_URL = "/admin/api/profiles"; // the build's model profile registry (the profile selects' options)
-let S = { models: [], modelDraft: freshModel(), editingIndex: -1, editOriginal: null, formError: null, aux: [], showForm: false, loaded: false, auxDraft: freshAux(), auxEditingIndex: -1, auxEditOriginal: null, auxFormError: null, auxShowForm: false };
+let S = { models: [], modelDraft: freshModel(), editingIndex: -1, editOriginal: null, formError: null, aux: [], showForm: false, loaded: false, auxDraft: freshAux(), auxEditingIndex: -1, auxEditOriginal: null, auxFormError: null, auxShowForm: false, email: { enabled: false, smtp_host: "", smtp_port: "", username: "", password: "", from_address: "", from_name: "", use_starttls: true } };
 
 // api — the fetch helper the shared components expect (parsed JSON; throws
 // with the server's error message on a non-2xx).
@@ -670,53 +724,40 @@ function renderSidecars() {
   m.append(c);
 }
 
+// Email — the setup wizard's shared email form (renderEmailForm),
+// pre-filled with the SAVED settings (GET /admin/api/config's email area):
+// the form IS the current-settings display, and Save persists changes.
+// The admin-specific addition is Cancel — it undoes the form's edits and
+// restores the saved settings (see cancelEmail).
 function renderEmail() {
   const m = document.getElementById("main");
   m.innerHTML = "";
   const h = document.createElement("h1"); h.textContent = "Email"; m.append(h);
+  m.append(elP("bevin can email users and the admin (a task finished, something needs attention, …). When on, it sends through your SMTP server. A save applies immediately — no restart."));
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
   const c = document.createElement("div");
   c.className = "card";
-  if (!MAIL) { c.append(elP("Loading…")); m.append(c); return; }
-  const s = MAIL.smtp || {};
-  c.innerHTML =
-    "<h2>SMTP (saved)</h2>" +
-    "<p>" + (MAIL.configured ? "<span class='badge ok'>configured</span>" : "<span class='badge bad'>not configured</span>") + "</p>" +
-    "<p class='kv'>host " + esc(s.smtp_host || "—") + " : " + esc(s.smtp_port || "—") +
-    "<br>user " + esc(s.username || "—") + " — password " + (s.has_password ? "set" : "not set") +
-    "<br>from " + esc(s.from_address || (s.username || "—")) + " (" + esc(s.from_name || "bevin") + ")" +
-    "<br>STARTTLS " + (s.use_starttls ? "on" : "off") + "</p>";
+  c.innerHTML = "<h2>SMTP</h2>";
+  if (!EMAIL) { c.append(elP("Loading…")); m.append(c); return; }
+  c.append(renderEmailForm());
+  // The stored password is never returned: when one is set, the field
+  // stays blank with the keep-hint as its placeholder (blank on save
+  // keeps the stored one, server-side).
+  const pw = document.getElementById("em_pw");
+  if (pw && S.email._hasPassword) pw.placeholder = "saved — leave blank to keep";
+  // The form's button row (the shared form renders only its fields — the
+  // wizard provides its own Next; the page provides Save + Cancel).
+  const btns = document.createElement("div");
+  btns.className = "btns";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "ghost"; cancelBtn.textContent = "Cancel";
+  cancelBtn.onclick = cancelEmail;
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "primary"; saveBtn.textContent = "Save email settings";
+  saveBtn.onclick = saveEmail;
+  btns.append(cancelBtn, saveBtn);
+  c.append(btns);
   m.append(c);
-  // Test send.
-  const c2 = document.createElement("div");
-  c2.className = "card";
-  c2.innerHTML = "<h2>Send a test email</h2>";
-  const row = document.createElement("div");
-  row.className = "row";
-  const inp = document.createElement("input");
-  inp.type = "text"; inp.placeholder = "you@example.com";
-  const btn = document.createElement("button");
-  btn.className = "btn"; btn.textContent = "Send test email";
-  const msg = document.createElement("div");
-  msg.className = "msg";
-  btn.onclick = async () => {
-    const to = inp.value.trim();
-    if (!to) { msg.textContent = "Enter an address first."; msg.className = "msg err"; return; }
-    btn.disabled = true; btn.textContent = "Sending…";
-    try {
-      const r = await j("/admin/api/email/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }) });
-      msg.textContent = "Test email sent to " + r.to + "."; msg.className = "msg ok";
-    } catch (e) {
-      msg.textContent = "Send failed: " + e.message; msg.className = "msg err";
-    } finally { btn.disabled = false; btn.textContent = "Send test email"; }
-  };
-  row.append(inp, btn);
-  c2.append(row, msg);
-  if (!MAIL.configured) {
-    const off = elP("");
-    off.innerHTML = "Email is not configured yet — open the <a href='/admin/email'>email editor</a> to set it up.";
-    c2.append(off);
-  }
-  m.append(c2);
 }
 
 function renderTools() {
