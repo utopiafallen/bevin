@@ -724,6 +724,7 @@ function renderTools() {
   m.innerHTML = "";
   const h = document.createElement("h1"); h.textContent = "Tools"; m.append(h);
   m.append(elP("Settings for the agent's tools. A save applies from the next turn — no restart."));
+  const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
 
   // Web search — the admin-configured search API behind the web_search
   // tool. Disabled = the tool is not offered to the model at all; the
@@ -784,10 +785,11 @@ function renderTools() {
   save.onclick = async () => {
     save.disabled = true;
     try {
-      await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tools: { web_search: { enabled, provider: psel.value, api_key: k.value.trim() } } }) });
+      const r = await j("/admin/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tools: { web_search: { enabled, provider: psel.value, api_key: k.value.trim() } } }) });
       await loadTools();
+      msg(r.reloaded ? "Saved — web search changes apply from the next turn." : "Saved (the agent reload failed — restart bevin to apply).", r.reloaded ? "ok" : "err");
     } catch (e) {
-      alert("Save failed: " + e.message);
+      msg("Save failed: " + e.message, "err");
       save.disabled = false;
     }
   };
