@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -141,6 +142,13 @@ func fileSafeRelPath(p string) (string, error) {
 	}
 	if strings.ContainsRune(p, '\x00') {
 		return "", errors.New("invalid path")
+	}
+	// Windows: a colon in a path is the NTFS alternate data stream
+	// separator — "file.txt:evil" targets a hidden stream whose content is
+	// invisible to listings but retrievable by name. Colons are legal
+	// filename characters on other OSes, so the check is Windows-only.
+	if runtime.GOOS == "windows" && strings.ContainsRune(p, ':') {
+		return "", errors.New("paths must not contain ':' (on Windows a colon is the NTFS data-stream separator)")
 	}
 	p = strings.ReplaceAll(p, `\`, "/")
 	if strings.HasPrefix(p, "/") {
