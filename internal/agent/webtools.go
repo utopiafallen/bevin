@@ -16,20 +16,26 @@ import (
 // pointed at web_search for a plain search when it is enabled, and at
 // search-engine tabs when it is not). The registry entry itself never
 // carries the note (it is per-instance state, not part of the tool).
-const webBrowserDescriptionBase = `Browse the web in a real desktop browser on the user's machine (a visible window the user can watch and step into; logins made in it persist).
+//
+// BREVITY CONTRACT (user directive 2026-11-19): the whole wire tool surface
+// must stay small (the descriptions ride every system prompt). The
+// description must still stand ALONE (the WS4 test — the model uses the
+// tool from the description alone): trim padding, never the behavior. Arg
+// details live in the parameter descriptions, not the body.
+const webBrowserDescriptionBase = `Browse the web in a real desktop browser the bevin server runs in a dedicated profile (logins made in it persist). #N = an interactive element id from the last read.
 Commands:
-- openTab (url) — open a new tab (url optional; becomes the current tab)
-- navigate (url) — load url in the current tab and wait for it to finish loading
-- read (selector?) — the page's clean text as markdown + a numbered list of interactive elements (#N: role "name"). This is how you see page content. Pass selector to drill into a part of a truncated page.
-- readItems (selector) — collect a list: the items matching selector, sorted by VISUAL position (top, left — not DOM order), deduped, text + first link per item, after the page has settled.
-- scroll (direction?, viewports?) — scroll the page one viewport (default; direction down|up|top|bottom, viewports >= 1) and wait for it to settle; reports the new position and whether the bottom was reached.
-- click (element or selector) — click element #N from the last read (or a raw CSS selector)
-- type (element or selector, text) — click the element, then type text into it (a trailing newline is sent as Enter)
-- select (element or selector, value) — pick an option of a <select> (by value or visible text)
-- waitFor (selector or expression, timeout_ms?) — wait until a selector is present+visible, or a JS expression is truthy (default 10 s)
-- evaluate (expression) — run JS in the page and return the result (last resort)
-- listTabs / closeTab (tab?) — manage tabs
-Workflow: openTab/navigate → read → act with the #N ids → read again after each action (the page changes; stale #N ids fail). On lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached — readItems returns items in visual (bounding-box) order, deduped, after the page has settled. Do not evaluate-scroll + read on such pages.`
+- openTab (url?) — open a tab (becomes the current one)
+- navigate (url) — load url in the current tab (waits for load)
+- read (selector?) — the page as clean markdown + numbered interactive elements (#N: role "name"). How you see content; selector drills into a truncated page.
+- readItems (selector) — the items matching selector, in VISUAL order (not DOM order), deduped, text + first link, after the page settles.
+- scroll (direction?, viewports?) — move whole viewports (direction down|up|top|bottom, default: down 1) and wait for settle; reports position + bottom reached.
+- click (element|selector) — click #N or a CSS selector
+- type (element|selector, text) — click + type (a trailing newline = Enter)
+- select (element|selector, value) — pick a <select> option (value or visible text)
+- waitFor (selector|expression, timeout_ms?) — wait for a selector (present+visible) or a truthy JS expression (default 10 s)
+- evaluate (expression) — run JS, return the result (last resort)
+- listTabs / closeTab (tab?)
+Workflow: openTab/navigate → read → act with #N → read again after each action (the page changes; stale #N ids fail). Lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached — do not evaluate-scroll + read.`
 
 // webBrowserWireDescription is the web_browser description for ONE turn's
 // wire request: the base + the search note matching this instance's
@@ -38,9 +44,9 @@ Workflow: openTab/navigate → read → act with the #N ids → read again after
 // the pointer to act on it).
 func webBrowserWireDescription(wsEnabled bool) string {
 	if wsEnabled {
-		return webBrowserDescriptionBase + "\nSearching: for a plain web search prefer the web_search tool (faster, cleaner results); use this browser to read or interact with a specific page."
+		return webBrowserDescriptionBase + "\nSearching: prefer web_search for plain searches; use this browser to read or interact with a specific page."
 	}
-	return webBrowserDescriptionBase + "\nSearching: this instance has no web_search tool — to search the web, openTab a search-engine results page (e.g. https://www.bing.com/search?q=your+query), read the results, then openTab the pages that look useful."
+	return webBrowserDescriptionBase + "\nSearching: web_search is not configured — openTab a search-engine results page (e.g. https://www.bing.com/search?q=your+query), read the results, then openTab the pages that look useful."
 }
 
 // registerWebBrowser registers the web_browser tool (the plan's WS5): ONE
@@ -61,16 +67,16 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 					"type": "string",
 					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "evaluate", "listTabs", "closeTab"},
 				},
-				"url":       map[string]any{"type": "string", "description": "openTab / navigate"},
-				"element":   map[string]any{"type": "string", "description": "click / type / select: the #N id from the last read"},
-				"selector":  map[string]any{"type": "string", "description": "a raw CSS selector (advanced fallback for click/type/select; the drill-in scope for read; the item selector for readItems; the wait target for waitFor)"},
-				"text":      map[string]any{"type": "string", "description": "type: what to type (a trailing newline = Enter)"},
-				"value":     map[string]any{"type": "string", "description": "select: the option value or visible text"},
-				"expression": map[string]any{"type": "string", "description": "evaluate: the JS expression; waitFor: the truthy predicate"},
-				"direction":  map[string]any{"type": "string", "description": "scroll: which way to move — down, up, top, or bottom (default down)"},
-				"viewports":  map[string]any{"type": "number", "description": "scroll: how many viewport heights to move (default 1)"},
-				"tab":        map[string]any{"type": "string", "description": "a tab id from listTabs (default: the current tab)"},
-				"timeout_ms": map[string]any{"type": "number", "description": "waitFor: the ceiling (default 10000, max 120000)"},
+				"url":        map[string]any{"type": "string", "description": "openTab / navigate"},
+				"element":    map[string]any{"type": "string", "description": "click/type/select: #N id from the last read"},
+				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, drill-in scope for read, item selector for readItems, wait target for waitFor"},
+				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},
+				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
+				"expression": map[string]any{"type": "string", "description": "evaluate: JS expression; waitFor: truthy predicate"},
+				"direction":  map[string]any{"type": "string", "description": "scroll: down|up|top|bottom (default down)"},
+				"viewports":  map[string]any{"type": "number", "description": "scroll: viewport heights to move (default 1)"},
+				"tab":        map[string]any{"type": "string", "description": "tab id from listTabs (default: the current tab)"},
+				"timeout_ms": map[string]any{"type": "number", "description": "waitFor: ceiling (default 10000, max 120000)"},
 			},
 			"required": []string{"command"},
 		},

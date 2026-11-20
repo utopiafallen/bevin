@@ -9,11 +9,10 @@ import (
 	"github.com/utopiafallen/bevin/internal/websearch"
 )
 
-// webSearchDescription is the model-facing description on the wire.
-const webSearchDescription = `Search the web with the server's configured search API (a natural-language query returns ranked results: title, URL, publication date, and relevance-sized excerpts). Use it for research and lookups; use web_browser to read or interact with a specific page.
-Arguments:
-- query (required) — the search query in natural language (the subject +, when useful, the kind of source and time period you want)
-- num_results (optional) — how many results to fetch (1-20, default 10)`
+// webSearchDescription is the model-facing description on the wire (the
+// brevity contract, see webBrowserDescriptionBase: stands alone, no
+// padding — arg details live in the parameter descriptions).
+const webSearchDescription = `Search the web with the server's configured search API: a natural-language query returns ranked results (title, URL, publication date, excerpts). Use web_browser to read or interact with a specific page.`
 
 // webSearchArgs is one web_search call's arguments (the model's JSON).
 type webSearchArgs struct {
@@ -46,11 +45,11 @@ func registerWebSearch(r *ToolRegistry, a *Agent) error {
 			"properties": map[string]any{
 				"query": map[string]any{
 					"type":        "string",
-					"description": "the search query in natural language (the subject +, when useful, the kind of source and time period you want)",
+					"description": "natural-language query (subject +, when useful, source kind / time period)",
 				},
 				"num_results": map[string]any{
 					"type":        "number",
-					"description": "how many results to fetch (1-20, default 10)",
+					"description": "results to fetch (1-20, default 10)",
 				},
 			},
 			"required": []string{"query"},

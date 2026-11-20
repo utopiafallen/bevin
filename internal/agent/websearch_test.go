@@ -120,7 +120,7 @@ func TestWebSearchEnabled(t *testing.T) {
 	if !names["web_search"] {
 		t.Fatal("web_search must be offered when the admin has it enabled")
 	}
-	if !strings.Contains(descs["web_browser"], "prefer the web_search tool") {
+	if !strings.Contains(descs["web_browser"], "prefer web_search") {
 		t.Fatalf("the web_browser wire description should say to prefer web_search (it is on): %.200s", descs["web_browser"])
 	}
 	if strings.Contains(descs["web_browser"], "search-engine results page") {
