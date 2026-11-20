@@ -86,6 +86,10 @@ type App struct {
 	diskMon *diskMonitor
 	// diskCancel stops the disk monitor's periodic walk.
 	diskCancel context.CancelFunc
+	// loginLimiter rate-limits /login (per IP + per handle); lazily built
+	// on first use (apps built by hand in tests get the same defaults).
+	loginLimitOnce sync.Once
+	loginLimiter   *loginLimiter
 }
 
 // NewNormal builds the normal-mode app from a loaded config.
@@ -334,6 +338,15 @@ func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC().Format(time.RFC3339)})
 }
 
+// loginLimiterFor lazily builds the app's login rate limiter (defaults) so
+// apps built by hand (tests) are throttled too.
+func (a *App) loginLimiterFor() *loginLimiter {
+	a.loginLimitOnce.Do(func() {
+		a.loginLimiter = newLoginLimiter(defaultLoginLimit, defaultLoginWindow)
+	})
+	return a.loginLimiter
+}
+
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Handle   string `json:"handle"`
@@ -343,11 +356,23 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Rate limit BEFORE the credential check: the caps bound both an
+	// attacker (per IP) and a target account (per handle).
+	limit := a.loginLimiterFor()
+	if ok, retry := limit.attempt(clientIP(r), req.Handle); !ok {
+		log.Printf("login: throttled handle %s from %s", req.Handle, clientIP(r))
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts — try again later"})
+		return
+	}
 	u, token, err := a.prov.Authenticate(r.Context(), req.Handle, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
+	// A success clears the handle's failure counter (legitimate typos must
+	// not accumulate into a lockout).
+	limit.reset(req.Handle)
 	log.Printf("login: %s (%s)", u.Handle, clientIP(r))
 	auth.SetSessionCookie(w, token, a.ttl)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "handle": u.Handle, "role": u.Role})
