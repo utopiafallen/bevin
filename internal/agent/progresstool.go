@@ -25,7 +25,7 @@ import (
 // model self-heals from the error result).
 func registerReportProgress(r *ToolRegistry) error {
 	return r.Register(Tool{
-		Name: reportProgressTool,
+		Name:        reportProgressTool,
 		Description: `Report your estimated progress (percent + next_step). Call when asked for a check-in, and proactively while working autonomously. Be honest — a low or declining percent while you keep repeating the same action is exactly when Bevin needs to hear it: it may stop the turn and tell the user what is blocking you.`,
 		Parameters: map[string]any{
 			"type": "object",

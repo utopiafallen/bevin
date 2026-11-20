@@ -219,15 +219,15 @@ func (c *ServerConfig) OAuthRedirectURI() string {
 // Model is a main text model in the admin catalog. A model is a provider
 // endpoint (Provider + BaseURL + APIKey) plus the API model name (ModelID).
 type Model struct {
-	ID          string `toml:"id" json:"id"`
-	Provider    string `toml:"provider" json:"provider"` // openai | anthropic | llama
-	BaseURL     string `toml:"base_url" json:"base_url"`
-	APIKey      string `toml:"api_key" json:"api_key"`
+	ID       string `toml:"id" json:"id"`
+	Provider string `toml:"provider" json:"provider"` // openai | anthropic | llama
+	BaseURL  string `toml:"base_url" json:"base_url"`
+	APIKey   string `toml:"api_key" json:"api_key"`
 	// HasAPIKey is the masked-secret flag for API responses: the admin
 	// config API never returns the key itself (only whether one is set),
 	// and a blank key on save keeps the stored one (the UI is never given
 	// a stored key to echo back). Derived at read time — not persisted.
-	HasAPIKey bool `toml:"-" json:"has_api_key"`
+	HasAPIKey   bool   `toml:"-" json:"has_api_key"`
 	ModelID     string `toml:"model_id" json:"model_id"`
 	DisplayName string `toml:"display_name" json:"display_name"`
 	MaxContext  int    `toml:"max_context" json:"max_context"`
@@ -273,8 +273,8 @@ type AuxModel struct {
 	BaseURL  string   `toml:"base_url" json:"base_url"`
 	APIKey   string   `toml:"api_key" json:"api_key"`
 	// HasAPIKey — the masked-secret flag (see Model.HasAPIKey).
-	HasAPIKey bool `toml:"-" json:"has_api_key"`
-	ModelID  string   `toml:"model_id" json:"model_id"`
+	HasAPIKey bool   `toml:"-" json:"has_api_key"`
+	ModelID   string `toml:"model_id" json:"model_id"`
 	// Profile is the model's MODEL PROFILE (internal/profile) — the same
 	// assignable surface as the main models (blank self-heals to general, a
 	// set unknown name is a loud config error). The perception calls consume

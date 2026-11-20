@@ -16,10 +16,10 @@ import (
 func TestSettleDecision(t *testing.T) {
 	const quietMs = 300.0
 	type tc struct {
-		name                    string
-		now, lastMut, qms       float64
-		inFlight                int
-		want                    bool
+		name              string
+		now, lastMut, qms float64
+		inFlight          int
+		want              bool
 	}
 	cases := []tc{
 		{"fresh install, nothing in flight: not quiet yet", 1000, 1000, quietMs, 0, false},

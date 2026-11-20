@@ -45,7 +45,7 @@ var scrollJS = `(() => {
 
 // ScrollResult is one scroll call's outcome (before the tool renders it).
 type ScrollResult struct {
-	Target  string // "document" or "<tag>#<id>"
+	Target  string  // "document" or "<tag>#<id>"
 	Prev    float64 // the scroll position before the move
 	Top     float64 // the new scroll position
 	Max     float64 // the furthest scrollable position
