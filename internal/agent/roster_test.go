@@ -288,6 +288,66 @@ func TestPurposeNudge(t *testing.T) {
 	}
 }
 
+// TestPurposeNudgeNoSiblings: the nudge fires with NO sibling present —
+// the purpose also labels the conversation in the user's chat list, so the
+// nudge is not gated on siblings. Solo conversation: quiet turns, a
+// nudge-only checkin on the due turn (no roster section), set_purpose
+// resets, staleness wording on the next due turn.
+func TestPurposeNudgeNoSiblings(t *testing.T) {
+	a, us, _ := newRosterTestAgent(t)
+	ca := newRosterConversation(t, a, "Solo")
+	ctx := context.Background()
+
+	// Turns 1-6: nothing at all (no siblings, nudge not yet due).
+	for i := 1; i <= 6; i++ {
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if ci := lastCheckin(t, us, ca.ID); ci != "" {
+			t.Fatalf("turn %d: unexpected announcement: %q", i, ci)
+		}
+	}
+	// Turn 7: the nudge, ALONE (no siblings → no roster section).
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t7"); err != nil {
+		t.Fatal(err)
+	}
+	ci := lastCheckin(t, us, ca.ID)
+	if !strings.Contains(ci, "PURPOSE CHECK") || !strings.Contains(ci, "no stated purpose") {
+		t.Fatalf("turn 7: want the no-purpose nudge, got %q", ci)
+	}
+	if strings.Contains(ci, "conversations of yours") || strings.Contains(ci, "Changes among") {
+		t.Fatalf("a nudge-only announcement must not carry a roster section: %q", ci)
+	}
+
+	// set_purpose resets the cadence.
+	tl, ok := a.tools.Get("set_purpose")
+	if !ok {
+		t.Fatal("set_purpose not registered")
+	}
+	tctx := context.WithValue(ctx, ctxConversationKey, ca.ID)
+	if out, err := tl.Execute(tctx, "u1", []byte(`{"purpose":"solo research"}`)); err != nil || !strings.Contains(out, "purpose updated") {
+		t.Fatalf("set_purpose = %q, %v", out, err)
+	}
+
+	// Turns 8-13: quiet again; turn 14: the staleness nudge, alone.
+	for i := 8; i <= 13; i++ {
+		before := countCheckins(t, us, ca.ID)
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if after := countCheckins(t, us, ca.ID); after != before {
+			t.Fatalf("turn %d: unexpected announcement: %q", i, lastCheckin(t, us, ca.ID))
+		}
+	}
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t14"); err != nil {
+		t.Fatal(err)
+	}
+	ci = lastCheckin(t, us, ca.ID)
+	if !strings.Contains(ci, "PURPOSE CHECK") || !strings.Contains(ci, "7 turns old") {
+		t.Fatalf("turn 14: want the staleness nudge, got %q", ci)
+	}
+}
+
 // TestAgentMessageQueueAndDelivery: agent_message queues (never pushes), the
 // recipient gets it at its next user turn (marked delivered), self/unknown
 // sends are refused, and the per-pair cap refuses a sender that keeps

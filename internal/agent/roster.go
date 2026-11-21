@@ -220,16 +220,16 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 		msgLines = append(msgLines, fmt.Sprintf("- from %s: %s", who, m.Text))
 	}
 
-	// The rolling-purpose nudge (the sole updater; meaningful only while
-	// there are siblings to see the purpose).
+	// The rolling-purpose nudge (the sole updater). It fires regardless of
+	// whether any sibling is present: the purpose also labels this
+	// conversation in the user's chat list, so it serves the user directly,
+	// not only the siblings.
 	var nudgeLine string
-	if len(newSnap) > 0 {
-		if due, turns := a.purposeNudgeDue(convID); due {
-			if self.Purpose == "" {
-				nudgeLine = "PURPOSE CHECK: this conversation has no stated purpose — call set_purpose to state it (one line), so your siblings can see what you are doing."
-			} else {
-				nudgeLine = fmt.Sprintf("PURPOSE CHECK: the stated purpose is %d turns old — if what this conversation is doing has drifted, call set_purpose to refresh it.", turns)
-			}
+	if due, turns := a.purposeNudgeDue(convID); due {
+		if self.Purpose == "" {
+			nudgeLine = "PURPOSE CHECK: this conversation has no stated purpose — call set_purpose to state it (one line). It labels this conversation in the user's chat list and on your siblings' roster."
+		} else {
+			nudgeLine = fmt.Sprintf("PURPOSE CHECK: the stated purpose is %d turns old — if what this conversation is doing has drifted, call set_purpose to refresh it.", turns)
 		}
 	}
 
