@@ -176,8 +176,9 @@ input:focus, textarea:focus, select:focus {
 .msg .error-text { color: var(--danger, #c0392b); }
 /* Tool-call indicator rows: the model issued a tool call (one row per call,
    parallel calls stack). The chip pulses while the call is in flight and
-   settles to ✓/✗ on completion; the model's next reply renders below. */
-.msg-tool { display: flex; justify-content: center; margin: 0.3rem 0; }
+   settles to ✓/✗ on completion; the model's next reply renders below.
+   Left-aligned with the assistant's bubble (the same left edge). */
+.msg-tool { display: flex; justify-content: flex-start; margin: 0.3rem 0; }
 .tool-chip {
   display: inline-flex; align-items: center; gap: 0.4rem; max-width: 92%;
   font-size: 0.74rem; font-weight: 700; color: var(--text-muted);

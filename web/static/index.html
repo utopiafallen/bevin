@@ -959,14 +959,26 @@
               // The model issued a tool call: one indicator row per call
               // (parallel calls stack). The model's next reply —
               // processing the results — renders BELOW the rows, so the
-              // row lands before a fresh bubble, and the bare placeholder
-              // (nothing streamed yet — no narration, no thinking) is
-              // dropped instead of lingering above the row. Measure the
-              // follow state BEFORE the mutations (row + bubble both
-              // extend the log — the same pre-measure rule as the
-              // reasoning branch).
+              // row lands before a fresh bubble. The bubble that carried
+              // the call: if it THOUGHT, the thinking block is shown
+              // ABOVE the rows (collapsed — the thinking is done) and the
+              // empty content bubble is dropped when nothing was
+              // narrated; a bare placeholder (no narration, no thinking)
+              // is dropped outright. Measure the follow state BEFORE the
+              // mutations (row + bubble both extend the log — the same
+              // pre-measure rule as the reasoning branch).
               var tBelow = pinScroll($("chatLog"));
-              if (asst && !asst.buf && asst.details.style.display === "none") asst.m.remove();
+              if (asst) {
+                if (asst.details.style.display !== "none") {
+                  asst.details.open = false; // the thinking is done
+                  if (asst.r0 && !asst.t0 && !asst.stats.hidden) {
+                    asst.stats.textContent = asst.stats.textContent.replace("thinking…", "thinking");
+                  }
+                  if (!asst.buf) asst.bubble.remove(); // thinking-only: no empty bubble
+                } else if (!asst.buf) {
+                  asst.m.remove();
+                }
+              }
               addToolRow(p.name, false, false);
               asst = startAssistantMsg();
               reasoning = ""; // the new bubble owns a fresh thinking block
@@ -1082,10 +1094,11 @@
             addUserMsg(m.content, m.created_at);
           } else if (m.role === "assistant") {
             // The row's tool calls render as indicator rows after the
-            // bubble; a tool-call turn's EMPTY row carries no bubble at
+            // bubble (or after the thinking-only block); a tool-call
+            // turn's EMPTY row without reasoning carries no bubble at
             // all (its text landed on the final reply row) — rows only.
             var hasCalls = m.tool_calls && m.tool_calls.length > 0;
-            if (!hasCalls || m.content) {
+            if (m.content || m.reasoning || !hasCalls) {
               var a = startAssistantMsg();
               // Show the stored time, not "now" (this is history, not a live reply).
               var dts = new Date(m.created_at);
@@ -1093,8 +1106,15 @@
                 a.m.querySelector(".when").textContent = fmtWhen(dts);
                 a.m.querySelector(".when").title = dts.toUTCString();
               }
-              a.buf = m.content || "(empty reply)";
-              paint(a);
+              if (m.content) {
+                a.buf = m.content;
+                paint(a);
+              } else if (m.reasoning) {
+                a.bubble.remove(); // thinking-only carrier: no content bubble
+              } else {
+                a.buf = "(empty reply)";
+                paint(a);
+              }
               if (m.reasoning) {
                 // Restore the persisted thinking block: the full trace inside
                 // the collapsed details; the summary previews its first line.
