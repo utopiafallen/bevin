@@ -69,13 +69,20 @@ func conversationColumns(t *testing.T, dir string) map[string]bool {
 	return out
 }
 
-// checkPostMigration asserts the v3 invariants: all three versions recorded,
-// the purpose columns present, agent_messages usable.
+// checkPostMigration asserts the post-migration invariants: all versions
+// recorded, the purpose columns present (v2), agent_messages usable (v3),
+// and the tasks origin column present (v4).
 func checkPostMigration(t *testing.T, dir string) {
 	t.Helper()
 	versions := schemaVersions(t, dir)
-	if len(versions) != 3 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 {
-		t.Fatalf("schema versions = %v, want [1 2 3]", versions)
+	want := 1 + len(userMigrations)
+	if len(versions) != want {
+		t.Fatalf("schema versions = %v, want %d versions ([1 .. %d])", versions, want, want)
+	}
+	for i, v := range versions {
+		if v != i+1 {
+			t.Fatalf("schema versions = %v, want [1 .. %d]", versions, want)
+		}
 	}
 	cols := conversationColumns(t, dir)
 	for _, c := range []string{"purpose", "topic", "purpose_updated_at"} {
@@ -91,6 +98,13 @@ func checkPostMigration(t *testing.T, dir string) {
 	var n int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM agent_messages`).Scan(&n); err != nil {
 		t.Fatalf("agent_messages not queryable: %v", err)
+	}
+	// v4: the tasks origin column exists.
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'origin_conversation_id'`).Scan(&n); err != nil {
+		t.Fatalf("tasks origin column not queryable: %v", err)
+	}
+	if n != 1 {
+		t.Fatal("tasks.origin_conversation_id column missing (the v4 step did not apply)")
 	}
 }
 

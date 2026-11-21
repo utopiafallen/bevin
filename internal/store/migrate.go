@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS agent_messages (
 CREATE INDEX IF NOT EXISTS idx_am_to ON agent_messages(to_conversation, delivered_at);
 `,
 	},
+	{
+		// v4 (2026-11-20): tasks.origin_conversation_id — the conversation
+		// a task was created from (the minimal task system, tier 2): its
+		// completion summary is posted there (the audit trail). NULL = a
+		// harness task with no origin (the summary stays in the task's own
+		// conversation).
+		version: 4,
+		up: `
+ALTER TABLE tasks ADD COLUMN origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL;
+`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

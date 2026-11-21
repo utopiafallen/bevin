@@ -8,25 +8,34 @@ import (
 
 // Task is a P6 row (a user-level kanban item; owns one conversation).
 type Task struct {
-	ID             string   `json:"id"`
-	Title          string   `json:"title"`
-	Description    string   `json:"description"`
-	State          string   `json:"state"`
-	CreatedAt      string   `json:"created_at"`
-	UpdatedAt      string   `json:"updated_at"`
-	ConversationID *string  `json:"conversation_id,omitempty"`
-	Dependencies   []string `json:"depends_on,omitempty"`
+	ID             string  `json:"id"`
+	Title          string  `json:"title"`
+	Description    string  `json:"description"`
+	State          string  `json:"state"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
+	ConversationID *string `json:"conversation_id,omitempty"`
+	// OriginConversationID is the conversation the task was created from
+	// (v2): its completion summary is posted there. NULL = no origin.
+	OriginConversationID *string  `json:"origin_conversation_id,omitempty"`
+	Dependencies         []string `json:"depends_on,omitempty"`
 }
 
-var taskStates = map[string]bool{"todo": true, "in-progress": true, "done": true, "blocked": true}
+// The task states. "canceled" (code-only; the columns are unconstrained
+// TEXT) is a terminal state set by StopTask — a task the user/harness
+// abandoned before it completed. done/blocked/canceled are terminal: no
+// transitions out of them (see TransitionTask).
+var taskStates = map[string]bool{"todo": true, "in-progress": true, "done": true, "blocked": true, "canceled": true}
+
+var taskTerminal = map[string]bool{"done": true, "blocked": true, "canceled": true}
 
 // TaskStateValid reports whether s is a known task state.
 func TaskStateValid(s string) bool { return taskStates[s] }
 
-const taskCols = `id, title, description, state, created_at, updated_at, conversation_id`
+const taskCols = `id, title, description, state, created_at, updated_at, conversation_id, origin_conversation_id`
 
 func scanTask(rs interface{ Scan(...any) error }, t *Task) error {
-	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID)
+	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID, &t.OriginConversationID)
 }
 
 func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, deps []string) (*Task, error) {
@@ -122,6 +131,42 @@ func (s *UserStore) SetTaskConversation(id, convID string) error {
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET conversation_id = ?, updated_at = ? WHERE id = ?`, v, nowUTC(), id)
 	return err
+}
+
+// SetTaskOrigin records the conversation a task was created from (the
+// completion summary's destination). An empty convID clears it.
+func (s *UserStore) SetTaskOrigin(id, convID string) error {
+	var v *string
+	if convID != "" {
+		v = &convID
+	}
+	_, err := s.db.Exec(`UPDATE tasks SET origin_conversation_id = ?, updated_at = ? WHERE id = ?`, v, nowUTC(), id)
+	return err
+}
+
+// TransitionTask is the compare-and-swap state change: it flips the task
+// from exactly `from` to `to`, and errors when the state moved in the
+// meantime or when `from` is terminal (no transitions out of done/blocked/
+// canceled). The task runner's transitions
+// (todo→in-progress→done/blocked/canceled) use it so a StopTask racing the
+// runner can never lose to a stale write.
+func (s *UserStore) TransitionTask(id, from, to string) error {
+	if !taskStates[from] || !taskStates[to] {
+		return fmt.Errorf("invalid task state in transition %q -> %q", from, to)
+	}
+	if taskTerminal[from] {
+		return fmt.Errorf("task state %q is terminal (no transitions out of it)", from)
+	}
+	res, err := s.db.Exec(`UPDATE tasks SET state = ?, updated_at = ? WHERE id = ? AND state = ?`, to, nowUTC(), id, from)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	switch {
+	case n == 0:
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetTaskDependencies replaces a task's parent dependencies, rejecting any

@@ -73,6 +73,11 @@ type Agent struct {
 	// snapshots, and the purpose-nudge counters (see roster.go).
 	roster *rosterState
 
+	// tasks is the minimal task system (tier 2): harness-spawned units of
+	// work the agent works done in owned conversations, through the same
+	// per-model slot pools (see tasks.go).
+	tasks *taskSystem
+
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
 
@@ -151,6 +156,11 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// The idle learning loop (armed per conversation at turn completion;
 	// the pass itself runs on the timer's goroutine, never in a turn).
 	a.learn = newLearningMgr(a)
+	// The minimal task system (tier 2). Its boot reset re-works tasks that
+	// were in-progress when the process last died (runtime state is
+	// in-memory by design — see tasks.go).
+	a.tasks = newTaskSystem(a)
+	a.tasks.resetStaleOnBoot()
 	return a, nil
 }
 
