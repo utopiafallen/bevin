@@ -252,6 +252,75 @@ body.page-chat .column { max-width: none; }
   width: auto; max-width: 11rem;
   padding: 0.3rem 0.5rem; font-size: 0.88rem;
 }
+/* The model chip (closed picker): name + the current model's R/K/S
+   micro-bars, so the scores are visible even when collapsed. */
+.model-chip {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.3rem 0.55rem;
+  font: inherit; font-size: 0.88rem;
+  color: var(--text); background: transparent;
+  border: 1px solid var(--border); border-radius: 999px;
+  cursor: pointer;
+}
+.model-chip:hover { background: var(--surface-2); }
+.model-chip:disabled { opacity: 0.5; cursor: default; }
+/* One scored metric: letter + pill bar (fill = value/10). The chip's
+   micro-bars stay tiny; the card's rows are a touch bigger and add the
+   number. */
+.metric { display: inline-flex; align-items: center; gap: 0.2rem; flex: none; }
+.metric .mk { font-size: 0.66rem; color: var(--text-muted); }
+.mbar {
+  position: relative;
+  width: 1.1rem; height: 0.28rem;
+  border-radius: 999px; background: var(--surface-2);
+  overflow: hidden;
+}
+.mbar i {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  border-radius: inherit; background: var(--brand);
+}
+.metric .mval { font-size: 0.68rem; color: var(--text-muted); }
+/* The model card (open picker): a block sibling between the ctx row
+   and the composer — its own flow line at the column's left edge,
+   capped + scrolling so any model count stays usable. Flat card
+   vocabulary — border + white surface, no shadow. */
+.model-card {
+  /* Constrained to the SAME 4:3 column the ctx row and composer live in —
+     the chat page's .chat-card is full-width, so without this the card
+     left-aligns to the container edge instead of the column. */
+  width: 100%;
+  max-width: var(--col-43);
+  box-sizing: border-box;
+  margin: 0.25rem auto 0.1rem;
+  padding: 0.45rem;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.model-card input {
+  width: 100%; box-sizing: border-box;
+  padding: 0.32rem 0.5rem; margin-bottom: 0.35rem;
+  font: inherit; font-size: 0.88rem;
+  color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.model-list { max-height: 42vh; overflow-y: auto; }
+.model-row {
+  display: flex; align-items: center; gap: 0.55rem;
+  width: 100%; box-sizing: border-box;
+  padding: 0.38rem 0.5rem;
+  font: inherit; font-size: 0.9rem;
+  color: var(--text); background: transparent;
+  border: 0; border-radius: 8px;
+  cursor: pointer; text-align: left;
+}
+.model-row:hover { background: var(--surface-2); }
+.model-row.active { background: var(--brand-soft); }
+.model-row .m-name {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.model-row .m-ctx { font-size: 0.72rem; color: var(--text-muted); flex: none; }
+.model-row .mbar { width: 1.5rem; height: 0.32rem; }
 .ctx-viz {
   flex: 1; min-width: 11rem;
   display: flex; align-items: center; gap: 0.5rem;

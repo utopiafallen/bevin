@@ -157,12 +157,25 @@
                  per-model reasoning effort (only when the model's profile
                  supports one), and the context-window usage bar. -->
             <div class="chat-ctx">
-              <select id="modelSelect" disabled title="This conversation's model — changes apply from the next message"></select>
+              <!-- The model picker: a compact chip (current model + its
+                   R/K/S micro-bars) that expands the model card INLINE
+                   below this row (filter + one row per model with its
+                   scores). The card is normal flow — it pushes the
+                   composer down while open. -->
+              <button id="modelChip" class="model-chip" type="button" disabled aria-haspopup="true" aria-expanded="false" title="This conversation's model — R/K/S = reasoning / knowledge / speed, each 1-10. Changes apply from the next message."></button>
               <select id="effortSelect" hidden title="Reasoning effort — how hard the model thinks (this model's supported levels)"></select>
               <div class="ctx-viz" id="ctxViz" hidden title="Context window usage for this conversation">
                 <div class="ctx-bar"><div class="ctx-fill" id="ctxFill"></div></div>
                 <span class="ctx-label" id="ctxLabel"></span>
               </div>
+            </div>
+            <!-- The model card (open picker): a sibling between the ctx
+                 row and the composer — its own flow line, so it always
+                 starts at the column's left edge (inside the ctx row's
+                 flex it raced the usage bar for the same line). -->
+            <div id="modelCard" class="model-card" hidden>
+              <input id="modelFilter" type="text" placeholder="Filter models…" autocomplete="off">
+              <div id="modelList" class="model-list"></div>
             </div>
             <form id="chat">
               <!-- The composer is a textarea (not an input): Enter sends,
@@ -319,6 +332,7 @@
       if (e.key === "Escape") {
         closeNav();
         if (panelOpen) { setPanel(false); panelOpen = false; }
+        if (modelCardOpen) closeModelCard();
       }
     });
     // A resize to desktop closes a stale mobile drawer.
@@ -626,37 +640,135 @@
       $("ctxLabel").textContent = Math.round(used).toLocaleString() + " / " + ctxMax.toLocaleString() + " tokens (" + Math.round(pct) + "%)";
     }
 
-    // Fills the model select: every available model, pre-selected to the
-    // conversation's active model (a model that fell out of the list —
-    // auto-disabled, removed — shows its stored id so nothing is hidden).
-    // A brand-new chat (no conversation yet) pre-selects the model the
-    // server will take at create time (newChatModelID) — the selector and
-    // the effort control are then real BEFORE the first send, not after:
-    // the user sees, and can change, what the chat will actually run on
-    // (the choice rides on the create request). Disabled only when there
-    // are no models at all. effort is the conversation's stored
-    // reasoning-effort choice ("" = the model's own default).
-    var currentModelID = null; // the active model shown in the select
-    function buildModelSelect(activeID, effort) {
-      var sel = $("modelSelect");
-      sel.innerHTML = "";
-      models.forEach(function (m) {
-        var o = document.createElement("option");
-        o.value = m.id;
-        o.textContent = m.display_name || m.id;
-        sel.appendChild(o);
+    // The model picker: a compact CHIP (current model + its R/K/S
+    // micro-bars — the scores stay visible even when collapsed) that
+    // expands the model CARD inline below the ctx row. The card lists
+    // every available model with its scores (name + max context left,
+    // R/K/S bars with values right); the current model leads the list
+    // (highlighted) and a filter narrows it, so any model count stays
+    // usable (the list caps at ~42vh and scrolls). The card is normal
+    // document flow — it pushes the composer down while open.
+    //
+    // Pre-selection mirrors the old select: the conversation's active
+    // model (a model that fell out of the list — auto-disabled, removed
+    // — shows its stored id so nothing is hidden); a brand-new chat
+    // (no conversation yet) pre-selects the model the server will take
+    // at create time (newChatModelID), so the chip + effort control are
+    // real BEFORE the first send (the choice rides on the create
+    // request). The chip is disabled only when there are no models at
+    // all. effort is the conversation's stored reasoning-effort choice
+    // ("" = the model's own default).
+    var currentModelID = null; // the conversation's own model (null = not created yet)
+    // pendingModelID: the user's pick in a chat that does NOT exist yet
+    // (nothing to PATCH — the choice rides on the create). Cleared when a
+    // conversation is started/opened (its own model takes over) and when
+    // the conversation meta syncs from the server.
+    var pendingModelID = "";
+    var modelCardOpen = false;
+    var modelFilterText = "";
+
+    // One R/K/S metric: letter + a small pill bar (fill = value/10)
+    // + the number (card rows only — the chip's micro-bars stay tiny).
+    function modelScoreBars(m, withValues) {
+      var out = "";
+      [["reasoning", "R"], ["knowledge", "K"], ["speed", "S"]].forEach(function (kv) {
+        var v = Math.max(0, Math.min(10, m[kv[0]] || 0));
+        out += '<span class="metric"><span class="mk">' + kv[1] + '</span><span class="mbar"><i style="width:' + (v * 10) + '%"></i></span>' +
+          (withValues ? '<span class="mval">' + v + '</span>' : "") + "</span>";
       });
-      if (activeID && !sel.querySelector('option[value="' + activeID + '"]')) {
-        var o = document.createElement("option");
-        o.value = activeID;
-        o.textContent = activeID;
-        sel.appendChild(o);
-      }
-      var shown = activeID || newChatModelID();
-      sel.value = shown || "";
+      return out;
+    }
+
+    // Humanizes a token count for the rows' context label (200k, 1M).
+    function ctxSize(n) {
+      if (!n || n <= 0) return "";
+      if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M";
+      if (n >= 1000) return Math.round(n / 1000) + "k";
+      return String(n);
+    }
+
+    // One model row in the card: a real <button> (focusable, Enter
+    // selects) — name + context size left, the scored bars right.
+    function modelRow(m, active) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "model-row" + (active ? " active" : "");
+      var name = document.createElement("span");
+      name.className = "m-name";
+      name.textContent = m.display_name || m.id;
+      var ctx = document.createElement("span");
+      ctx.className = "m-ctx";
+      ctx.textContent = ctxSize(m.max_context);
+      b.appendChild(name);
+      b.appendChild(ctx);
+      b.insertAdjacentHTML("beforeend", modelScoreBars(m, true));
+      b.addEventListener("click", function () { selectModel(m.id); });
+      return b;
+    }
+
+    // (Re)renders the card's list: filter by name/id, then the current
+    // model first, the rest alphabetically.
+    function buildModelRows() {
+      var list = $("modelList");
+      list.innerHTML = "";
+      var f = modelFilterText.toLowerCase();
+      var shown = models.filter(function (m) {
+        if (!f) return true;
+        return (m.display_name || "").toLowerCase().indexOf(f) >= 0 ||
+          m.id.toLowerCase().indexOf(f) >= 0;
+      });
+      var lead = currentModelID || newChatModelID();
+      shown.sort(function (a, b) {
+        var ac = a.id === lead, bc = b.id === lead;
+        if (ac !== bc) return ac ? -1 : 1;
+        return (a.display_name || a.id).localeCompare(b.display_name || b.id);
+      });
+      shown.forEach(function (m) { list.appendChild(modelRow(m, m.id === lead)); });
+    }
+
+    function buildModelSelect(activeID, effort) {
       currentModelID = activeID || null; // the conversation's own model (null = not created yet)
-      sel.disabled = !models.length;
+      var shown = activeID || pendingModelID || newChatModelID();
+      var info = modelInfo(shown);
+      var chip = $("modelChip");
+      chip.textContent = "";
+      var label = document.createElement("span");
+      label.className = "m-name";
+      label.textContent = info ? (info.display_name || info.id) : (shown || "no models");
+      chip.appendChild(label);
+      chip.insertAdjacentHTML("beforeend", modelScoreBars(info || {}, false));
+      chip.disabled = !models.length;
+      modelFilterText = "";
+      buildModelRows(); // keep the (possibly open) card in sync
       buildEffortSelect(shown, effort || "");
+    }
+
+    function openModelCard() {
+      var card = $("modelCard");
+      if (!card.hidden || $("modelChip").disabled) return;
+      card.hidden = false;
+      modelCardOpen = true;
+      $("modelChip").setAttribute("aria-expanded", "true");
+      $("modelFilter").value = "";
+      modelFilterText = "";
+      buildModelRows();
+      $("modelFilter").focus();
+      // The card takes its height from the log (the composer stays put) —
+      // re-pin the bottom so the latest message isn't hidden behind it.
+      var s = $("chatScroll");
+      if (s.scrollHeight - s.scrollTop - s.clientHeight < 60) {
+        s.scrollTop = s.scrollHeight;
+      }
+    }
+
+    function closeModelCard() {
+      var card = $("modelCard");
+      if (!card.hidden) {
+        card.hidden = true;
+        modelCardOpen = false;
+        $("modelChip").setAttribute("aria-expanded", "false");
+        $("modelChip").focus();
+      }
     }
 
     // newChatModelID is the client mirror of the server's
@@ -711,6 +823,8 @@
     // conversation no longer exists (deleted elsewhere) — clear the local
     // reference and start fresh rather than posting into a dead one.
     async function loadConvMeta() {
+      pendingModelID = ""; // the conversation's own model (or the fresh
+      // default) now decides — a pre-create pick is spent.
       if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); return; }
       try {
         var r = await fetch("/api/conversations/" + convID);
@@ -731,19 +845,23 @@
 
     // Model switch: PATCH the conversation's active model. Takes effect
     // from the NEXT message (an in-flight turn keeps its model). On
-    // failure the select snaps back to the stored value.
-    $("modelSelect").addEventListener("change", async function () {
-      var sel = this;
+    // failure the chip reverts to the stored model. For a brand-new
+    // chat there is no conversation to PATCH — the choice rides on the
+    // create when the first message is sent; just mirror the effort
+    // control to the model the chat will take.
+    async function selectModel(next) {
+      closeModelCard();
+      var chip = $("modelChip");
       if (!convID) {
-        // A brand-new chat: no conversation to PATCH — the choice rides
-        // on the create when the first message is sent. Just mirror the
-        // effort dropdown to the model the chat will take.
-        buildEffortSelect(sel.value, "");
+        // Brand-new chat: no conversation to PATCH — remember the pick
+        // (it rides on the create) and mirror the controls to it.
+        pendingModelID = next;
+        buildModelSelect(null, "");
+        chip.focus(); // the clicked row is gone — park focus on the chip
         return;
       }
       var before = currentModelID; // what to revert to on failure
-      var next = sel.value;
-      sel.disabled = true;
+      chip.disabled = true;
       try {
         var r = await fetch("/api/conversations/" + convID, {
           method: "PATCH",
@@ -752,7 +870,7 @@
         });
         if (!r.ok) {
           var je = {}; try { je = await r.json(); } catch (e) {}
-          sel.value = before; // revert
+          buildModelSelect(before, currentEffort); // revert
           addErrorMsg("⚠ Could not switch model: " + (je.error || ("HTTP " + r.status)));
           return;
         }
@@ -778,11 +896,31 @@
         }
         loadConvMeta(); // re-sync from the server (the source of truth)
       } catch (err) {
-        sel.value = before;
+        buildModelSelect(before, currentEffort);
         addErrorMsg("⚠ Could not switch model: " + err.message);
       } finally {
-        sel.disabled = !models.length;
+        chip.disabled = !models.length;
+        chip.focus(); // the clicked row is gone — park focus on the chip
       }
+    }
+
+    $("modelChip").addEventListener("click", function () {
+      if (this.disabled) return;
+      if (modelCardOpen) closeModelCard();
+      else openModelCard();
+    });
+    $("modelFilter").addEventListener("input", function () {
+      modelFilterText = this.value;
+      buildModelRows();
+    });
+    // Click anywhere outside the chip + card closes it (the same way the
+    // conversation list's scrim works, but without a scrim — the card is
+    // small and in-flow, so a transparent document listener is enough).
+    document.addEventListener("click", function (e) {
+      if (!modelCardOpen) return;
+      var t = e.target;
+      if (t && t.closest && (t.closest("#modelCard") || t.closest("#modelChip"))) return;
+      closeModelCard();
     });
 
     // Reasoning-effort switch: PATCH the conversation's stored choice ("" =
@@ -881,7 +1019,7 @@
             // the create, exactly like the PATCHes do for an open one.
             body: JSON.stringify({
               title: title,
-              model_id: $("modelSelect").value || "",
+              model_id: currentModelID || pendingModelID || newChatModelID() || "",
               reasoning_effort: effortSel.hidden ? "" : (effortSel.value || "")
             })
           });
@@ -1302,6 +1440,7 @@
       convID = null;
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
+      pendingModelID = "";
       buildModelSelect(null, "");
       updateCtx(0, 0);
       addNote("New conversation started.");
@@ -1621,6 +1760,7 @@
     function openConversation(id) {
       if (!id || sending) return;
       convID = id;
+      pendingModelID = "";
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
       showPage("chat");
