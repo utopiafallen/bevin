@@ -21,6 +21,13 @@ type Conversation struct {
 	// the active model's profile levels, e.g. low/medium/xhigh; "" = the
 	// model's own default — the request builder sends nothing).
 	ReasoningEffort string `json:"reasoning_effort"`
+	// Purpose/Topic: the conversation's rolling self-reported summary
+	// (concurrent-instances design, layer 2) — the one-liner the roster
+	// shows to sibling conversations so a collision is a one-glance call.
+	// Written by the summary nudge (SetConversationSummary), "" = unset.
+	Purpose          string `json:"purpose"`
+	Topic            string `json:"topic"`
+	PurposeUpdatedAt string `json:"purpose_updated_at"`
 }
 
 // ErrNotFound is returned when a row is missing.
@@ -38,10 +45,10 @@ func (s *UserStore) CreateConversation(title, activeModelID string) (*Conversati
 	return &Conversation{ID: id, Title: title, CreatedAt: now, LastActivityAt: now, State: "active", ActiveModelID: activeModelID}, nil
 }
 
-const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort`
+const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort, purpose, topic, purpose_updated_at`
 
 func scanConv(rs interface{ Scan(...any) error }, c *Conversation) error {
-	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort)
+	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort, &c.Purpose, &c.Topic, &c.PurposeUpdatedAt)
 }
 
 func (s *UserStore) GetConversation(id string) (*Conversation, error) {
@@ -175,6 +182,22 @@ func (s *UserStore) SetConversationReasoningEffort(id, effort string) error {
 // mutated in place (a profile/input change appends a new system message later).
 func (s *UserStore) SetFrozenSystemPrompt(id, prompt string) error {
 	res, err := s.db.Exec(`UPDATE conversations SET frozen_system_prompt = ? WHERE id = ?`, prompt, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetConversationSummary updates the conversation's rolling purpose/topic
+// (concurrent-instances design, layer 2) and stamps when it was last updated.
+// The summary nudge (set_conversation_summary tool) is the sole writer; the
+// roster shows the staleness of this stamp, so an abandoned summary degrades
+// visibly to the title instead of asserting a dead world.
+func (s *UserStore) SetConversationSummary(id, purpose, topic string) error {
+	res, err := s.db.Exec(`UPDATE conversations SET purpose = ?, topic = ?, purpose_updated_at = ? WHERE id = ?`, purpose, topic, nowUTC(), id)
 	if err != nil {
 		return err
 	}

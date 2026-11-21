@@ -25,8 +25,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 1
-
 // UserStore is a single user's learned state (users/<handle>/bevin.db).
 type UserStore struct {
 	db  *sql.DB
@@ -133,28 +131,11 @@ func cosine(a, b []float32) float64 {
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
 
-// migrate creates the per-user schema (idempotent) and records the version.
-//
-// The schema is a single flat version with NO migration steps: there is no
-// live data worth migrating (user directive), so rather than grow a
-// numbered-migration path forever, a file written by a NEWER build is refused
-// loudly (delete the user data dir or upgrade bevin) and everything else is
-// created fresh by the DDL above.
+// migrate creates the per-user schema and applies the numbered migrations
+// pending for this build (see migrate.go). A file stamped by a NEWER build is
+// refused loudly — bevin grows the schema forward only, never down.
 func (s *UserStore) migrate() error {
-	if _, err := s.db.Exec(userSchema); err != nil {
-		return err
-	}
-	var v int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
-		return err
-	}
-	if v > currentSchemaVersion {
-		return fmt.Errorf("bevin.db was written by a newer bevin build (schema v%d > v%d) — delete the user data dir or upgrade bevin", v, currentSchemaVersion)
-	}
-	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`,
-		currentSchemaVersion, nowUTC())
-	return err
+	return migrateSchema(s.db, userSchema, userMigrations, "bevin.db")
 }
 
 // userSchema is the full per-user schema (P1–P13, with FTS5).

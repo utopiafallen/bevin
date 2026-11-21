@@ -44,8 +44,9 @@ func (s *ServerStore) Close() error { return s.db.Close() }
 // ErrUserNotFound is returned when a handle has no account.
 var ErrUserNotFound = errors.New("user not found")
 
-func (s *ServerStore) migrate() error {
-	const schema = `
+// serverSchema is the server.db base (v1) DDL: user registry, credentials,
+// auth sessions.
+const serverSchema = `
 CREATE TABLE IF NOT EXISTS schema_version (
 	version    INTEGER PRIMARY KEY,
 	applied_at TEXT NOT NULL
@@ -78,21 +79,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_handle ON sessions(handle);
 `
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
-	}
-	// Single flat schema version, no migration steps (no live data worth
-	// migrating — user directive): a file written by a NEWER build is refused
-	// loudly, everything else is created fresh by the DDL above.
-	var v int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
-		return err
-	}
-	if v > 1 {
-		return fmt.Errorf("server.db was written by a newer bevin build (schema v%d > v1) — delete the data dir or upgrade bevin", v)
-	}
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`, 1, nowUTC())
-	return err
+
+// migrate creates the server schema and applies any numbered migrations this
+// build has pending (none yet for this file — see migrate.go).
+func (s *ServerStore) migrate() error {
+	return migrateSchema(s.db, serverSchema, nil, "server.db")
 }
 
 // User is an S1 account row.
