@@ -36,7 +36,8 @@ type containerRow struct {
 func (a *App) adminContainers(w http.ResponseWriter, r *http.Request) {
 	limit := a.liveCfg().Sandbox
 	resp := map[string]any{
-		"runtime_ok": false,
+		"runtime_ok":     false,
+		"runtime_detail": "no container backend on this platform",
 		"limits": map[string]any{
 			"cores":     limit.Cores,
 			"memory_mb": limit.MemoryMB,
@@ -52,7 +53,9 @@ func (a *App) adminContainers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	resp["runtime_ok"] = bk.Runtime(r.Context()).OK
+	rt := bk.Runtime(r.Context())
+	resp["runtime_ok"] = rt.OK
+	resp["runtime_detail"] = rt.Detail
 	handles, ok := a.userHandles()
 	if !ok {
 		writeJSON(w, http.StatusOK, resp)

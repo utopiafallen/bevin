@@ -41,7 +41,9 @@
   .util { height:5px; border-radius:3px; background:var(--surface-2); margin-top:.4rem; overflow:hidden; }
   .util i { display:block; height:100%; background:var(--brand); border-radius:3px; }
   .util i.warn { background:#d97706; }
-  .util i.danger { background:var(--danger, #dc2626); }
+  .util i.danger { background: var(--danger); }
+  .cont-spin { display:inline-block; width:13px; height:13px; border:2px solid var(--surface-2); border-top-color: var(--brand); border-radius:50%; animation: contspin .7s linear infinite; vertical-align:-2px; flex:0 0 auto; }
+  @keyframes contspin { to { transform: rotate(360deg); } }
   table.q { width:100%; border-collapse:collapse; font-size:.9rem; }
   table.q th { text-align:left; color:var(--text-muted); font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; padding:.3rem .5rem; }
   table.q td { padding:.45rem .5rem; border-top:1px solid var(--border); }
@@ -898,16 +900,23 @@ function renderServer() {
 // dashboard auto-refreshes every 10s; the cap form is rendered once and a
 // poll updates only the dashboard in place (never clobbering an in-progress
 // edit).
-let CONTAINERS = null;   // { limits: {cores, memory_mb, disk_mb}, runtime_ok, containers: [...] }
+let CONTAINERS = null;   // { limits: {cores, memory_mb, disk_mb}, runtime_ok, runtime_detail, containers: [...] }
 const _cpuPrev = {};     // handle -> { sec, ts } (the previous poll, for the live CPU %)
+let _contFetching = true; // true while a /admin/api/containers fetch is in flight (the loading state)
 
 async function loadContainers() {
-  try { CONTAINERS = await j("/admin/api/containers"); } catch (_) { return; } // a poll hiccup is not fatal
+  _contFetching = true;
+  if (page() === "containers") updateContStatus(); // show "querying…" at once
+  try {
+    CONTAINERS = await j("/admin/api/containers");
+    CONTAINERS.loaded_at = Date.now();
+  } catch (_) { _contFetching = false; return; } // a poll hiccup is not fatal
+  _contFetching = false;
   if (page() !== "containers") return;
-  // First load (the "Loading…" card is showing) → full render; steady-state
-  // poll → update the dashboard in place (never re-render the cap form).
-  if (document.getElementById("cont-dash-body")) renderDashboard();
-  else renderContainers();
+  // First load (the card's body shows "querying") → update in place; the poll
+  // updates only the dashboard, never re-rendering the cap form.
+  renderDashboard();
+  updateContStatus(); // "updated <time>"
 }
 
 function renderContainers() {
@@ -919,27 +928,32 @@ function renderContainers() {
   note.textContent = "Every user's environment + the per-container resource caps. Saving CPU or RAM restarts the running environments (their users are emailed to check in-flight work); the disk cap applies immediately.";
   m.append(note);
   const msgEl = document.createElement("div"); msgEl.className = "msg"; msgEl.id = "msg"; m.append(msgEl);
-  if (!CONTAINERS) { const c = document.createElement("div"); c.className = "card"; c.append(elP("Loading…")); m.append(c); return; }
+  // The dashboard card carries its own loading state (a spinner + "querying…")
+  // in its body, so it is always created — even before the first fetch lands.
   m.append(renderContainerDash());
   m.append(renderLimitsCard());
 }
 
 // renderContainerDash — the health dashboard card: a per-environment table
-// (state + CPU + RAM + disk) + a "Restart all" action. The div#cont-dash-body
-// is the part the poll re-renders in place.
+// (state + CPU + RAM + disk) + a "Restart all" action + a live status line
+// (querying… / updated <time>). The div#cont-dash-body is the part the poll
+// re-renders in place.
 function renderContainerDash() {
   const c = document.createElement("div"); c.className = "card";
-  let head = "<h2>Environments</h2>";
-  if (CONTAINERS && !CONTAINERS.runtime_ok) head += "<p class='muted'>The container runtime is not ready on this server — per-environment state may be unavailable.</p>";
-  c.innerHTML = head;
+  c.innerHTML = "<h2>Environments</h2>";
+  const bar = document.createElement("div"); bar.className = "toolbar";
+  const st = document.createElement("span"); st.className = "muted"; st.id = "cont-status";
+  bar.append(st);
+  const ra = document.createElement("button"); ra.className = "btn ghost"; ra.textContent = "Restart all environments";
+  ra.title = "Bounce every running environment (to apply the current limits, or to recover a stuck one). In-flight work is interrupted — the affected users are emailed.";
+  ra.style.marginLeft = "auto";
+  ra.onclick = () => restartAll(ra);
+  bar.append(ra);
+  c.append(bar);
   const tb = document.createElement("div"); tb.id = "cont-dash-body";
   c.append(tb);
-  const bar = document.createElement("div"); bar.className = "toolbar";
-  const ra = document.createElement("button"); ra.className = "btn ghost"; ra.textContent = "Restart all environments";
-  ra.onclick = () => restartAll(ra);
-  bar.append(elP("Restart bounces every running environment (to apply the current limits, or to recover a stuck one). In-flight work is interrupted — the affected users are emailed."), ra);
-  c.append(bar);
   renderDashboard();
+  updateContStatus();
   return c;
 }
 
@@ -950,9 +964,19 @@ function renderDashboard() {
   const body = document.getElementById("cont-dash-body");
   if (!body) return;
   body.innerHTML = "";
-  const lim = (CONTAINERS && CONTAINERS.limits) || {};
+  if (!CONTAINERS) { // the first fetch is in flight
+    body.innerHTML = "<div class='muted' style='display:flex;align-items:center;gap:.5rem;padding:.5rem 0'>" + spinner() + " Querying container environments…</div>";
+    return;
+  }
+  if (!CONTAINERS.runtime_ok) { // the runtime is unavailable (e.g. unprivileged / no backend)
+    const detail = CONTAINERS.runtime_detail || "the container runtime is not ready";
+    body.innerHTML = "<p class='err'>The container runtime is not ready: " + esc(detail) + "</p>" +
+      "<p class='muted'>No environments can run until it is ready, so none are shown as running. The caps below are saved now and apply to every environment once the runtime is available (on Linux that means running bevin as root).</p>";
+    return;
+  }
+  const lim = CONTAINERS.limits || {};
   const cores = lim.cores || 0, memCap = lim.memory_mb || 0, diskCap = lim.disk_mb || 0;
-  const list = (CONTAINERS && CONTAINERS.containers) || [];
+  const list = CONTAINERS.containers || [];
   if (!list.length) { body.append(elP("No environments yet — one is created for each user when they first sign in.")); return; }
   const t = document.createElement("table"); t.className = "q";
   t.innerHTML = "<tr><th>Environment</th><th>State</th><th>CPU</th><th>RAM</th><th>Disk</th></tr>";
@@ -986,6 +1010,19 @@ function renderDashboard() {
     t.append(tr);
   }
   body.append(t);
+}
+
+// spinner — a small CSS-animated loading indicator (the .cont-spin style).
+function spinner() { return "<span class='cont-spin'></span>"; }
+// updateContStatus — the live status line in the environments card: a
+// spinner + "querying…" while a fetch is in flight, "updated <time>" once
+// the data has landed (so the admin sees it is live + when it last refreshed).
+function updateContStatus() {
+  const s = document.getElementById("cont-status");
+  if (!s) return;
+  if (CONTAINERS && CONTAINERS.loaded_at) s.innerHTML = "updated " + new Date(CONTAINERS.loaded_at).toLocaleTimeString();
+  else if (_contFetching) s.innerHTML = spinner() + " querying container environments…";
+  else s.textContent = "";
 }
 
 // utilBar — a usage bar (the shared .util style), 0-100% with a warn/danger

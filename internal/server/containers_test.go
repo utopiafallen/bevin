@@ -23,9 +23,16 @@ type fakeSandbox struct {
 	memBytes  uint64
 	restarted []string
 	stopped   []string
+	// ready + rtDetail control the Runtime() report (the loading-state +
+	// runtime-not-ready tests). Empty rtDetail = the default ready runtime.
+	ready    bool
+	rtDetail string
 }
 
 func (f *fakeSandbox) Runtime(context.Context) sandbox.Runtime {
+	if f.rtDetail != "" {
+		return sandbox.Runtime{OK: f.ready, Detail: f.rtDetail}
+	}
 	return sandbox.Runtime{OK: true, Detail: "fake runtime"}
 }
 func (f *fakeSandbox) Ensure(context.Context, string) (sandbox.Info, error) {
@@ -108,8 +115,9 @@ func TestAdminContainersEndpoint(t *testing.T) {
 		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
 	}
 	var got struct {
-		RuntimeOK  bool `json:"runtime_ok"`
-		Limits     struct {
+		RuntimeOK     bool   `json:"runtime_ok"`
+		RuntimeDetail string `json:"runtime_detail"`
+		Limits        struct {
 			Cores    int `json:"cores"`
 			MemoryMB int `json:"memory_mb"`
 			DiskMB   int `json:"disk_mb"`
@@ -128,6 +136,9 @@ func TestAdminContainersEndpoint(t *testing.T) {
 	}
 	if !got.RuntimeOK {
 		t.Fatalf("runtime_ok = false, want true")
+	}
+	if got.RuntimeDetail != "fake runtime" {
+		t.Fatalf("runtime_detail = %q, want the backend's runtime detail", got.RuntimeDetail)
 	}
 	if got.Limits.Cores != 2 || got.Limits.MemoryMB != 2048 || got.Limits.DiskMB != 10240 {
 		t.Fatalf("limits = %+v, want {2 2048 10240}", got.Limits)
@@ -168,6 +179,54 @@ func TestAdminContainersEndpoint(t *testing.T) {
 	}
 	if bob.Running {
 		t.Fatalf("bob = %+v, want not running (zero usage)", bob)
+	}
+}
+
+// TestAdminContainersRuntimeNotReady — when the container runtime is not ready
+// (e.g. the server runs unprivileged and systemd-nspawn needs root), the
+// endpoint reports runtime_ok=false + the reason (runtime_detail) and still
+// lists the environments (so the admin knows the users exist, they just can't
+// run yet). This is the state the "no containers running" panel must explain,
+// not misreport.
+func TestAdminContainersRuntimeNotReady(t *testing.T) {
+	a, srv := testApp(t, config.Email{})
+	fake := &fakeSandbox{ready: false, rtDetail: "bevin must run as root (managing systemd-nspawn requires it)"}
+	a.sandboxBk = fake
+	if _, err := srv.CreateUser("alice", "Alice", "user"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequest(http.MethodGet, "/admin/api/containers", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		RuntimeOK     bool   `json:"runtime_ok"`
+		RuntimeDetail string `json:"runtime_detail"`
+		Containers    []struct {
+			Handle  string `json:"handle"`
+			Running bool   `json:"running"`
+		} `json:"containers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RuntimeOK {
+		t.Fatalf("runtime_ok = true, want false (the runtime is not ready)")
+	}
+	if got.RuntimeDetail != "bevin must run as root (managing systemd-nspawn requires it)" {
+		t.Fatalf("runtime_detail = %q, want the not-ready reason", got.RuntimeDetail)
+	}
+	// The environment is still listed (so the admin knows the user exists) —
+	// just not running (the runtime can't start it).
+	var found bool
+	for _, c := range got.Containers {
+		if c.Handle == "alice" && !c.Running {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("containers = %+v, want alice listed (not running)", got.Containers)
 	}
 }
 
