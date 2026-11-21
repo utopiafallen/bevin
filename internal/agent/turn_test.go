@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,9 @@ type fakeProvider struct {
 	replies  []string
 	replyIdx int
 	usage    *provider.Usage
+	// toolCalls, when set, ride on the FIRST Chat/Stream call (a tool-call
+	// turn); later calls return the normal reply cycle. Test-only.
+	toolCalls []provider.ToolCall
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
@@ -32,6 +37,7 @@ func (f *fakeProvider) Chat(_ context.Context, model string, req provider.ChatRe
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, req)
 	f.models = append(f.models, model)
+	first := len(f.calls) == 1
 	reply := "ok"
 	if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
@@ -41,6 +47,9 @@ func (f *fakeProvider) Chat(_ context.Context, model string, req provider.ChatRe
 	if f.usage != nil {
 		res.Usage = f.usage
 	}
+	if first && len(f.toolCalls) > 0 {
+		res.ToolCalls = f.toolCalls
+	}
 	return res, nil
 }
 
@@ -48,6 +57,7 @@ func (f *fakeProvider) Stream(_ context.Context, model string, req provider.Chat
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.models = append(f.models, model)
+	first := len(f.calls) == 1
 	reply := "ok"
 	if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
@@ -75,6 +85,9 @@ func (f *fakeProvider) Stream(_ context.Context, model string, req provider.Chat
 	res := &provider.Result{Text: reply}
 	if usage != nil {
 		res.Usage = usage
+	}
+	if first && len(f.toolCalls) > 0 {
+		res.ToolCalls = f.toolCalls
 	}
 	return res, nil
 }
@@ -845,4 +858,112 @@ func TestTurnStream(t *testing.T) {
 	if assistant != 1 {
 		t.Fatalf("assistant reply not persisted (%d)", assistant)
 	}
+}
+
+// TestTurnStreamToolIndicators verifies the tool-call indicator events on
+// the stream: for each call the model issues, emit gets Chunk{ToolName}
+// (issued) and, once it finishes, Chunk{ToolName, ToolDone, ToolSuccess} —
+// one pair per call, in issue order (the UI renders one indicator row per
+// call; the model's next reply lands below the rows). A tool error is
+// ToolSuccess=false, never a turn failure.
+func TestTurnStreamToolIndicators(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	fp := &fakeProvider{
+		replies:   []string{"narration", "final"},
+		toolCalls: []provider.ToolCall{{Name: "alpha", Arguments: `{"x":1}`}, {Name: "beta", Arguments: `{}`}},
+	}
+	a.providers["m1"] = fp
+	// alpha succeeds; beta errors (the failure path).
+	if err := a.tools.Register(Tool{Name: "alpha", Execute: func(ctx context.Context, handle string, args json.RawMessage) (string, error) {
+		return "alpha result", nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.tools.Register(Tool{Name: "beta", Execute: func(ctx context.Context, handle string, args json.RawMessage) (string, error) {
+		return "", errors.New("beta exploded")
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	var mu sync.Mutex
+	var chunks []provider.Chunk
+	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "go", func(c provider.Chunk) error {
+		mu.Lock()
+		chunks = append(chunks, c)
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("TurnStream: %v", err)
+	}
+	if reply != "final" {
+		t.Fatalf("reply = %q, want %q (the tool-call turn's narration is not the reply)", reply, "final")
+	}
+	mu.Lock()
+	// The exact sequence: the narration deltas, then per call an issued →
+	// done pair (in issue order, the done carrying the outcome), then the
+	// final reply's deltas.
+	var seq []string
+	for _, c := range chunks {
+		switch {
+		case c.ToolName != "" && !c.ToolDone:
+			seq = append(seq, "issued:"+c.ToolName)
+		case c.ToolName != "":
+			seq = append(seq, "done:"+c.ToolName+":"+boolStr(c.ToolSuccess))
+		case c.TextDelta != "":
+			seq = append(seq, "text:"+c.TextDelta)
+		}
+	}
+	want := []string{
+		"text:narr", "text:ation",
+		"issued:alpha", "done:alpha:true",
+		"issued:beta", "done:beta:false",
+		"text:fi", "text:nal",
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("seq = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("seq[%d] = %q, want %q (seq = %v)", i, seq[i], want[i], seq)
+		}
+	}
+	mu.Unlock()
+	// The P7 rows record both calls with their outcomes (the wire pairs
+	// them for the model's next call).
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var toolRow int64
+	for _, m := range msgs {
+		if m.Role == roleAssistant && m.Content == "narration" {
+			toolRow = m.ID
+		}
+	}
+	if toolRow == 0 {
+		t.Fatal("the narration row (carrying the tool calls) was not persisted")
+	}
+	rows, err := us.ToolCallsForMessage(toolRow)
+	if err != nil {
+		t.Fatalf("ToolCallsForMessage: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Tool != "alpha" || rows[1].Tool != "beta" || rows[0].Success != true || rows[1].Success != false {
+		t.Fatalf("P7 rows = %+v, want alpha(success) + beta(failure)", rows)
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }

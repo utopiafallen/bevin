@@ -524,6 +524,57 @@
       $("chatLog").appendChild(p);
     }
 
+    // Tool-call indicator row: the model issued a call of this tool. One
+    // row per call (parallel calls stack). While in flight the dot pulses;
+    // done=true settles it to ✓/✗. The model's next reply (processing the
+    // results) renders BELOW the rows — the stream opens a fresh bubble
+    // after them (live) / they render after the carrying bubble (history).
+    function addToolRow(name, done, success) {
+      var row = document.createElement("div");
+      row.className = "msg-tool";
+      var chip = document.createElement("span");
+      chip.className = "tool-chip" + (done ? "" : " pending");
+      chip.title = "tool call: " + name;
+      chip.dataset.tool = name; // settleToolRow matches on this
+      var dot = document.createElement("span");
+      dot.className = "tool-dot" + (done ? (success ? " ok" : " bad") : "");
+      if (done) dot.textContent = success ? "✓" : "✗";
+      var gear = document.createElement("span");
+      gear.className = "tool-gear";
+      gear.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm9.4 5.5v-3l-2.6-.5a6.6 6.6 0 0 0-.7-1.7l1.5-2.2-2.1-2.1-2.2 1.5a6.6 6.6 0 0 0-1.7-.7L13 2.6h-3l-.5 2.6a6.6 6.6 0 0 0-1.7.7L5.6 4.4 3.5 6.5l1.5 2.2a6.6 6.6 0 0 0-.7 1.7l-2.6.5v3l2.6.5c.2.6.4 1.2.7 1.7l-1.5 2.2 2.1 2.1 2.2-1.5c.5.3 1.1.5 1.7.7l.5 2.6h3l.5-2.6c.6-.2 1.2-.4 1.7-.7l2.2 1.5 2.1-2.1-1.5-2.2c.3-.5.5-1.1.7-1.7l2.6-.5z"/></svg>';
+      var label = document.createElement("span");
+      label.className = "tool-name";
+      label.textContent = name;
+      chip.appendChild(dot);
+      chip.appendChild(gear);
+      chip.appendChild(label);
+      row.appendChild(chip);
+      $("chatLog").appendChild(row);
+      return row;
+    }
+    // Settle the OLDEST still-pending row for this tool (calls settle in
+    // issue order; a tool may be called several times in one turn).
+    function settleToolRow(name, success) {
+      var chips = document.querySelectorAll(".msg-tool .tool-chip.pending");
+      for (var i = 0; i < chips.length; i++) {
+        if (chips[i].getAttribute("data-tool") !== name) continue;
+        chips[i].classList.remove("pending");
+        var dot = chips[i].querySelector(".tool-dot");
+        dot.textContent = success ? "✓" : "✗";
+        dot.className = "tool-dot " + (success ? "ok" : "bad");
+        return;
+      }
+    }
+    // Settle whatever is still pending (the stream ended: done, error, or
+    // an early cutoff) — a row that never resolved shows no outcome.
+    function settleAllToolRows() {
+      var chips = document.querySelectorAll(".msg-tool .tool-chip.pending");
+      for (var i = 0; i < chips.length; i++) {
+        chips[i].classList.remove("pending");
+        chips[i].querySelector(".tool-dot").className = "tool-dot";
+      }
+    }
+
     // The available models (for the select) + the server default. The
     // conversation's ACTIVE model comes from the conversation itself
     // (loadConvMeta) — the default only matters before the conversation
@@ -904,8 +955,27 @@
                 asst.buf += p.delta;
                 schedulePaint(asst);
               }
+            } else if (evt === "tool") {
+              // The model issued a tool call: one indicator row per call
+              // (parallel calls stack). The model's next reply —
+              // processing the results — renders BELOW the rows, so the
+              // row lands before a fresh bubble, and the bare placeholder
+              // (nothing streamed yet — no narration, no thinking) is
+              // dropped instead of lingering above the row. Measure the
+              // follow state BEFORE the mutations (row + bubble both
+              // extend the log — the same pre-measure rule as the
+              // reasoning branch).
+              var tBelow = pinScroll($("chatLog"));
+              if (asst && !asst.buf && asst.details.style.display === "none") asst.m.remove();
+              addToolRow(p.name, false, false);
+              asst = startAssistantMsg();
+              reasoning = ""; // the new bubble owns a fresh thinking block
+              if (tBelow) $("chatLog").scrollTop = $("chatLog").scrollHeight;
+            } else if (evt === "tool_done") {
+              settleToolRow(p.name, p.success);
             } else if (evt === "done") {
               gotDone = true;
+              settleAllToolRows(); // nothing may still be pulsing at stream end
               // The "done" reply is the authoritative final text — the
               // server sanitizes it (an echoed transcript timestamp marker
               // is stripped). If it differs from what streamed, re-render
@@ -940,9 +1010,11 @@
         }
         if (!gotDone && !asst.buf && !reasoning) {
           asst.m.remove();
+          settleAllToolRows();
           addErrorMsg("⚠ The stream ended before the reply completed.");
         }
       } catch (err) {
+        settleAllToolRows(); // the stream died — no row may keep pulsing
         if (asst) {
           if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
           else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
@@ -1009,26 +1081,35 @@
           if (m.role === "user") {
             addUserMsg(m.content, m.created_at);
           } else if (m.role === "assistant") {
-            var a = startAssistantMsg();
-            // Show the stored time, not "now" (this is history, not a live reply).
-            var dts = new Date(m.created_at);
-            if (!isNaN(dts)) {
-              a.m.querySelector(".when").textContent = fmtWhen(dts);
-              a.m.querySelector(".when").title = dts.toUTCString();
+            // The row's tool calls render as indicator rows after the
+            // bubble; a tool-call turn's EMPTY row carries no bubble at
+            // all (its text landed on the final reply row) — rows only.
+            var hasCalls = m.tool_calls && m.tool_calls.length > 0;
+            if (!hasCalls || m.content) {
+              var a = startAssistantMsg();
+              // Show the stored time, not "now" (this is history, not a live reply).
+              var dts = new Date(m.created_at);
+              if (!isNaN(dts)) {
+                a.m.querySelector(".when").textContent = fmtWhen(dts);
+                a.m.querySelector(".when").title = dts.toUTCString();
+              }
+              a.buf = m.content || "(empty reply)";
+              paint(a);
+              if (m.reasoning) {
+                // Restore the persisted thinking block: the full trace inside
+                // the collapsed details; the summary previews its first line.
+                a.details.style.display = "";
+                a.pre.textContent = m.reasoning;
+                var ln = "";
+                m.reasoning.split("\n").forEach(function (l) {
+                  if (!ln && l.trim()) ln = l.trim();
+                });
+                if (ln.length > 90) ln = ln.slice(0, 90) + "…";
+                if (ln) a.details.querySelector("summary").textContent = "thinking — " + ln;
+              }
             }
-            a.buf = m.content || "(empty reply)";
-            paint(a);
-            if (m.reasoning) {
-              // Restore the persisted thinking block: the full trace inside
-              // the collapsed details; the summary previews its first line.
-              a.details.style.display = "";
-              a.pre.textContent = m.reasoning;
-              var ln = "";
-              m.reasoning.split("\n").forEach(function (l) {
-                if (!ln && l.trim()) ln = l.trim();
-              });
-              if (ln.length > 90) ln = ln.slice(0, 90) + "…";
-              if (ln) a.details.querySelector("summary").textContent = "thinking — " + ln;
+            if (hasCalls) {
+              m.tool_calls.forEach(function (tc) { addToolRow(tc.name, true, tc.success); });
             }
           }
         });

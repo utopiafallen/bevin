@@ -950,17 +950,26 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 	return map[string]any{"tokens": tokens, "max_tokens": a.modelMaxContext(c.ActiveModelID)}, nil
 }
 
+// ToolCallInfo is the display form of one tool call attached to an
+// assistant message (the UI renders one indicator row per call).
+type ToolCallInfo struct {
+	Name    string `json:"name"`
+	Success bool   `json:"success"`
+}
+
 // ConversationMessage is one displayable message from a conversation. The
 // store also keeps bevin-internal rows (summary context artifacts, and tool
 // rows once tools exist); those are never rendered as chat, so
 // ConversationMessages filters to user + assistant only. Reasoning is the
-// assistant's stored thinking trace (empty for user messages and turns before
-// reasoning persistence).
+// assistant's stored thinking trace (empty for user messages and turns
+// before reasoning persistence). ToolCalls are the P7 sidecar calls the
+// row's turn issued (the UI renders an indicator row per call).
 type ConversationMessage struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Reasoning string `json:"reasoning,omitempty"`
-	CreatedAt string `json:"created_at"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content"`
+	Reasoning string         `json:"reasoning,omitempty"`
+	ToolCalls []ToolCallInfo `json:"tool_calls,omitempty"`
+	CreatedAt string         `json:"created_at"`
 }
 
 // ConversationMessages returns the displayable messages of the user's
@@ -978,26 +987,38 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 	if err != nil {
 		return nil, err
 	}
+	// Attach the assistant rows' tool calls (P7 sidecar rows, one query)
+	// so the UI can render one indicator row per call in the flow. An
+	// empty assistant row WITH calls is the tool-call turn (its text
+	// lands on the turn's final reply row) — it is INCLUDED now, so the
+	// calls have a place in the flow; the UI renders only the indicator
+	// rows (no bubble). An empty row WITHOUT calls is a genuine empty
+	// reply (a reasoning-only completion, or the dropped streamed tool
+	// call before 7174606): it stays in the history so the user's
+	// question never looks unanswered, and the UI renders it as
+	// "(empty reply)".
+	var assistantIDs []int64
+	for _, m := range msgs {
+		if m.Role == roleAssistant {
+			assistantIDs = append(assistantIDs, m.ID)
+		}
+	}
+	callsByMsg := map[int64][]ToolCallInfo{}
+	if len(assistantIDs) > 0 {
+		if rows, err := us.ToolCallsForMessages(assistantIDs); err == nil {
+			for id, list := range rows {
+				for _, r := range list {
+					callsByMsg[id] = append(callsByMsg[id], ToolCallInfo{Name: r.Tool, Success: r.Success})
+				}
+			}
+		}
+	}
 	out := make([]ConversationMessage, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role != roleUser && m.Role != roleAssistant {
 			continue
 		}
-		// An empty assistant row WITH P7 tool calls is the model's
-		// tool-call turn — the row exists to carry the calls, and the text
-		// lands on the turn's final reply row: not a chat bubble. An empty
-		// row WITHOUT any tool calls is a genuine empty reply (the model
-		// ended the turn with no text — a reasoning-only completion, or the
-		// dropped streamed tool call before 7174606): it stays in the
-		// history so the user's question never looks unanswered, and the
-		// UI renders it as "(empty reply)".
-		if m.Role == roleAssistant && m.Content == "" {
-			rows, err := us.ToolCallsForMessage(m.ID)
-			if err == nil && len(rows) > 0 {
-				continue
-			}
-		}
-		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, CreatedAt: m.CreatedAt})
+		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, ToolCalls: callsByMsg[m.ID], CreatedAt: m.CreatedAt})
 	}
 	return out, nil
 }
@@ -1204,12 +1225,22 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 				return conv.ID, "", err
 			}
 			for _, tc := range res.ToolCalls {
+				if emit != nil {
+					if err := emit(provider.Chunk{ToolName: tc.Name}); err != nil {
+						return conv.ID, "", err
+					}
+				}
 				p7id, err := us.AppendToolCall(assistantMsg.ID, tc.Name, tc.Arguments)
 				if err != nil {
 					return conv.ID, "", err
 				}
 				if cerr := us.CompleteToolCall(p7id, "not executed: the turn was stopped (no observed progress — the no-progress confidence reached its threshold)", false); cerr != nil {
 					return conv.ID, "", cerr
+				}
+				if emit != nil {
+					if err := emit(provider.Chunk{ToolName: tc.Name, ToolDone: true, ToolSuccess: false}); err != nil {
+						return conv.ID, "", err
+					}
 				}
 			}
 			persistedInLoop = true
@@ -1226,6 +1257,15 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 			return conv.ID, "", err
 		}
 		for ci, tc := range res.ToolCalls {
+			// The UI sees each issued call as an indicator row in the
+			// chat flow (one row per call; the next assistant reply
+			// renders below the rows). The cap-excess calls get a row
+			// too — the model DID issue them.
+			if emit != nil {
+				if err := emit(provider.Chunk{ToolName: tc.Name}); err != nil {
+					return conv.ID, "", err
+				}
+			}
 			p7id, err := us.AppendToolCall(assistantMsg.ID, tc.Name, tc.Arguments)
 			if err != nil {
 				return conv.ID, "", err
@@ -1240,6 +1280,11 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 			}
 			if cerr := us.CompleteToolCall(p7id, resultText, ok); cerr != nil {
 				return conv.ID, "", cerr
+			}
+			if emit != nil {
+				if err := emit(provider.Chunk{ToolName: tc.Name, ToolDone: true, ToolSuccess: ok}); err != nil {
+					return conv.ID, "", err
+				}
 			}
 			// Feed the no-progress accumulator: the executed call (name, args,
 			// result) is one observation. A failed / not-executed call (ok=false)

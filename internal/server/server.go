@@ -749,7 +749,10 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // sendMessageStream streams a chat turn as SSE (text/event-stream). Each text
-// delta is a "message" event (JSON {delta, reasoning}); when the stream
+// delta is a "message" event (JSON {delta, reasoning}); each tool call the
+// model issues is a "tool" event ({name}) with a matching "tool_done"
+// ({name, success}) once it finishes (the UI renders one indicator row per
+// call — the model's next reply lands below the rows); when the stream
 // completes a "done" event carries the conversation id, the full reply, and
 // the API-reported usage (from the final SSE chunk); a failure sends an
 // "error" event. A client disconnect cancels the request context, aborting
@@ -802,6 +805,15 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	convID, reply, err := a.ag.TurnStream(r.Context(), u.Handle, id, req.Message, func(c provider.Chunk) error {
 		if c.Usage != nil {
 			lastUsage = c.Usage
+		}
+		if c.ToolName != "" {
+			// Harness-level tool-call indicators (not model deltas): the
+			// UI renders one row per issued call — the model's next reply
+			// (processing the results) lands below the rows.
+			if c.ToolDone {
+				return writeEvent("tool_done", map[string]any{"name": c.ToolName, "success": c.ToolSuccess})
+			}
+			return writeEvent("tool", map[string]any{"name": c.ToolName})
 		}
 		if c.TextDelta != "" || c.ReasoningDelta != "" {
 			if ttft == 0 {

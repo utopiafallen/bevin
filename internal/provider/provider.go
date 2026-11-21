@@ -141,6 +141,15 @@ type Chunk struct {
 	StopReason         string          // stop_reason from message_delta
 	Usage              *Usage
 	Done               bool
+
+	// Harness-level tool-call indicators (the backends never set these;
+	// the agent's turn loop emits them so the UI can render a row per
+	// issued tool call — the model's next reply lands below the rows).
+	// ToolName non-empty = an indicator: ToolDone false = the call was
+	// issued, true = it finished (ToolSuccess carries the outcome).
+	ToolName    string
+	ToolDone    bool
+	ToolSuccess bool
 }
 
 // ModelInfo describes one model a backend serves, incl. its modalities.

@@ -174,6 +174,27 @@ input:focus, textarea:focus, select:focus {
 .msg-assistant { align-items: flex-start; align-self: flex-start; }
 .msg-assistant .bubble { border-bottom-left-radius: 6px; }
 .msg .error-text { color: var(--danger, #c0392b); }
+/* Tool-call indicator rows: the model issued a tool call (one row per call,
+   parallel calls stack). The chip pulses while the call is in flight and
+   settles to ✓/✗ on completion; the model's next reply renders below. */
+.msg-tool { display: flex; justify-content: center; margin: 0.3rem 0; }
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 0.4rem; max-width: 92%;
+  font-size: 0.74rem; font-weight: 700; color: var(--text-muted);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.16rem 0.7rem 0.16rem 0.5rem;
+}
+.tool-chip .tool-gear { flex: none; display: inline-flex; color: var(--brand-strong); }
+.tool-chip .tool-name { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-weight: 600; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-dot { flex: none; width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--brand); display: inline-flex; align-items: center; justify-content: center; font-size: 0.62rem; line-height: 1; color: var(--brand-contrast); }
+.tool-chip.pending .tool-dot { animation: toolpulse 1.1s ease-in-out infinite; }
+.tool-dot.ok, .tool-dot.bad { width: auto; height: auto; background: transparent; font-size: 0.78rem; font-weight: 700; }
+.tool-dot.ok { color: var(--ok); }
+.tool-dot.bad { color: var(--danger); }
+@keyframes toolpulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
 .msg details.reasoning { margin: 0 0.2rem 0.3rem; font-size: 0.8rem; color: var(--text-muted); max-width: 100%; }
 .msg details.reasoning summary { cursor: pointer; font-size: 0.72rem; font-weight: 700; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg details.reasoning pre { white-space: pre-wrap; font-family: inherit; margin: 0.3rem 0 0; }

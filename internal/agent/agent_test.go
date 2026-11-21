@@ -116,14 +116,15 @@ func TestModelsFiltersAutoDisabled(t *testing.T) {
 
 var _ = fmt.Sprintf
 
-// TestConversationMessagesEmptyReply pins the display filter: an empty
-// assistant row that carries a P7 tool call is the model's tool-call turn
-// (hidden — the turn's text lands on the final reply row), but an empty
-// row WITHOUT tool calls is a genuine empty reply and must stay in the
-// history (the UI renders it as "(empty reply)") — otherwise the user's
-// question looks unanswered after a page reload (2026-11-19: the blanket
-// empty-row filter made the streamed-tool-call era's empty replies vanish
-// from restored chat logs).
+// TestConversationMessagesEmptyReply pins the display rules: an empty
+// assistant row that carries a P7 tool call is the model's tool-call turn —
+// it is INCLUDED in the display so the calls have a place in the flow (the
+// UI renders only the indicator rows, no bubble; the turn's text lands on
+// the final reply row) — while an empty row WITHOUT tool calls is a
+// genuine empty reply and must stay in the history (the UI renders it as
+// "(empty reply)") — otherwise the user's question looks unanswered after
+// a page reload (2026-11-19: the blanket empty-row filter made the
+// streamed-tool-call era's empty replies vanish from restored chat logs).
 func TestConversationMessagesEmptyReply(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -142,8 +143,8 @@ func TestConversationMessagesEmptyReply(t *testing.T) {
 	if _, err := us.AppendMessage(conv.ID, roleAssistant, "", "the model thought but said nothing", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	// The tool-call turn: an empty row WITH a P7 call (hidden), then the
-	// turn's final text reply (shown).
+	// The tool-call turn: an empty row WITH a P7 call (indicator rows only,
+	// no bubble), then the turn's final text reply.
 	if _, err := us.AppendMessage(conv.ID, roleUser, "do it", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -164,15 +165,21 @@ func TestConversationMessagesEmptyReply(t *testing.T) {
 	}
 	var rows []string
 	var emptyReasoning string
-	for _, m := range msgs {
+	var toolCallsAt []int
+	for i, m := range msgs {
 		rows = append(rows, m.Role+":"+m.Content)
-		if m.Role == roleAssistant && m.Content == "" {
+		// The genuine empty reply is the empty row WITHOUT tool calls (the
+		// tool-call row is also empty — it carries only the indicator rows).
+		if m.Role == roleAssistant && m.Content == "" && len(m.ToolCalls) == 0 {
 			emptyReasoning = m.Reasoning
 		}
+		if len(m.ToolCalls) > 0 {
+			toolCallsAt = append(toolCallsAt, i)
+		}
 	}
-	want := []string{"user:hi", "assistant:", "user:do it", "assistant:done"}
+	want := []string{"user:hi", "assistant:", "user:do it", "assistant:", "assistant:done"}
 	if len(rows) != len(want) {
-		t.Fatalf("rows = %v, want %v (the tool-call row hides, the genuine empty reply stays)", rows, want)
+		t.Fatalf("rows = %v, want %v (the tool-call row stays — it carries the indicator rows; the genuine empty reply stays too)", rows, want)
 	}
 	for i := range want {
 		if rows[i] != want[i] {
@@ -182,6 +189,15 @@ func TestConversationMessagesEmptyReply(t *testing.T) {
 	// The empty reply keeps its reasoning trace (the UI's thinking block).
 	if emptyReasoning != "the model thought but said nothing" {
 		t.Fatalf("empty reply's reasoning = %q, want the stored trace", emptyReasoning)
+	}
+	// Exactly the tool-call row carries calls, and they are the stored P7
+	// rows (name + success).
+	if len(toolCallsAt) != 1 || toolCallsAt[0] != 3 {
+		t.Fatalf("tool_calls on rows %v, want only the tool-call row (index 3)", toolCallsAt)
+	}
+	got := msgs[3].ToolCalls
+	if len(got) != 1 || got[0].Name != "fake_tool" {
+		t.Fatalf("tool-call row's calls = %+v, want [fake_tool]", got)
 	}
 }
 
