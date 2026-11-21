@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
@@ -288,9 +289,9 @@ func TestPurposeNudge(t *testing.T) {
 }
 
 // TestAgentMessageQueueAndDelivery: agent_message queues (never pushes), the
-// recipient gets it at its next user turn (marked delivered), the roster
-// shows the pending message, self/unknown sends are refused, and the
-// per-pair cap refuses a sender that keeps replying.
+// recipient gets it at its next user turn (marked delivered), self/unknown
+// sends are refused, and the per-pair cap refuses a sender that keeps
+// replying.
 func TestAgentMessageQueueAndDelivery(t *testing.T) {
 	a, us, _ := newRosterTestAgent(t)
 	ca := newRosterConversation(t, a, "Alpha")
@@ -339,17 +340,15 @@ func TestAgentMessageQueueAndDelivery(t *testing.T) {
 		t.Fatalf("an idle recipient got %d announcements without a user turn", n)
 	}
 
-	// Beta's next user turn: the message is delivered (the roster note and
-	// the message share the announcement) + marked delivered.
+	// Beta's next user turn: the message is delivered in the announcement
+	// (the delivery section IS the never-silent guarantee — the roster is
+	// presence-only, no per-line pending notes) + marked delivered.
 	if _, _, err := a.Turn(ctx, "u1", cb.ID, "hi"); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, cb.ID)
 	if !strings.Contains(ci, "Messages from your sibling") || !strings.Contains(ci, `"Alpha"`) || !strings.Contains(ci, "the 500 is a nil deref in session.go") {
 		t.Fatalf("delivery missing from the announcement: %q", ci)
-	}
-	if !strings.Contains(ci, "has a pending message for you") {
-		t.Fatalf("the roster line must show the pending message: %q", ci)
 	}
 	pending, _ = us.PendingAgentMessages(cb.ID)
 	if len(pending) != 0 {
@@ -368,5 +367,71 @@ func TestAgentMessageQueueAndDelivery(t *testing.T) {
 	}
 	if n, err := us.CountPendingAgentMessages(ca.ID, cb.ID); err != nil || n != 3 {
 		t.Fatalf("pending count = %d, %v (want 3 — the refused send must not queue)", n, err)
+	}
+}
+
+// TestRosterPresenceOnly: the conversation list is unbounded in theory, so
+// the roster is presence-only — running or active (within the quiet grace)
+// siblings are announced; idle ones are not. A sibling that went idle is
+// announced once as a departure ("went idle"), a deleted one as
+// "no longer exists", and a returning sibling comes back with "+".
+func TestRosterPresenceOnly(t *testing.T) {
+	a, us, _ := newRosterTestAgent(t)
+	ca := newRosterConversation(t, a, "Alpha")
+	cb := newRosterConversation(t, a, "Beta")
+	ctx := context.Background()
+	t.Cleanup(func() { rosterQuietGrace = 15 * time.Minute })
+
+	// Grace 0: anything with past activity is idle → the roster is empty
+	// → all idle means nothing announced.
+	rosterQuietGrace = 0
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if ci := lastCheckin(t, us, ca.ID); ci != "" {
+		t.Fatalf("all-idle siblings must not be announced, got: %q", ci)
+	}
+
+	// Beta is running right now → present regardless of grace (the
+	// in-flight flag beats the quiet window).
+	a.enterInflight("u1", cb.ID)
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again"); err != nil {
+		t.Fatal(err)
+	}
+	ci := lastCheckin(t, us, ca.ID)
+	if !strings.Contains(ci, `running · "Beta"`) {
+		t.Fatalf("the running sibling must be announced: %q", ci)
+	}
+	a.leaveInflight("u1", cb.ID)
+
+	// Beta went idle → the departure is announced once as went-idle (NOT
+	// no-longer-exists — the conversation still exists).
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 2"); err != nil {
+		t.Fatal(err)
+	}
+	ci = lastCheckin(t, us, ca.ID)
+	if !strings.Contains(ci, "(went idle)") || strings.Contains(ci, "no longer exists") {
+		t.Fatalf("the idle departure must be announced as went-idle: %q", ci)
+	}
+	// ...and not re-announced on the next turn (still absent, nothing new).
+	before := countCheckins(t, us, ca.ID)
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 3"); err != nil {
+		t.Fatal(err)
+	}
+	if after := countCheckins(t, us, ca.ID); after != before {
+		t.Fatalf("no re-announcement for a still-absent sibling: %q", lastCheckin(t, us, ca.ID))
+	}
+
+	// Beta is active again (grace restored + fresh activity) → returns with "+".
+	rosterQuietGrace = 15 * time.Minute
+	if _, err := us.AppendMessage(cb.ID, roleUser, "ping", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 4"); err != nil {
+		t.Fatal(err)
+	}
+	ci = lastCheckin(t, us, ca.ID)
+	if !strings.Contains(ci, `+ active · "Beta"`) {
+		t.Fatalf("a returning sibling must be announced with +: %q", ci)
 	}
 }

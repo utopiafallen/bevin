@@ -21,15 +21,19 @@ import (
 // deliberately ephemeral — a restart re-announces the full roster, which is
 // correct: a cold start knows nothing.
 const (
-	// rosterQuietGrace: a sibling whose last activity is within this window
-	// is "active" on the roster; older than that is "idle since HH:MM".
-	rosterQuietGrace = 15 * time.Minute
 	// purposeNudgeCadence: the purpose nudge fires at most once this many
 	// user turns apart per conversation (the design's ~5-10 turn tunable,
 	// the sole updater of the rolling purpose — a background whisper, not a
 	// per-turn demand).
 	purposeNudgeCadence = 7
 )
+
+// rosterQuietGrace: a sibling whose last activity is within this window is
+// "active" on the roster (presence-only: the conversation list is unbounded
+// in theory, so the roster shows who is RUNNING or recently ACTIVE — never
+// the long tail of idle conversations). A var, not a const, as a test seam
+// (tests shrink it to 0 to age a sibling into idle deterministically).
+var rosterQuietGrace = 15 * time.Minute
 
 // rosterState is the in-memory awareness state (all maps keyed per
 // conversation; guarded by one mutex — the operations are short and the
@@ -101,38 +105,39 @@ func (a *Agent) purposeSet(convID string) {
 	a.roster.purposeTurns[convID] = 0
 }
 
-// rosterStateWord is the roster's state word for a sibling conversation:
-// running (a turn in-flight right now), active (activity within the quiet
-// grace), idle since HH:MM (older — the lazy classification, an
-// approximation: "no LLM work observed" is what it actually means).
-func rosterStateWord(c store.Conversation, inFlight bool) string {
+// rosterStateWord is the roster's state word for a sibling conversation +
+// whether it is IN the roster at all. The roster is presence-only: running
+// (a turn in-flight right now — the turn bracket) or active (activity
+// within the quiet grace). Idle siblings are not roster entries: the user's
+// conversation list is unbounded in theory, and the announcement must stay
+// bounded to who is actually around. A lazy classification (no timers, no
+// events): "no LLM work observed recently" is what "active" actually means.
+// An unparseable activity timestamp is treated as active (presence errs
+// toward showing, not hiding, a sibling).
+func rosterStateWord(c store.Conversation, inFlight bool) (state string, present bool) {
 	if inFlight {
-		return "running"
+		return "running", true
 	}
 	t, err := time.Parse(time.RFC3339, c.LastActivityAt)
 	if err != nil {
-		return "active"
+		return "active", true
 	}
 	if time.Since(t) <= rosterQuietGrace {
-		return "active"
+		return "active", true
 	}
-	return "idle since " + t.UTC().Format("15:04")
+	return "", false
 }
 
 // rosterLine is one roster entry: state word + title + purpose + the
 // conversation id (the id is what agent_message takes — the model needs no
 // other lookup). No purpose = title only (the visible fallback: an
 // unstated purpose degrades to the title, never asserts a dead world).
-func rosterLine(c store.Conversation, state string, pendingToMe bool) string {
+func rosterLine(c store.Conversation, state string) string {
 	line := fmt.Sprintf("%s · %q", state, c.Title)
 	if c.Purpose != "" {
 		line += " — " + c.Purpose
 	}
-	line += fmt.Sprintf(" (conv %s)", c.ID)
-	if pendingToMe {
-		line += " · has a pending message for you"
-	}
-	return line
+	return line + fmt.Sprintf(" (conv %s)", c.ID)
 }
 
 // announceTurnStart runs at the start of every user turn, after the user
@@ -155,25 +160,27 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 		return err
 	}
 
-	// The roster: every sibling (all the user's conversations but this
-	// one), each with its state word and any pending message to self.
+	// The roster: the siblings PRESENT right now (running or active —
+	// presence-only: the conversation list is unbounded in theory, so the
+	// announcement is bounded to who is actually around; see
+	// rosterStateWord).
 	newSnap := map[string]string{}
+	convExists := map[string]bool{}
 	var lines []string
 	a.roster.mu.Lock()
 	oldSnap := a.roster.snap[convID]
 	firstAnnounce := oldSnap == nil
 	a.roster.mu.Unlock()
 	for _, c := range convs {
+		convExists[c.ID] = true
 		if c.ID == convID {
 			continue
 		}
-		pendingToMe := false
-		for _, m := range pending {
-			if m.FromConversation == c.ID {
-				pendingToMe = true
-			}
+		state, present := rosterStateWord(c, a.isInflight(handle, c.ID))
+		if !present {
+			continue
 		}
-		line := rosterLine(c, rosterStateWord(c, a.isInflight(handle, c.ID)), pendingToMe)
+		line := rosterLine(c, state)
 		newSnap[c.ID] = line
 		switch {
 		case firstAnnounce:
@@ -184,10 +191,18 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 			lines = append(lines, "~ "+line)
 		}
 	}
-	// Gone siblings (announced before, no longer a conversation).
+	// Departures (in the last snapshot, not present now): deleted
+	// ("no longer exists") vs simply went idle ("went idle" — it still
+	// exists, it is just no longer around). Each is announced once, at the
+	// departure; nothing is tracked beyond that.
 	if !firstAnnounce {
 		for id, line := range oldSnap {
-			if _, ok := newSnap[id]; !ok {
+			if _, ok := newSnap[id]; ok {
+				continue
+			}
+			if convExists[id] {
+				lines = append(lines, "- "+line+" (went idle)")
+			} else {
 				lines = append(lines, "- "+line+" (no longer exists)")
 			}
 		}
@@ -224,7 +239,7 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 	var b strings.Builder
 	if len(lines) > 0 {
 		if firstAnnounce {
-			b.WriteString("Other conversations of yours (who is active, what each is doing — running = a turn is in progress, active = recent activity, idle = quiet):\n")
+			b.WriteString("Other conversations of yours (who is around right now — running = a turn is in progress, active = recent activity):\n")
 		} else {
 			b.WriteString("Changes among your other conversations since your last turn (+ new, ~ changed, - gone):\n")
 		}
