@@ -25,6 +25,14 @@ func fastLearning(t *testing.T, a *Agent, passReply string) {
 	a.learn.busyDeferral = 20 * time.Millisecond
 }
 
+// enableLearning opts a test into the idle learning loop (disabled by
+// default — see learningEnabled). Restored after the test.
+func enableLearning(t *testing.T) {
+	t.Helper()
+	learningEnabled = true
+	t.Cleanup(func() { learningEnabled = false })
+}
+
 func newTestConversation(t *testing.T, a *Agent, handle string) (string, *store.UserStore) {
 	t.Helper()
 	us, err := a.userStore(handle)
@@ -55,6 +63,7 @@ const passJSON = `{"memories":[{"facet":"preferences","statement":"The user pref
 
 func TestIdleLearningPass(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID,
 		[2]string{"I'd like to set up a project.", "What kind of project?"},
@@ -113,6 +122,7 @@ func TestIdleLearningPass(t *testing.T) {
 // assumed threshold) — the window closes without a pass.
 func TestIdleLearningMinUserTurns(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID, [2]string{"One quick question.", "Here is the answer."})
 	fastLearning(t, a, passJSON)
@@ -133,6 +143,7 @@ func TestIdleLearningMinUserTurns(t *testing.T) {
 // the pass defers, then runs once the work finishes.
 func TestIdleLearningBusyGate(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID,
 		[2]string{"Turn one.", "Reply one."},
@@ -161,6 +172,7 @@ func TestIdleLearningBusyGate(t *testing.T) {
 // (no crash), and the window is NOT advanced (a later idle window retries).
 func TestIdleLearningNoModel(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID,
 		[2]string{"One.", "a."},
@@ -185,6 +197,7 @@ func TestIdleLearningNoModel(t *testing.T) {
 // pass fires → the pass drops the state cleanly.
 func TestIdleLearningDeletedConversation(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID,
 		[2]string{"One.", "a."},
@@ -209,6 +222,7 @@ func TestIdleLearningDeletedConversation(t *testing.T) {
 // WITHOUT advancing the window — the next idle window retries the same turns.
 func TestIdleLearningRetryOnBadJSON(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	enableLearning(t)
 	convID, us := newTestConversation(t, a, "u1")
 	appendTurns(t, us, convID,
 		[2]string{"One.", "a."},
@@ -401,6 +415,29 @@ func TestMemoryRecallRanking(t *testing.T) {
 	out = execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "cat couch", "top": 1})
 	if strings.Count(out, "#") != 1 {
 		t.Fatalf("top=1 must return one memory:\n%s", out)
+	}
+}
+
+// TestIdleLearningDisabledByDefault pins the 2026-11-20 user decision: the
+// idle learning loop is OFF by default (its passes are being redesigned as
+// background TASKS). The arming hook is a no-op until enabled, so a clean
+// idle conversation learns nothing.
+func TestIdleLearningDisabledByDefault(t *testing.T) {
+	if learningEnabled {
+		t.Fatal("the idle learning loop must be disabled by default (task-system redesign pending)")
+	}
+	a, _, _ := newTestAgent(t)
+	convID, us := newTestConversation(t, a, "u1")
+	appendTurns(t, us, convID,
+		[2]string{"One.", "a."},
+		[2]string{"Two.", "b."},
+	)
+	fastLearning(t, a, passJSON)
+	a.learn.onTurnComplete("u1", convID)
+	time.Sleep(100 * time.Millisecond) // well past the fast delay
+	mems, _ := us.ListActiveMemories()
+	if len(mems) != 0 {
+		t.Fatalf("a disabled loop must not learn: %+v", mems)
 	}
 }
 

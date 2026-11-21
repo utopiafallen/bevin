@@ -30,6 +30,13 @@ const (
 	learningMaxMemories  = 50
 )
 
+// learningEnabled gates the idle learning loop at its single arming point
+// (onTurnComplete). DISABLED by default (2026-11-20, user directive): the
+// loop is being redesigned to run passes as background TASKS (the task
+// system) — until then no idle timer is armed and no pass runs. The
+// machinery stays in the tree and tested (the tests opt in).
+var learningEnabled = false
+
 // llmWork tracks, per user, how many LLM works are running in the agent
 // (turns). The scheduler pools are per-model and shared across users, so
 // the per-user "no other LLM work running" gate lives here, where the
@@ -96,6 +103,9 @@ func learningKey(handle, convID string) string { return handle + "\x00" + convID
 // onTurnComplete is the hook (runScheduled, after a clean turn): cancel any
 // pending pass and arm a fresh idle timer for this conversation.
 func (m *learningMgr) onTurnComplete(handle, convID string) {
+	if !learningEnabled {
+		return // disabled pending the task-system redesign (2026-11-20)
+	}
 	key := learningKey(handle, convID)
 	m.mu.Lock()
 	st, ok := m.st[key]
