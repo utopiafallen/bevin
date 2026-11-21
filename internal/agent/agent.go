@@ -68,6 +68,11 @@ type Agent struct {
 	// every use because the backend is (re)built on config save.
 	containerBk func() sandbox.Backend
 
+	// roster is the in-memory turn-start awareness state (concurrent-
+	// instances, layers 2+4): the in-flight set, the last-announced roster
+	// snapshots, and the purpose-nudge counters (see roster.go).
+	roster *rosterState
+
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
 
@@ -130,6 +135,19 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerMemoryTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register memory tools: %w", err)
 	}
+	// The concurrent-instances tools (layers 2+4): set_purpose (the rolling
+	// purpose the roster shows to siblings) + agent_message (the sibling
+	// queue — queued, delivered at the recipient's next user turn).
+	if err := registerPurposeTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register set_purpose: %w", err)
+	}
+	if err := registerAgentMessageTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register agent_message: %w", err)
+	}
+	// The turn-start awareness state (the roster/nudge/queue delivery —
+	// in-memory only: a restart re-announces the full roster, which is
+	// correct for a cold start).
+	a.roster = newRosterState()
 	// The idle learning loop (armed per conversation at turn completion;
 	// the pass itself runs on the timer's goroutine, never in a turn).
 	a.learn = newLearningMgr(a)
@@ -1050,6 +1068,16 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", err
 	}
 	a.indexMessage(ctx, handle, userMsg, conv.Title)
+	// Turn-start awareness (concurrent-instances, layers 2+4): this
+	// conversation is in-flight for the turn's duration (its siblings'
+	// rosters show it as running), and the roster delta + queued sibling
+	// messages + purpose nudge are announced as ONE UI-hidden checkin row
+	// when any of them is new (see announceTurnStart).
+	a.enterInflight(handle, convID)
+	defer a.leaveInflight(handle, convID)
+	if err := a.announceTurnStart(us, handle, convID, conv); err != nil {
+		return conv.ID, "", err
+	}
 	// The conversation's active model's profile drives the request builder
 	// (its model-facing decisions — see buildRequest); it is resolved once
 	// per turn from live config.
