@@ -345,6 +345,13 @@
       if (c === "*" || c === "_" || c === "~") {
         var rl2 = runOf(c, i);
         var isDouble = rl2 >= 2;
+        if (c === "~" && !isDouble) {
+          // GFM: a single ~ is NEVER a strike marker (strike is ~~ only).
+          // Models write approximate prices as ~$21.7k — a lone ~ that
+          // pairs with the next lone ~ would strike out the text between
+          // them (models + prices rendered as struck-through).
+          plain.push(c); i++; continue;
+        }
         var close2 = findRun(c, isDouble ? rl2 : 1, i + rl2);
         if (close2 >= i + (isDouble ? rl2 : 1)) {
           var inner2 = text.slice(i + (isDouble ? rl2 : 1), close2);

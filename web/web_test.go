@@ -107,6 +107,25 @@ func TestAdminInlineJSValid(t *testing.T) {
 	checkInlineJSValid(t, "admin.html")
 }
 
+// TestMarkdownNodeTests runs the parser suite (markdown_test.js — block
+// cut points, settle-then-render consistency, and the inline marker
+// branches against a minimal fake DOM) under node, so the streaming
+// renderer's core is gated like the inline UI scripts. Skipped where node
+// is unavailable.
+func TestMarkdownNodeTests(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available")
+	}
+	out, err := exec.Command(node, "markdown_test.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("markdown_test.js: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("ALL PASS")) {
+		t.Fatalf("markdown_test.js:\n%s", out)
+	}
+}
+
 // checkInlineJSValid syntax-checks every inline <script> block of an embedded
 // page with `node --check`. Skipped where node is unavailable.
 func checkInlineJSValid(t *testing.T, pageName string) {

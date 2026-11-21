@@ -207,5 +207,82 @@ console.log("stableCut: settle-then-render consistency");
     tail === "tail still streaming", JSON.stringify(tail));
 })();
 
+// ---- inline rendering (the marker branches) against a minimal fake DOM.
+// render() needs only createElement/createTextNode/createDocumentFragment +
+// appendChild/insertBefore/textContent/className/style/href — enough to
+// serialize the tree and assert on the produced tags.
+(function () {
+  console.log("parseInline: marker branches (fake DOM)");
+  function makeDoc() {
+    function mk(tag) {
+      var el = {
+        tag: tag, children: [], className: "", style: {},
+        href: "", target: "", rel: "", open: false,
+        appendChild: function (c) { this.children.push(c); return c; },
+        insertBefore: function (c, ref) {
+          if (c.isFrag) { // DOM semantics: a fragment spreads its children
+            var i = ref ? this.children.indexOf(ref) : this.children.length;
+            var arr = c.children; c.children = [];
+            this.children.splice(i, 0, ...arr);
+          } else {
+            var j = ref ? this.children.indexOf(ref) : -1;
+            if (j >= 0) this.children.splice(j, 0, c); else this.children.push(c);
+          }
+          return c;
+        },
+        get textContent() {
+          return this.children.map(function (c) {
+            return c.tag === "#text" ? c.text : c.textContent;
+          }).join("");
+        },
+        set textContent(t) { this.children = [{ tag: "#text", text: String(t) }]; }
+      };
+      return el;
+    }
+    return {
+      createElement: mk,
+      createTextNode: function (t) { return { tag: "#text", text: String(t) }; },
+      createDocumentFragment: function () { var f = mk("#frag"); f.isFrag = true; return f; }
+    };
+  }
+  function ser(n) {
+    if (n.tag === "#text") return n.text;
+    var inner = n.children.map(ser).join("");
+    if (n.tag === "#frag") return inner;
+    return "<" + n.tag + ">" + inner + "</" + n.tag + ">";
+  }
+  function renderInline(text) {
+    var doc = makeDoc();
+    var container = doc.createElement("div");
+    container.ownerDocument = doc;
+    MD.render(text, container, null, false);
+    return ser(container);
+  }
+
+  // The live bug (used-car research): the model writes approximate prices
+  // as ~$21.7k. A lone ~ must NEVER pair (GFM strike is ~~ only) — before
+  // the fix, consecutive ~$ prices struck out the models + prices between.
+  var prices = "Hyundai Venue ~$21.7k (cheapest new car on sale)\n- Kia K4 ~$23.5k · Nissan Sentra ~$23.8k · Corolla ~$24.3k\n- Mazda3 ~$24.5–26k · Civic ~$24.7–25.9k";
+  var rp = renderInline(prices);
+  check("lone ~ prices stay literal", rp.indexOf("<del>") < 0, rp);
+  check("all ~$ amounts survive verbatim",
+    ["~$21.7k", "~$23.5k", "~$23.8k", "~$24.3k", "~$24.5–26k", "~$24.7–25.9k"]
+      .every(function (s) { return rp.indexOf(s) >= 0; }), rp);
+
+  check("~~strike~~ still renders <del>",
+    renderInline("before ~~struck~~ after").indexOf("<del>struck</del>") >= 0,
+    renderInline("before ~~struck~~ after"));
+  check("~~ with intraword ~s still pairs on the double run",
+    renderInline("a ~~b~~ c").indexOf("<del>b</del>") >= 0);
+  check("unterminated ~~ stays literal mid-stream",
+    renderInline("only ~~ open").indexOf("~~") >= 0);
+  check("*em* and **bold** unaffected",
+    renderInline("*em* and **bold**") === "<div><p><em>em</em> and <strong>bold</strong></p></div>",
+    renderInline("*em* and **bold**"));
+  check("lone ~ with no pair at all stays literal",
+    renderInline("about ~$16k total") === "<div><p>about ~$16k total</p></div>",
+    renderInline("about ~$16k total"));
+})();
+
 console.log(failures === 0 ? "ALL PASS" : failures + " FAILURES");
 process.exit(failures === 0 ? 0 : 1);
