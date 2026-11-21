@@ -45,10 +45,42 @@ type taskSystem struct {
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc // taskID -> its live run's cancel (StopTask)
+
+	// terminal: the model's own outcome report (the advance_task tool),
+	// keyed by the task's owned conversation. Set during the run's turn,
+	// consumed ONCE by the settling run (last call wins — the model's
+	// latest judgment). A turn that errors before settling consumes it
+	// too (an intent from a failed run must not leak into a re-run).
+	termMu   sync.Mutex
+	terminal map[string]terminalIntent
 }
 
 func newTaskSystem(a *Agent) *taskSystem {
-	return &taskSystem{a: a, running: map[string]context.CancelFunc{}}
+	return &taskSystem{a: a, running: map[string]context.CancelFunc{}, terminal: map[string]terminalIntent{}}
+}
+
+// terminalIntent is what advance_task reports: the state the model picked
+// (done | blocked) + its optional note (the reason, posted ahead of the
+// completion summary).
+type terminalIntent struct {
+	state string
+	note  string
+}
+
+func (ts *taskSystem) setTerminalIntent(convID, state, note string) {
+	ts.termMu.Lock()
+	defer ts.termMu.Unlock()
+	ts.terminal[convID] = terminalIntent{state: state, note: note}
+}
+
+// takeTerminalIntent returns the model's outcome report for the task
+// conversation (clearing it — it applies to this run only).
+func (ts *taskSystem) takeTerminalIntent(convID string) (terminalIntent, bool) {
+	ts.termMu.Lock()
+	defer ts.termMu.Unlock()
+	in, ok := ts.terminal[convID]
+	delete(ts.terminal, convID)
+	return in, ok
 }
 
 // SpawnTask creates a task + its owned conversation and dispatches it
@@ -179,6 +211,10 @@ func (ts *taskSystem) run(handle, taskID string) {
 
 	convID := *task.ConversationID
 	_, reply, terr := a.Turn(ctx, handle, convID, taskWorkMessage(task))
+	// The model's own outcome report (advance_task) — consumed once here
+	// (even on the error/cancel paths, so a failed run's report never
+	// leaks into a later re-run).
+	intent, hasIntent := ts.takeTerminalIntent(convID)
 
 	switch {
 	case ctx.Err() != nil:
@@ -187,19 +223,36 @@ func (ts *taskSystem) run(handle, taskID string) {
 		_ = us.TransitionTask(taskID, "in-progress", "canceled")
 	case terr != nil:
 		// Infra/model failure: the task is blocked, and its card status
-		// area (the conversation's last message) says why.
+		// area (the conversation's last message) says why. An infra
+		// failure beats any report the model managed to make (it is
+		// objective).
 		_, _ = us.AppendMessage(convID, roleAssistant, "Task failed: "+terr.Error(), "", "", nil)
 		_ = us.TransitionTask(taskID, "in-progress", "blocked")
 	default:
-		_ = us.TransitionTask(taskID, "in-progress", "done")
+		// The terminal state: the model's report when it made one, the
+		// harness default (done) otherwise.
+		state := "done"
+		if hasIntent {
+			state = intent.state
+		}
+		_ = us.TransitionTask(taskID, "in-progress", state)
 		// The completion summary (audit trail + "what the agent learned"):
-		// the task's final reply, posted to the origin conversation when
-		// one was given (a deleted origin loses it silently — the task
-		// conversation keeps the reply either way).
+		// the task's final reply (its advance_task note, when given,
+		// posted ahead of it), posted to the origin conversation when one
+		// was given (a deleted origin loses it silently — the task
+		// conversation keeps the reply either way). A blocked task posts
+		// too — it is exactly the outcome the origin should see.
 		if origin := task.OriginConversationID; origin != nil && *origin != "" {
 			if _, err := us.GetConversation(*origin); err == nil {
-				_, _ = us.AppendMessage(*origin, roleAssistant,
-					"Task \""+task.Title+"\" is complete:\n\n"+reply, "", "", nil)
+				summary := reply
+				if intent.note != "" {
+					summary = intent.note + "\n\n" + reply
+				}
+				framing := "Task \"" + task.Title + "\" is complete:"
+				if state == "blocked" {
+					framing = "Task \"" + task.Title + "\" is blocked:"
+				}
+				_, _ = us.AppendMessage(*origin, roleAssistant, framing+"\n\n"+summary, "", "", nil)
 			}
 		}
 	}
@@ -212,7 +265,9 @@ func taskWorkMessage(task *store.Task) string {
 	var b strings.Builder
 	b.WriteString("You are working a background task to completion.\n\n")
 	b.WriteString("Task: " + task.Title + "\n" + task.Description + "\n\n")
-	b.WriteString("Work it with your normal tools. Your final reply is recorded as the task's completion summary")
+	b.WriteString("Work it with your normal tools. When you know how it ended, call advance_task to report it")
+	b.WriteString(" (state \"done\", or \"blocked\" with a note on what is missing or stuck) — the task settles on that report. ")
+	b.WriteString("Your final reply is recorded as the task's completion summary")
 	if task.OriginConversationID != nil && *task.OriginConversationID != "" {
 		b.WriteString(" and posted to the conversation the task was created from, for the user's audit trail")
 	}

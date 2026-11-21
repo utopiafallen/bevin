@@ -423,3 +423,239 @@ func TestTaskSpawnValidation(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// toolCallProvider queues whole Results per call — a tool call first, then
+// the final text — so tests can drive the advance_task report path (the
+// plain fakeProvider only answers with text).
+type toolCallProvider struct {
+	mu      sync.Mutex
+	calls   int
+	results []provider.Result
+	errs    []error // per-call index; a non-nil entry makes that call fail
+}
+
+func (p *toolCallProvider) Name() string { return "tcall" }
+
+func (p *toolCallProvider) Chat(_ context.Context, _ string, _ provider.ChatRequest) (*provider.Result, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := p.calls
+	p.calls++
+	if i < len(p.errs) && p.errs[i] != nil {
+		return nil, p.errs[i]
+	}
+	if i < len(p.results) {
+		return &p.results[i], nil
+	}
+	return &provider.Result{Text: "ok"}, nil
+}
+
+func (p *toolCallProvider) Stream(_ context.Context, _ string, _ provider.ChatRequest, _ func(provider.Chunk) error) (*provider.Result, error) {
+	return p.Chat(context.Background(), "", provider.ChatRequest{})
+}
+
+func (p *toolCallProvider) Models(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
+
+func (p *toolCallProvider) Embed(context.Context, string, []string) ([][]float32, error) {
+	return nil, nil
+}
+
+func advanceCall(args string) provider.Result {
+	return provider.Result{ToolCalls: []provider.ToolCall{{ID: "c1", Name: "advance_task", Arguments: args}}}
+}
+
+// TestTaskAdvanceBlocked: the model reports its task blocked (with a note);
+// the task settles BLOCKED — not done — and the origin receives the blocked
+// summary (note + final reply), the audit trail of why it needs attention.
+func TestTaskAdvanceBlocked(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	p := &toolCallProvider{results: []provider.Result{
+		advanceCall(`{"state":"blocked","note":"the archive API key is not configured"}`),
+		{Text: "I could not finish: the archive API key is missing."},
+	}}
+	a.providers["m1"] = p
+
+	origin, err := a.CreateConversation(context.Background(), "u1", "origin", "", "")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
+		Title: "fetch the archive", Description: "Pull the archive export.", OriginConvID: origin,
+	})
+	if err != nil {
+		t.Fatalf("SpawnTask: %v", err)
+	}
+	waitTaskState(t, a, "u1", task.ID, "blocked")
+
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	omsgs, err := us.ListMessages(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(omsgs) != 1 {
+		t.Fatalf("origin has %d messages, want 1 (the blocked summary)", len(omsgs))
+	}
+	s := omsgs[0]
+	if s.Role != roleAssistant || !contains(s.Content, `Task "fetch the archive" is blocked:`) ||
+		!contains(s.Content, "the archive API key is not configured") ||
+		!contains(s.Content, "I could not finish") {
+		t.Fatalf("origin message = %+v, want the blocked summary (framing + note + reply)", s)
+	}
+}
+
+// TestTaskAdvanceDone: the model reports done (with a note) — the task
+// settles done and the origin gets the complete summary (note ahead of the
+// final reply).
+func TestTaskAdvanceDone(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	p := &toolCallProvider{results: []provider.Result{
+		advanceCall(`{"state":"done","note":"archived 12 items"}`),
+		{Text: "Archive pull finished; 12 items stored."},
+	}}
+	a.providers["m1"] = p
+
+	origin, err := a.CreateConversation(context.Background(), "u1", "origin", "", "")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
+		Title: "pull the archive", Description: "Pull the archive export.", OriginConvID: origin,
+	})
+	if err != nil {
+		t.Fatalf("SpawnTask: %v", err)
+	}
+	waitTaskState(t, a, "u1", task.ID, "done")
+
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	omsgs, err := us.ListMessages(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(omsgs) != 1 {
+		t.Fatalf("origin has %d messages, want 1", len(omsgs))
+	}
+	s := omsgs[0]
+	if !contains(s.Content, `Task "pull the archive" is complete:`) || !contains(s.Content, "archived 12 items") || !contains(s.Content, "12 items stored") {
+		t.Fatalf("origin message = %+v, want the complete summary (note + reply)", s)
+	}
+}
+
+// TestTaskAdvanceIgnoredOnInfraError: the model reports done, then the model
+// fails — the objective infra failure wins: the task settles blocked, and
+// the (failed) run's report does not leak into anything.
+func TestTaskAdvanceIgnoredOnInfraError(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	p := &toolCallProvider{
+		results: []provider.Result{advanceCall(`{"state":"done","note":"almost"}`)},
+		errs:    []error{nil, errors.New("model exploded")},
+	}
+	a.providers["m1"] = p
+
+	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
+		Title: "half done", Description: "the model dies on the second call",
+	})
+	if err != nil {
+		t.Fatalf("SpawnTask: %v", err)
+	}
+	blocked := waitTaskState(t, a, "u1", task.ID, "blocked")
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := us.ListMessages(*blocked.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := msgs[len(msgs)-1]
+	if last.Role != roleAssistant || !contains(last.Content, "Task failed:") {
+		t.Fatalf("card status (last message) = %+v, want the failure recorded (the done report must not win)", last)
+	}
+}
+
+// TestAdvanceTaskScoping: outside a task conversation the tool refuses
+// (structured, model-readable) and the wire never offers it; in a task's
+// owned conversation the wire offers it and the report is accepted.
+func TestAdvanceTaskScoping(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	tool, ok := a.tools.Get("advance_task")
+	if !ok {
+		t.Fatal("advance_task is not registered")
+	}
+	// A plain chat conversation: the wire filters the tool out, and a
+	// direct call (the model imitating it from history) is refused.
+	chat, err := a.CreateConversation(context.Background(), "u1", "chat", "", "")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	var offered bool
+	for _, wt := range a.wireTools(nil) {
+		if wt.Name == "advance_task" {
+			offered = true
+		}
+	}
+	if offered {
+		t.Fatal("advance_task offered to a non-task conversation")
+	}
+	res, err := tool.Execute(context.WithValue(context.Background(), ctxConversationKey, chat), "u1", []byte(`{"state":"done"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !contains(res, "not a task") {
+		t.Fatalf("chat-conversation call result = %q, want the not-a-task refusal", res)
+	}
+	// A task-owned conversation: the wire offers it (the reverse link is
+	// stamped by SetTaskConversation).
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := us.CreateTask("t", "d", "todo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskConv, err := a.CreateConversation(context.Background(), "u1", "task: t", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := us.SetTaskConversation(task.ID, taskConv); err != nil {
+		t.Fatal(err)
+	}
+	conv, err := us.GetConversation(taskConv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.OwnerTaskID == nil || *conv.OwnerTaskID != task.ID {
+		t.Fatalf("owned conversation owner_task_id = %v, want %s (the reverse link)", conv.OwnerTaskID, task.ID)
+	}
+	offered = false
+	for _, wt := range a.wireTools(conv.OwnerTaskID) {
+		if wt.Name == "advance_task" {
+			offered = true
+		}
+	}
+	if !offered {
+		t.Fatal("advance_task not offered to a task-owned conversation")
+	}
+	res, err = tool.Execute(context.WithValue(context.Background(), ctxConversationKey, taskConv), "u1", []byte(`{"state":"blocked","note":"stuck"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !contains(res, "settles as blocked") {
+		t.Fatalf("task-conversation call result = %q, want the recorded report", res)
+	}
+	// A bad state is refused, not recorded.
+	res, _ = tool.Execute(context.WithValue(context.Background(), ctxConversationKey, taskConv), "u1", []byte(`{"state":"canceled"}`))
+	if !contains(res, `"done" or "blocked"`) {
+		t.Fatalf("bad-state result = %q, want the structured refusal", res)
+	}
+}

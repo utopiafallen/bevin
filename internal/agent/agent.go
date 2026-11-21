@@ -149,6 +149,13 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerAgentMessageTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register agent_message: %w", err)
 	}
+	// advance_task (the minimal task system): the model's own report of how
+	// its task ended (done/blocked). Registered for every conversation like
+	// the others; OFFERED only in a task's owned conversation (the wire
+	// filter keys on the conversation's owner_task_id — see wireTools).
+	if err := registerAdvanceTaskTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register advance_task: %w", err)
+	}
 	// The turn-start awareness state (the roster/nudge/queue delivery —
 	// in-memory only: a restart re-announces the full roster, which is
 	// correct for a cold start).
@@ -178,24 +185,28 @@ func (a *Agent) webSearchState() config.WebSearch {
 // is FILTERED OUT while the live config has it disabled/unconfigured (a
 // turn never offers a tool it can't use — the model then has no reason to
 // call it, and the description note below tells it how to search anyway),
-// and the web_browser description carries a per-turn SEARCH note matching
-// the web_search state (prefer web_search when it is on the wire; when it
-// is not, search-engine tabs — user directive: the agent uses web_browser
-// to search). The registry entries are untouched — the wire copies carry
-// the note (Wire() returns fresh copies each turn).
-func (a *Agent) wireTools() []provider.Tool {
+// advance_task is filtered out of every NON-task conversation (it can only
+// report the outcome of the task the conversation is working — one offered
+// in a chat conversation could only be refused), and the web_browser
+// description carries a per-turn SEARCH note matching the web_search state
+// (prefer web_search when it is on the wire; when it is not, search-engine
+// tabs — user directive: the agent uses web_browser to search). The
+// registry entries are untouched — the wire copies carry the note (Wire()
+// returns fresh copies each turn).
+func (a *Agent) wireTools(ownerTaskID *string) []provider.Tool {
 	wsOn := a.webSearchState().Configured()
 	list := a.tools.Wire()
-	if !wsOn {
-		filtered := make([]provider.Tool, 0, len(list))
-		for _, t := range list {
-			if t.Name == "web_search" {
-				continue
-			}
-			filtered = append(filtered, t)
+	filtered := make([]provider.Tool, 0, len(list))
+	for _, t := range list {
+		if !wsOn && t.Name == "web_search" {
+			continue
 		}
-		list = filtered
+		if ownerTaskID == nil && t.Name == "advance_task" {
+			continue
+		}
+		filtered = append(filtered, t)
 	}
+	list = filtered
 	for i := range list {
 		if list[i].Name == "web_browser" {
 			list[i].Description = webBrowserWireDescription(wsOn)
@@ -1106,9 +1117,10 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// the tool results showed (see the np state below). With an empty registry
 	// the loop body never fires and the turn is exactly today's single call.
 	// wireTools (not tools.Wire) builds the per-turn list: web_search is
-	// filtered out while disabled/unconfigured, and web_browser carries the
-	// matching search note (see wireTools).
-	wireTools := a.wireTools()
+	// filtered out while disabled/unconfigured, advance_task out of
+	// non-task conversations, and web_browser carries the matching search
+	// note (see wireTools).
+	wireTools := a.wireTools(conv.OwnerTaskID)
 	var res *provider.Result
 	// The no-progress / stuck-detection state (the design log's TOOL LOOP
 	// NO-PROGRESS section): REPLACES the hard maxToolIterations cap. The turn

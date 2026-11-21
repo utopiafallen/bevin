@@ -123,14 +123,33 @@ func (s *UserStore) SetTaskState(id, state string) error {
 	return nil
 }
 
-// SetTaskConversation links the task to the conversation it owns.
+// SetTaskConversation links the task to the conversation it owns — and
+// stamps the conversation's owner_task_id, the reverse of the 1:1 link
+// (the conversation is KNOWN to be this task's; advance_task's scoping and
+// the per-turn wire filter key on it). A clear un-stamps only this task's
+// own conversation.
 func (s *UserStore) SetTaskConversation(id, convID string) error {
 	var v *string
 	if convID != "" {
 		v = &convID
 	}
-	_, err := s.db.Exec(`UPDATE tasks SET conversation_id = ?, updated_at = ? WHERE id = ?`, v, nowUTC(), id)
-	return err
+	var oldConv string
+	if err := s.db.QueryRow(`SELECT COALESCE(conversation_id, '') FROM tasks WHERE id = ?`, id).Scan(&oldConv); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET conversation_id = ?, updated_at = ? WHERE id = ?`, v, nowUTC(), id); err != nil {
+		return err
+	}
+	if convID != "" {
+		if _, err := s.db.Exec(`UPDATE conversations SET owner_task_id = ? WHERE id = ?`, id, convID); err != nil {
+			return err
+		}
+	} else if oldConv != "" {
+		if _, err := s.db.Exec(`UPDATE conversations SET owner_task_id = NULL WHERE id = ? AND owner_task_id = ?`, oldConv, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetTaskOrigin records the conversation a task was created from (the

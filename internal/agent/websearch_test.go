@@ -55,7 +55,7 @@ func TestWebSearchNotEnabled(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
 
-	names, descs := wireToolNames(a.wireTools())
+	names, descs := wireToolNames(a.wireTools(nil))
 	if names["web_search"] {
 		t.Fatal("web_search must not be offered while the admin has it disabled")
 	}
@@ -116,7 +116,7 @@ func TestWebSearchEnabled(t *testing.T) {
 	defer func() { newSearchProvider = orig }()
 
 	// The wire offers web_search + the web_browser note flips.
-	names, descs := wireToolNames(a.wireTools())
+	names, descs := wireToolNames(a.wireTools(nil))
 	if !names["web_search"] {
 		t.Fatal("web_search must be offered when the admin has it enabled")
 	}
