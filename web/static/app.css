@@ -219,7 +219,14 @@ body.panel-chats .panel { display: flex; }
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
 }
-#chat #message { flex: 1; }
+#chat #message {
+  flex: 1;
+  /* The composer grows with its content (JS auto-resize on input), up to
+     the fixed cap below, then scrolls; word-wrap is the textarea default. */
+  resize: none;
+  overflow-y: auto;
+  max-height: 180px;
+}
 
 /* The context controls: the conversation's model + reasoning effort + the
    context-window usage bar, sitting above the composer. */

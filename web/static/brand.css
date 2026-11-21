@@ -218,8 +218,8 @@ input:focus, textarea:focus, select:focus {
 @keyframes thinking-blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
 #chatLog { max-height: 26rem; overflow-y: auto; padding-right: 0.25rem; }
 
-/* ---- markdown inside assistant bubbles (web/static/markdown.js) ---- */
-.msg-assistant .md-bubble { white-space: normal; }
+/* ---- markdown inside message bubbles (web/static/markdown.js) ---- */
+.msg .md-bubble { white-space: normal; }
 .md-bubble p { margin: 0 0 0.5em; }
 .md-bubble p:last-child, .md-tail p:last-child { margin-bottom: 0; }
 .md-bubble h1, .md-bubble h2, .md-bubble h3, .md-bubble h4,

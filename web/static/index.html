@@ -163,7 +163,10 @@
               </div>
             </div>
             <form id="chat">
-              <input id="message" placeholder="Say something&hellip;" autocomplete="off">
+              <!-- The composer is a textarea (not an input): Enter sends,
+                   Shift+Enter inserts a newline; it word-wraps and grows
+                   down the page up to a fixed cap, then scrolls. -->
+              <textarea id="message" rows="1" placeholder="Say something&hellip;" autocomplete="off"></textarea>
               <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
             </form>
           </section>
@@ -383,13 +386,16 @@
     function addUserMsg(text, iso) {
       var m = document.createElement("div");
       m.className = "msg msg-user";
-      m.innerHTML = '<div class="msg-head"><span class="who"></span><span class="when"></span></div><span class="bubble"></span>';
+      m.innerHTML = '<div class="msg-head"><span class="who"></span><span class="when"></span></div><div class="bubble md-bubble"></div>';
       m.querySelector(".who").textContent = (me && (me.display_name || me.handle)) || "you";
       var d = new Date(iso);
       var when = m.querySelector(".when");
       when.textContent = fmtWhen(d);
       when.title = d.toUTCString(); // full UTC on hover
-      m.querySelector(".bubble").textContent = text;
+      // User messages render as markdown (same parser + styles as the
+      // assistant's bubbles): a single newline is a line break (chat
+      // style), so a Shift+Enter line shows as a line.
+      BevinMD.render(text, m.querySelector(".bubble"));
       $("chatLog").appendChild(m);
       $("chatLog").scrollTop = $("chatLog").scrollHeight;
     }
@@ -829,10 +835,12 @@
       // the user can retry, instead of crashing into a stuck state.
       if (!$("chatLog")) return;
       input.value = "";
+      fitMsgInput(); // back to one line (a programmatic clear fires no input event)
       try {
         addUserMsg(text, new Date().toISOString());
       } catch (e) {
         input.value = text;
+        fitMsgInput();
         return;
       }
       sending = true;
@@ -857,7 +865,10 @@
         if (wasAtBottom) scrollChat();
         asst.t0 = 0;
         if (!convID) {
-          var title = text.length > 40 ? text.slice(0, 40) + "…" : text;
+          // The title comes from the FIRST line (a multi-line message
+          // would otherwise embed newlines in the conversation list).
+          var firstLine = text.split("\n")[0];
+          var title = firstLine.length > 40 ? firstLine.slice(0, 40) + "…" : firstLine;
           var effortSel = $("effortSelect");
           var cr = await fetch("/api/conversations", {
             method: "POST",
@@ -1621,6 +1632,27 @@
       e.preventDefault();
       sendChat();
     });
+
+    // Composer: Enter sends, Shift+Enter inserts a newline (the native
+    // textarea behavior — a bare input could not hold lines at all).
+    $("message").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        $("chat").requestSubmit();
+      }
+    });
+    // The composer grows with its content up to the CSS cap, then scrolls
+    // (max-height on #chat #message clamps; overflow-y: auto scrolls the
+    // overflow). scrollHeight is content+padding, so the border-box height
+    // needs the border widths added back — without that, the last line
+    // clips by 2px and a scrollbar appears early.
+    function fitMsgInput() {
+      var el = $("message");
+      el.style.height = "auto";
+      var cs = getComputedStyle(el);
+      el.style.height = el.scrollHeight + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + "px";
+    }
+    $("message").addEventListener("input", fitMsgInput);
 
     // ---- workspaces: the user's folders on the server (the user's
     // persistent working state — execution is the agent's job, not a
