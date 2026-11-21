@@ -154,7 +154,10 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// the others; OFFERED only in a task's owned conversation (the wire
 	// filter keys on the conversation's owner_task_id — see wireTools).
 	if err := registerAdvanceTaskTool(a.tools, a); err != nil {
-		return nil, fmt.Errorf("register advance_task: %w", err)
+		return nil, fmt.Errorf("register the advance task tool: %w", err)
+	}
+	if err := registerSetProfileTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register the set profile tool: %w", err)
 	}
 	// The turn-start awareness state (the roster/nudge/queue delivery —
 	// in-memory only: a restart re-announces the full roster, which is
@@ -193,15 +196,31 @@ func (a *Agent) webSearchState() config.WebSearch {
 // tabs — user directive: the agent uses web_browser to search). The
 // registry entries are untouched — the wire copies carry the note (Wire()
 // returns fresh copies each turn).
-func (a *Agent) wireTools(ownerTaskID *string) []provider.Tool {
+func (a *Agent) wireTools(us *store.UserStore, conv *store.Conversation) []provider.Tool {
 	wsOn := a.webSearchState().Configured()
 	list := a.tools.Wire()
+	var ownerTaskID *string
+	curationConv := false
+	if conv != nil {
+		ownerTaskID = conv.OwnerTaskID
+		// set_profile is the curation task's sole-writer surface: offered
+		// ONLY in the curation task's own conversation (one store lookup,
+		// and only in task conversations — the common case is one nil).
+		if ownerTaskID != nil && us != nil {
+			if t, err := us.GetTask(*ownerTaskID); err == nil && t.Title == CurationTaskTitle {
+				curationConv = true
+			}
+		}
+	}
 	filtered := make([]provider.Tool, 0, len(list))
 	for _, t := range list {
 		if !wsOn && t.Name == "web_search" {
 			continue
 		}
 		if ownerTaskID == nil && t.Name == "advance_task" {
+			continue
+		}
+		if !curationConv && t.Name == "set_profile" {
 			continue
 		}
 		filtered = append(filtered, t)
@@ -1141,7 +1160,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// filtered out while disabled/unconfigured, advance_task out of
 	// non-task conversations, and web_browser carries the matching search
 	// note (see wireTools).
-	wireTools := a.wireTools(conv.OwnerTaskID)
+	wireTools := a.wireTools(us, conv)
 	var res *provider.Result
 	// The no-progress / stuck-detection state (the design log's TOOL LOOP
 	// NO-PROGRESS section): REPLACES the hard maxToolIterations cap. The turn

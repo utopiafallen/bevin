@@ -8,17 +8,32 @@ import (
 
 // Task is a P6 row (a user-level kanban item; owns one conversation).
 type Task struct {
-	ID             string  `json:"id"`
-	Title          string  `json:"title"`
-	Description    string  `json:"description"`
-	State          string  `json:"state"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	State       string `json:"state"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	// ConversationID is the task's owned conversation. A todo task may not
+	// have one yet: the conversation is created at DISPATCH, with the
+	// resolved model (the task model rule — no explicit target means any
+	// available main model, which is only knowable then).
 	ConversationID *string `json:"conversation_id,omitempty"`
 	// OriginConversationID is the conversation the task was created from
-	// (v2): its completion summary is posted there. NULL = no origin.
-	OriginConversationID *string  `json:"origin_conversation_id,omitempty"`
-	Dependencies         []string `json:"depends_on,omitempty"`
+	// (v2): its completion summary is posted there. NULL = no origin. The
+	// origin never implies a model (the task model rule).
+	OriginConversationID *string `json:"origin_conversation_id,omitempty"`
+	// Model is an EXPLICIT model target (nullable): the task runs on it.
+	// NULL = any available main model, resolved at dispatch (least-loaded
+	// pool). Updatable while the task is todo (SetTaskModel) — an override
+	// made later applies at the next dispatch.
+	Model *string `json:"model,omitempty"`
+	// MemoryStart/MemoryEnd: the curation task's CLOSED range of memory
+	// ids (fixed at spawn; NULL on non-curation tasks). The watermark is
+	// the max MemoryEnd of DONE curation tasks.
+	MemoryStart  *int64   `json:"memory_start,omitempty"`
+	MemoryEnd    *int64   `json:"memory_end,omitempty"`
+	Dependencies []string `json:"depends_on,omitempty"`
 }
 
 // The task states. "canceled" (code-only; the columns are unconstrained
@@ -32,20 +47,20 @@ var taskTerminal = map[string]bool{"done": true, "blocked": true, "canceled": tr
 // TaskStateValid reports whether s is a known task state.
 func TaskStateValid(s string) bool { return taskStates[s] }
 
-const taskCols = `id, title, description, state, created_at, updated_at, conversation_id, origin_conversation_id`
+const taskCols = `id, title, description, state, created_at, updated_at, conversation_id, origin_conversation_id, model, memory_start, memory_end`
 
 func scanTask(rs interface{ Scan(...any) error }, t *Task) error {
-	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID, &t.OriginConversationID)
+	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID, &t.OriginConversationID, &t.Model, &t.MemoryStart, &t.MemoryEnd)
 }
 
-func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, deps []string) (*Task, error) {
+func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, deps []string, model *string, memStart, memEnd *int64) (*Task, error) {
 	if !taskStates[state] {
 		return nil, fmt.Errorf("invalid task state %q", state)
 	}
 	id := newID()
 	now := nowUTC()
-	if _, err := tx.Exec(`INSERT INTO tasks (id, title, description, state, created_at, updated_at) VALUES (?,?,?,?,?,?)`,
-		id, title, description, state, now, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO tasks (id, title, description, state, created_at, updated_at, model, memory_start, memory_end) VALUES (?,?,?,?,?,?,?,?,?)`,
+		id, title, description, state, now, now, model, memStart, memEnd); err != nil {
 		return nil, err
 	}
 	for _, p := range deps {
@@ -53,21 +68,40 @@ func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, d
 			return nil, err
 		}
 	}
-	return &Task{ID: id, Title: title, Description: description, State: state, CreatedAt: now, UpdatedAt: now, Dependencies: deps}, nil
+	return &Task{ID: id, Title: title, Description: description, State: state, CreatedAt: now, UpdatedAt: now, Model: model, MemoryStart: memStart, MemoryEnd: memEnd, Dependencies: deps}, nil
 }
 
 // CreateTask creates a task with (0..N) parent dependencies. A cycle-forming
-// dependency is rejected.
+// dependency is rejected. (The plain creation path — no model target, no
+// curation range: the task model rule's "any available main model" applies.)
 func (s *UserStore) CreateTask(title, description, state string, deps []string) (*Task, error) {
-	if state == "" {
-		state = "todo"
+	return s.CreateTaskNew(TaskNew{Title: title, Description: description, State: state, Deps: deps})
+}
+
+// TaskNew is the full creation request (CreateTask's zero-valued
+// convenience covers the plain case).
+type TaskNew struct {
+	Title       string
+	Description string
+	State       string // "" = todo
+	Deps        []string
+	Model       *string // explicit model target (nil = any available main model)
+	MemStart    *int64  // curation range, inclusive (nil on non-curation tasks)
+	MemEnd      *int64
+}
+
+// CreateTaskNew creates a task with an optional explicit model target and
+// curation range. A cycle-forming dependency is rejected.
+func (s *UserStore) CreateTaskNew(n TaskNew) (*Task, error) {
+	if n.State == "" {
+		n.State = "todo"
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	t, err := s.createTaskTx(tx, title, description, state, deps)
+	t, err := s.createTaskTx(tx, n.Title, n.Description, n.State, n.Deps, n.Model, n.MemStart, n.MemEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +195,44 @@ func (s *UserStore) SetTaskOrigin(id, convID string) error {
 	}
 	_, err := s.db.Exec(`UPDATE tasks SET origin_conversation_id = ?, updated_at = ? WHERE id = ?`, v, nowUTC(), id)
 	return err
+}
+
+// SetTaskModel sets the task's EXPLICIT model target (the task model rule's
+// override — "during its lifetime"): only while the task is todo, since the
+// running turn already holds its model (an override made later applies at
+// the next dispatch, e.g. after a boot reset). An empty model clears the
+// target (back to any available main model).
+func (s *UserStore) SetTaskModel(id, model string) error {
+	var v *string
+	if model != "" {
+		v = &model
+	}
+	res, err := s.db.Exec(`UPDATE tasks SET model = ?, updated_at = ? WHERE id = ? AND state = 'todo'`, v, nowUTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CurationWatermark returns the highest memory id a DONE curation task
+// covered (0 when none has completed): the anchor of the growth trigger.
+// Blocked/canceled runs do NOT advance it (their range is retried).
+func (s *UserStore) CurationWatermark(title string) (int64, error) {
+	var w int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(memory_end), 0) FROM tasks WHERE title = ? AND state = 'done' AND memory_end IS NOT NULL`, title).Scan(&w)
+	return w, err
+}
+
+// HasActiveCuration reports whether a curation task is already queued or
+// running (the spawn guard: one curation at a time; a BLOCKED one is
+// terminal, so the next growth crossing spawns a fresh attempt).
+func (s *UserStore) HasActiveCuration(title string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE title = ? AND state IN ('todo', 'in-progress')`, title).Scan(&n)
+	return n > 0, err
 }
 
 // TransitionTask is the compare-and-swap state change: it flips the task

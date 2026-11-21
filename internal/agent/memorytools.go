@@ -323,6 +323,9 @@ func (a *Agent) execRemember(ctx context.Context, handle string, args json.RawMe
 			_ = us.SetMemoryProvenance(created.ID, []int64{latest})
 		}
 	}
+	// The curation growth trigger (the memory store just grew by one row —
+	// this is the only live growth path; see curation.go).
+	a.maybeSpawnCuration(ctx, handle)
 	if p.SupersedeID != nil {
 		old, err := us.GetMemory(*p.SupersedeID)
 		if err != nil {

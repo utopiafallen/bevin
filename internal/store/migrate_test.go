@@ -106,6 +106,15 @@ func checkPostMigration(t *testing.T, dir string) {
 	if n != 1 {
 		t.Fatal("tasks.origin_conversation_id column missing (the v4 step did not apply)")
 	}
+	// v5: the task model-targeting + curation-range columns exist.
+	for _, col := range []string{"model", "memory_start", "memory_end"} {
+		if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?`, col).Scan(&n); err != nil {
+			t.Fatalf("tasks %s column not queryable: %v", col, err)
+		}
+		if n != 1 {
+			t.Fatalf("tasks.%s column missing (the v5 step did not apply)", col)
+		}
+	}
 }
 
 // TestMigrationsFreshDB: a brand-new file gets the base version plus every

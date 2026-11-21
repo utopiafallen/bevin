@@ -31,10 +31,18 @@ type TaskSpec struct {
 	Title       string // the task's title (the owned conversation is titled "task: <Title>")
 	Description string // the unit of work the agent works done
 	// OriginConvID is the conversation the task was created from (optional):
-	// the task conversation takes its model, and the completion summary is
-	// posted there. Empty = a harness task with no origin (the summary
-	// stays in the task conversation; the user's default model applies).
+	// the completion summary is posted there (the audit trail). It never
+	// implies a model (the task model rule).
 	OriginConvID string
+	// Model is an EXPLICIT model target (the task model rule's override at
+	// creation). Empty = ANY AVAILABLE MAIN MODEL, resolved at dispatch
+	// (the least-loaded pool — availability is only meaningful then).
+	Model string
+	// MemStart/MemEnd: the curation task's CLOSED range of memory ids
+	// (inclusive; 0 = unset, the non-curation case). Fixed at spawn —
+	// memories arriving mid-run wait for the next pass.
+	MemStart int64
+	MemEnd   int64
 }
 
 // taskSystem is the Agent's tier-2 dispatcher: one goroutine per task, each
@@ -83,10 +91,16 @@ func (ts *taskSystem) takeTerminalIntent(convID string) (terminalIntent, bool) {
 	return in, ok
 }
 
-// SpawnTask creates a task + its owned conversation and dispatches it
-// (non-blocking: the run happens on its own goroutine through the model's
-// slot pool). It returns the created task — already todo, possibly already
-// flipped by the time the caller reads it back.
+// SpawnTask creates the task row and dispatches it (non-blocking: the run
+// happens on its own goroutine through the model's slot pool). It returns
+// the created task — already todo, possibly already flipped by the time the
+// caller reads it back.
+//
+// The owned conversation is NOT created here: model resolution happens at
+// DISPATCH (the task model rule — no explicit target means any available
+// main model, which is only knowable when the task actually starts), and the
+// conversation is created with the resolved model at that point. A todo
+// task is therefore a row in tasks, not yet a conversation.
 func (a *Agent) SpawnTask(ctx context.Context, handle string, spec TaskSpec) (*store.Task, error) {
 	if spec.Title == "" || spec.Description == "" {
 		return nil, fmt.Errorf("a task needs a title and a description")
@@ -95,25 +109,33 @@ func (a *Agent) SpawnTask(ctx context.Context, handle string, spec TaskSpec) (*s
 	if err != nil {
 		return nil, err
 	}
-	// Validate the origin (and take its model for the task conversation).
-	originModel := ""
+	// Validate the origin (the summary's destination — not a model source).
 	if spec.OriginConvID != "" {
-		conv, err := us.GetConversation(spec.OriginConvID)
-		if err != nil {
+		if _, err := us.GetConversation(spec.OriginConvID); err != nil {
 			return nil, fmt.Errorf("origin conversation: %w", err)
 		}
-		originModel = conv.ActiveModelID
 	}
-	task, err := us.CreateTask(spec.Title, spec.Description, "todo", nil)
+	// An explicit model target must name an available main model (a typo
+	// here would surface as a blocked task at dispatch — reject it at
+	// spawn instead).
+	if spec.Model != "" && !a.modelAvailable(spec.Model) {
+		return nil, fmt.Errorf("unknown or unavailable model %q", spec.Model)
+	}
+	var model *string
+	var memStart, memEnd *int64
+	if spec.Model != "" {
+		m := spec.Model
+		model = &m
+	}
+	if spec.MemStart > 0 && spec.MemEnd >= spec.MemStart {
+		s, e := spec.MemStart, spec.MemEnd
+		memStart, memEnd = &s, &e
+	}
+	task, err := us.CreateTaskNew(store.TaskNew{
+		Title: spec.Title, Description: spec.Description,
+		Model: model, MemStart: memStart, MemEnd: memEnd,
+	})
 	if err != nil {
-		return nil, err
-	}
-	convID, err := a.CreateConversation(ctx, handle, "task: "+spec.Title, originModel, "")
-	if err != nil {
-		_ = us.SetTaskState(task.ID, "blocked") // no owned conversation: it can never run
-		return nil, fmt.Errorf("create the task conversation: %w", err)
-	}
-	if err := us.SetTaskConversation(task.ID, convID); err != nil {
 		return nil, err
 	}
 	if spec.OriginConvID != "" {
@@ -168,10 +190,56 @@ func (ts *taskSystem) dispatch(handle string, task *store.Task) {
 	go ts.run(handle, task.ID)
 }
 
-// run is the task's lifecycle: wait for a slot in the task's model's pool,
-// run the work as a normal agent turn in the owned conversation, and settle
-// the terminal state (done / blocked / canceled) + post the completion
-// summary to the origin when one exists.
+// modelAvailable reports whether modelID is one of the user's available
+// main models (admin-enabled and not auto-disabled).
+func (a *Agent) modelAvailable(modelID string) bool {
+	for _, m := range a.Models() {
+		if m.ID == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+// pickAnyMainModel is the task model rule's default: no explicit target →
+// ANY available main model (the task is background work; any main model's
+// idle slot is fine). The LEAST-LOADED pool wins (busy slots + queued jobs;
+// a model with no pool yet is load 0), ties broken by config order. "" when
+// no model is available (the caller blocks the task).
+func (ts *taskSystem) pickAnyMainModel() string {
+	a := ts.a
+	models := a.Models()
+	if len(models) == 0 {
+		return ""
+	}
+	load := a.sched.Load()
+	bestID := ""
+	bestLoad := 0
+	for _, m := range models {
+		l := load[m.ID] // absent pool = no work seen = load 0
+		cur := l.Busy + len(l.Waiting)
+		if bestID == "" || cur < bestLoad {
+			bestID, bestLoad = m.ID, cur
+		}
+	}
+	return bestID
+}
+
+// resolveTaskModel applies the task model rule at dispatch: the explicit
+// target when the task carries one (the origin never implies a model), else
+// any available main model.
+func (ts *taskSystem) resolveTaskModel(task *store.Task) string {
+	if task.Model != nil && *task.Model != "" {
+		return *task.Model
+	}
+	return ts.pickAnyMainModel()
+}
+
+// run is the task's lifecycle: CAS the start, resolve the model + create
+// the owned conversation (dispatch time — see the task model rule), run the
+// work as a normal agent turn, and settle the terminal state (done /
+// blocked / canceled) + post the completion summary to the origin when one
+// exists.
 func (ts *taskSystem) run(handle, taskID string) {
 	a := ts.a
 	us, err := a.userStore(handle)
@@ -187,10 +255,6 @@ func (ts *taskSystem) run(handle, taskID string) {
 	}
 	if ok, err := us.TaskDepsDone(taskID); err != nil || !ok {
 		return // not eligible yet (v1 tasks have no parents — future-proofing)
-	}
-	if task.ConversationID == nil || *task.ConversationID == "" {
-		_ = us.SetTaskState(taskID, "blocked") // no owned conversation: it can't run
-		return
 	}
 	// CAS the start: a StopTask that landed between the re-read and this
 	// point already set canceled, and this flip simply loses (the task is
@@ -208,8 +272,35 @@ func (ts *taskSystem) run(handle, taskID string) {
 		ts.mu.Unlock()
 		cancel()
 	}()
-
-	convID := *task.ConversationID
+	// The owned conversation: kept when a re-run (boot reset) already has
+	// one; otherwise created NOW with the dispatch-time resolved model
+	// (the task model rule — see resolveTaskModel). A creation failure
+	// settles the task blocked (the in-progress→blocked CAS loses cleanly
+	// to a racing cancel).
+	fail := func() {
+		_ = us.TransitionTask(taskID, "in-progress", "blocked")
+	}
+	convID := ""
+	switch {
+	case task.ConversationID != nil && *task.ConversationID != "":
+		convID = *task.ConversationID
+	default:
+		modelID := ts.resolveTaskModel(task)
+		if modelID == "" {
+			fail() // no available model: it can't run
+			return
+		}
+		id, err := a.CreateConversation(ctx, handle, "task: "+task.Title, modelID, "")
+		if err != nil {
+			fail()
+			return
+		}
+		if err := us.SetTaskConversation(taskID, id); err != nil {
+			fail()
+			return
+		}
+		convID = id
+	}
 	_, reply, terr := a.Turn(ctx, handle, convID, taskWorkMessage(task))
 	// The model's own outcome report (advance_task) — consumed once here
 	// (even on the error/cancel paths, so a failed run's report never

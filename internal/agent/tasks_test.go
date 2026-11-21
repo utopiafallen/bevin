@@ -103,14 +103,16 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 
 // TestTaskSpawnRunsAndCompletes is the core path: the harness spawns a task
 // from an origin conversation; the agent works it to completion in the
-// task's owned conversation (which takes the origin's model); the task
-// settles done and the completion summary (its final reply) is posted to
-// the origin — the audit trail.
+// task's owned conversation (on the task's EXPLICIT model target — the
+// origin's model is not a target by itself); the task settles done and the
+// completion summary (its final reply) is posted to the origin — the audit
+// trail.
 func TestTaskSpawnRunsAndCompletes(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
-	// m2 only: the task must reach the model through the ORIGIN's model
-	// (m2), not the user default (m1, which has no provider here).
+	// The explicit target is m2 (the only model with a provider here);
+	// the origin happens to be on m2 too — the point is that the target
+	// is the task's, not the origin's.
 	fp := &fakeProvider{replies: []string{"I reviewed the day and learned that the user ships on Fridays."}}
 	a.providers["m2"] = fp
 
@@ -120,6 +122,7 @@ func TestTaskSpawnRunsAndCompletes(t *testing.T) {
 	}
 	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
 		Title: "nightly review", Description: "Review the day's conversations.", OriginConvID: origin,
+		Model: "m2",
 	})
 	if err != nil {
 		t.Fatalf("SpawnTask: %v", err)
@@ -132,13 +135,13 @@ func TestTaskSpawnRunsAndCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The owned conversation took the origin's model.
+	// The owned conversation took the task's explicit model target.
 	conv, err := us.GetConversation(*done.ConversationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if conv.ActiveModelID != "m2" {
-		t.Fatalf("task conversation model = %q, want the origin's m2", conv.ActiveModelID)
+		t.Fatalf("task conversation model = %q, want the explicit target m2", conv.ActiveModelID)
 	}
 	// The work ran in the task conversation: the framed work message first,
 	// the reply as the assistant message (a no-progress checkin row may
@@ -178,9 +181,10 @@ func TestTaskSpawnRunsAndCompletes(t *testing.T) {
 	}
 }
 
-// TestTaskNoOriginStaysLocal: a harness task with no origin runs on the
-// user's default model, and its summary stays in the task conversation
-// (nothing is posted anywhere else).
+// TestTaskNoOriginStaysLocal: a harness task with no origin runs on any
+// available main model (m1 here — the config-order tie-break of two
+// idle pools), and its summary stays in the task conversation (nothing is
+// posted anywhere else).
 func TestTaskNoOriginStaysLocal(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -222,10 +226,10 @@ func TestTaskNoOriginStaysLocal(t *testing.T) {
 }
 
 // TestTaskQueuedCancel: with the model's only slot held by an interactive
-// turn, a spawned task is accepted (in-progress — its turn is queued in the
-// pool) but not yet at the model. StopTask cancels it; when the slot frees,
-// the interactive turn finishes and the task never runs (no provider call,
-// no work message).
+// turn, a spawned task that EXPLICITLY targets that model is accepted
+// (in-progress — its turn is queued in the pool) but not yet at the model.
+// StopTask cancels it; when the slot frees, the interactive turn finishes
+// and the task never runs (no provider call for it, no work message).
 func TestTaskQueuedCancel(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -243,8 +247,11 @@ func TestTaskQueuedCancel(t *testing.T) {
 	}()
 	waitFor(t, func() bool { return gp.callCount() >= 1 }, "the interactive turn to hold m1's only slot")
 
+	// Explicit target m1: with the default any-model rule the task would
+	// pick the idle m2 pool and never queue behind the interactive turn.
 	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
 		Title: "queued behind the busy slot", Description: "never reaches the model",
+		Model: "m1",
 	})
 	if err != nil {
 		t.Fatalf("SpawnTask: %v", err)
@@ -406,8 +413,43 @@ func TestTaskBootReset(t *testing.T) {
 	waitTaskState(t, a, "u1", task.ID, "done")
 }
 
-// TestTaskSpawnValidation: spawn refuses empty title/description and an
-// unknown origin conversation.
+// TestTaskModelDefaultIgnoresOrigin: the task model rule — an untargeted
+// task does NOT take its origin conversation's model (the origin is the
+// audit destination, not a target): it runs on any available main model
+// (m1 here — both pools idle, config-order tie-break), while the origin
+// sits on m2.
+func TestTaskModelDefaultIgnoresOrigin(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	a.providers["m1"] = &fakeProvider{replies: []string{"ran on the any-model pick"}}
+	a.providers["m2"] = &fakeProvider{replies: []string{"never used"}}
+
+	origin, err := a.CreateConversation(context.Background(), "u1", "origin", "m2", "")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	task, err := a.SpawnTask(context.Background(), "u1", TaskSpec{
+		Title: "no target", Description: "runs on any available model.", OriginConvID: origin,
+	})
+	if err != nil {
+		t.Fatalf("SpawnTask: %v", err)
+	}
+	done := waitTaskState(t, a, "u1", task.ID, "done")
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := us.GetConversation(*done.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.ActiveModelID != "m1" {
+		t.Fatalf("task conversation model = %q, want the any-model pick m1 (the origin's m2 must not be implied)", conv.ActiveModelID)
+	}
+}
+
+// TestTaskSpawnValidation: spawn refuses empty title/description, an
+// unknown origin conversation, and an unknown/unavailable model target.
 func TestTaskSpawnValidation(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	defer a.Close()
@@ -419,6 +461,9 @@ func TestTaskSpawnValidation(t *testing.T) {
 	}
 	if _, err := a.SpawnTask(context.Background(), "u1", TaskSpec{Title: "t", Description: "x", OriginConvID: "no-such-conversation"}); err == nil {
 		t.Fatal("unknown origin conversation accepted")
+	}
+	if _, err := a.SpawnTask(context.Background(), "u1", TaskSpec{Title: "t", Description: "x", Model: "no-such-model"}); err == nil {
+		t.Fatal("unknown model target accepted")
 	}
 }
 
@@ -598,7 +643,7 @@ func TestAdvanceTaskScoping(t *testing.T) {
 		t.Fatalf("CreateConversation: %v", err)
 	}
 	var offered bool
-	for _, wt := range a.wireTools(nil) {
+	for _, wt := range a.wireTools(nil, nil) {
 		if wt.Name == "advance_task" {
 			offered = true
 		}
@@ -638,7 +683,7 @@ func TestAdvanceTaskScoping(t *testing.T) {
 		t.Fatalf("owned conversation owner_task_id = %v, want %s (the reverse link)", conv.OwnerTaskID, task.ID)
 	}
 	offered = false
-	for _, wt := range a.wireTools(conv.OwnerTaskID) {
+	for _, wt := range a.wireTools(us, conv) {
 		if wt.Name == "advance_task" {
 			offered = true
 		}

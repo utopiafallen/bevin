@@ -61,6 +61,22 @@ CREATE INDEX IF NOT EXISTS idx_am_to ON agent_messages(to_conversation, delivere
 ALTER TABLE tasks ADD COLUMN origin_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL;
 `,
 	},
+	{
+		// v5 (2026-11-21): task model targeting + the curation range (the
+		// CURATION TASK design). tasks.model = an EXPLICIT model target
+		// (the task model rule: no explicit target → any available main
+		// model, resolved at dispatch; the origin never implies one).
+		// memory_start/memory_end = the curation task's CLOSED range of
+		// memory ids (fixed at spawn — parallel growth mid-run waits for
+		// the next pass); the watermark is the max memory_end of DONE
+		// curation tasks. NULL on non-curation tasks.
+		version: 5,
+		up: `
+ALTER TABLE tasks ADD COLUMN model TEXT;
+ALTER TABLE tasks ADD COLUMN memory_start INTEGER;
+ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
+`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

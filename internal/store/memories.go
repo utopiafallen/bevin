@@ -146,6 +146,14 @@ func (s *UserStore) ForgetMemory(id int64) error {
 	return nil
 }
 
+// MaxMemoryID returns the highest memory id (0 when the store is empty):
+// the growth counter's anchor for the curation trigger.
+func (s *UserStore) MaxMemoryID() (int64, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM memories`).Scan(&id)
+	return id, err
+}
+
 // SetMemoryProvenance replaces the set of messages that a memory was derived
 // from.
 func (s *UserStore) SetMemoryProvenance(memoryID int64, messageIDs []int64) error {
