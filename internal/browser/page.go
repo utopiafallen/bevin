@@ -8,20 +8,22 @@ import (
 )
 
 // The page model the web_browser tool returns (the plan's WS5 contract):
-// a CLEAN, BOUNDED rendering of the page — never raw HTML (raw HTML is
-// 10-50x the tokens of its readable content).
+// a CLEAN rendering of the page — never raw HTML (raw HTML is 10-50x the
+// tokens of its readable content).
 //
 //   - default read = DETERMINISTIC clean (no LLM): readability-style main
-//     content → markdown, boilerplate stripped, PLUS a compact numbered
+//     content → markdown, boilerplate stripped, PLUS a numbered
 //     interactive-elements list (a11y role + name + a server-side
 //     resolvable selector) so the agent can still act;
-//   - capped at a token budget (pageBudgetChars, ~8k tokens at 4
-//     chars/token) — over the cap the markdown is cut at a line boundary
-//     and the result says so (drill-in: re-read with a selector);
+//   - UNBOUNDED (user decision 2026-11-21 — the old 32,000-char budget
+//     made real pages unusable): read returns the WHOLE cleaned page, no
+//     truncation, no element cap. The only guard is the cleaner's MAX_NODES
+//     walk ceiling for pathological pages, and hitting it is REPORTED (a
+//     partial clean says so instead of silently truncating);
 //   - aux-model extraction (goal/oversize) is the follow-up tier: v1
-//     covers drill-in with the selector + slice pagination instead.
+//     covers subtree scoping with the selector + slice pagination instead.
 
-// PageRead is one read's result (before bounding).
+// PageRead is one read's result.
 type PageRead struct {
 	// Error is set by the cleaner when the drill-in selector matched
 	// nothing (the elements list is still the full page's).
@@ -30,6 +32,10 @@ type PageRead struct {
 	URL      string       `json:"url"`
 	Markdown string       `json:"markdown"`
 	Elements []elementRef `json:"elements"`
+	// Aborted is set when the cleaner's MAX_NODES walk ceiling was hit
+	// (a pathological page size): the clean is PARTIAL — the result says
+	// so, it never silently truncates.
+	Aborted bool `json:"aborted"`
 	// The settle state (the read waits for stability before extracting —
 	// the mid-render fix, design log LAZY-LIST TIER): settled=false means
 	// the page was still churning at the cap and the content is a
@@ -37,13 +43,6 @@ type PageRead struct {
 	Settled bool          `json:"settled"`
 	Took    time.Duration `json:"took"`
 }
-
-// pageBudgetChars caps the markdown in a read result (~8k tokens).
-const pageBudgetChars = 32000
-
-// elementCap caps the numbered interactive-element list (the first N in
-// document order — the top of the page is where actions live).
-const elementCap = 100
 
 // pageCleanerJS is the deterministic cleaner, run in the page via
 // Runtime.evaluate. It reads the LIVE DOM (read-only — it never mutates the
@@ -117,7 +116,6 @@ var pageCleanerJS = `(() => {
   const candidates = Array.from(document.querySelectorAll(
     'a[href],button,[role="button"],[role="link"],input,select,textarea,summary,[onclick],label[for]'));
   for (const el of candidates) {
-    if (elements.length >= ` + fmt.Sprint(elementCap) + `) break;
     if (!visible(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
@@ -203,7 +201,8 @@ var pageCleanerJS = `(() => {
     title: document.title,
     url: location.href,
     markdown: md.join('').replace(/\n{3,}/g, '\n\n').trim(),
-    elements: elements
+    elements: elements,
+    aborted: aborted
   });
 })()`
 
@@ -238,9 +237,6 @@ func (i *Instance) Read(ctx context.Context, convID, tabID, selector string) (*P
 	}
 	pr.Settled = settled
 	pr.Took = took
-	if len(pr.Elements) > elementCap {
-		pr.Elements = pr.Elements[:elementCap]
-	}
 	if pr.Elements == nil {
 		pr.Elements = []elementRef{}
 	}
@@ -254,20 +250,12 @@ func (i *Instance) Read(ctx context.Context, convID, tabID, selector string) (*P
 	return &pr, nil
 }
 
-// BoundRead caps the markdown at the token budget (cut at a line boundary)
-// and reports the truncation so the model knows to drill in (re-read with a
-// selector) instead of assuming the page is short.
-func BoundRead(pr *PageRead) string {
+// FormatRead renders a read result for the model: the title/url header,
+// the FULL cleaned markdown (unbounded — see the file header; the only
+// notice is the partial-clean flag when the cleaner's node ceiling was
+// hit), and the numbered interactive-element table.
+func FormatRead(pr *PageRead) string {
 	md := pr.Markdown
-	truncated := false
-	if len(md) > pageBudgetChars {
-		cut := pageBudgetChars
-		if idx := lastIndexByte(md, '\n', cut); idx > pageBudgetChars/2 {
-			cut = idx + 1 // include the newline: the cut lands at the END of a full line
-		}
-		md = md[:cut]
-		truncated = true
-	}
 	els := ""
 	for _, e := range pr.Elements {
 		els += fmt.Sprintf("#%d %s %q <%s>\n", e.N, e.Role, e.Name, e.Tag)
@@ -276,11 +264,10 @@ func BoundRead(pr *PageRead) string {
 	if !pr.Settled {
 		out += fmt.Sprintf("(the page was still settling after %s — content is a snapshot; a later read may differ)\n", settleCap)
 	}
-	if truncated {
-		out += fmt.Sprintf("content (TRUNCATED at ~%d chars — the page is longer; re-read with a selector to drill in):\n", pageBudgetChars)
-	} else {
-		out += "content:\n"
+	if pr.Aborted {
+		out += "(the page is enormous — the clean hit its node ceiling and the content may be PARTIAL; read with a selector to get a subtree)\n"
 	}
+	out += "content:\n"
 	out += md
 	if els != "" {
 		out += "\n\ninteractive elements (click/type/select take the #N id, or a raw selector):\n" + els
@@ -295,16 +282,4 @@ func (i *Instance) ElementByN(convID string, n int) (elementRef, bool) {
 	defer i.mu.Unlock()
 	e, ok := i.convRead[convID][n]
 	return e, ok
-}
-
-func lastIndexByte(s string, b byte, before int) int {
-	if before > len(s) {
-		before = len(s)
-	}
-	for j := before - 1; j >= 0; j-- {
-		if s[j] == b {
-			return j
-		}
-	}
-	return -1
 }

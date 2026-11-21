@@ -132,10 +132,11 @@ func TestPerConversationBrowserState(t *testing.T) {
 	}
 }
 
-// TestBoundRead checks the tool result shape: the title/url header, the
-// content (untruncated when small), the numbered element table, and the
-// TRUNCATED marker + line-boundary cut for an over-budget page.
-func TestBoundRead(t *testing.T) {
+// TestFormatRead checks the tool result shape: the title/url header, the
+// FULL content (unbounded — a page far beyond the old 32k budget comes
+// back whole), the numbered element table, and the partial-clean notice
+// when the cleaner's node ceiling was hit.
+func TestFormatRead(t *testing.T) {
 	pr := &PageRead{
 		Title: "Example", URL: "https://example.com",
 		Markdown: "# Example Domain\n\nThis domain is for use in examples.\n",
@@ -143,7 +144,7 @@ func TestBoundRead(t *testing.T) {
 			{N: 1, Role: "link", Name: "More information", Selector: "body > a", Tag: "A"},
 		},
 	}
-	out := BoundRead(pr)
+	out := FormatRead(pr)
 	for _, want := range []string{
 		"title: Example",
 		"url: https://example.com",
@@ -153,48 +154,28 @@ func TestBoundRead(t *testing.T) {
 		"interactive elements",
 	} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("BoundRead output missing %q:\n%s", want, out)
+			t.Fatalf("FormatRead output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "TRUNCATED") {
-		t.Fatalf("small page must not be marked truncated:\n%s", out)
+	if strings.Contains(out, "TRUNCATED") || strings.Contains(out, "PARTIAL") {
+		t.Fatalf("a complete clean must carry no truncation or partial notice:\n%s", out)
 	}
 
-	// Over budget: cut at a line boundary at or under the cap, with the
-	// marker telling the model to drill in.
+	// The budget is gone: a page 7x over the old cap comes back WHOLE.
 	big := strings.Repeat("line of page text\n", 10000) // 220k chars
 	pr2 := &PageRead{Title: "T", URL: "u", Markdown: big}
-	out2 := BoundRead(pr2)
-	if !strings.Contains(out2, "TRUNCATED") {
-		t.Fatal("over-budget page must carry the TRUNCATED marker")
+	out2 := FormatRead(pr2)
+	if !strings.Contains(out2, big) {
+		t.Fatalf("over-budget page must come back whole (read is unbounded): got %d chars total, page is %d", len(out2), len(big))
 	}
-	// The content part (everything after the truncated header line) must be
-	// <= the budget and end on a line boundary.
-	header := "content (TRUNCATED at ~32000 chars — the page is longer; re-read with a selector to drill in):\n"
-	start := strings.Index(out2, header)
-	if start < 0 {
-		t.Fatalf("no truncated header:\n%q", out2[:200])
+	if strings.Contains(out2, "TRUNCATED") {
+		t.Fatal("an unbounded read must never mark the content truncated")
 	}
-	mdPart := out2[start+len(header):]
-	if len(mdPart) > pageBudgetChars {
-		t.Fatalf("truncated content = %d chars, want <= %d", len(mdPart), pageBudgetChars)
-	}
-	if !strings.HasSuffix(mdPart, "\n") {
-		t.Fatalf("truncated content must end on a line boundary, got suffix %q", mdPart[len(mdPart)-20:])
-	}
-}
 
-// TestLastIndexByte is the line-boundary cutter used by BoundRead.
-func TestLastIndexByte(t *testing.T) {
-	if got := lastIndexByte("a\nb\nc", '\n', 5); got != 3 {
-		t.Fatalf("lastIndexByte = %d, want 3", got)
-	}
-	if got := lastIndexByte("abc", '\n', 3); got != -1 {
-		t.Fatalf("no match = %d, want -1", got)
-	}
-	// A 'before' beyond the string is clamped, not an out-of-range panic.
-	if got := lastIndexByte("a\nb", '\n', 99); got != 1 {
-		t.Fatalf("clamped = %d, want 1", got)
+	// A partial clean (the cleaner's node ceiling was hit) says so.
+	out3 := FormatRead(&PageRead{Title: "T", URL: "u", Markdown: "partial content", Aborted: true})
+	if !strings.Contains(out3, "PARTIAL") {
+		t.Fatalf("aborted clean must carry the partial notice:\n%s", out3)
 	}
 }
 

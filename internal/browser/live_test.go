@@ -32,6 +32,14 @@ func TestWebBrowserLive(t *testing.T) {
 	// The page under test: a heading + paragraph (the clean's markdown),
 	// a button that reveals a div (the click + waitFor path), a text input
 	// (the type path), and a select (the select path).
+	// The long body: 2,500 paragraphs (~140k chars of markdown — far past
+	// the old 32k read budget): the read must come back WHOLE,
+	// untruncated (user decision 2026-11-21 — the budget made real pages
+	// unusable).
+	var longBody strings.Builder
+	for n := 1; n <= 2500; n++ {
+		fmt.Fprintf(&longBody, "<p>LONGPAGE-%04d — some body text that makes the page long.</p>\n", n)
+	}
 	page := `<html><head><title>Bevin E2E</title></head><body>
 <h1>E2E Page</h1>
 <p>Some paragraph text about testing browsers.</p>
@@ -40,7 +48,7 @@ func TestWebBrowserLive(t *testing.T) {
 <div id="after" style="display:none"></div>
 <input id="q" type="text" placeholder="search">
 <select id="pick"><option value="a">Option A</option><option value="b">Option B</option></select>
-</body></html>`
+` + longBody.String() + `</body></html>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, page)
 	}))
@@ -94,16 +102,22 @@ func TestWebBrowserLive(t *testing.T) {
 	}
 	toggle := find("button", "toggle")
 	if toggle.N < 1 {
-		t.Fatalf("the toggle button is not in the element table:\n%s", BoundRead(pr))
+		t.Fatalf("the toggle button is not in the element table:\n%s", FormatRead(pr))
 	}
 	if _, ok := inst.ElementByN("", toggle.N); !ok {
 		t.Fatal("the read's element table is not resolvable by #N")
 	}
 	if in := find("textbox", "search"); in.N < 1 {
-		t.Fatalf("the search input is not in the element table:\n%s", BoundRead(pr))
+		t.Fatalf("the search input is not in the element table:\n%s", FormatRead(pr))
 	}
 	if link := find("link", "go elsewhere"); link.N < 1 {
-		t.Fatalf("the link is not in the element table:\n%s", BoundRead(pr))
+		t.Fatalf("the link is not in the element table:\n%s", FormatRead(pr))
+	}
+
+	// Unbounded read: the FINAL line of the long body (past the old 32k
+	// budget by ~4x) must be present — the read never truncates.
+	if !strings.Contains(pr.Markdown, "LONGPAGE-2500") {
+		t.Fatalf("read must be unbounded (whole page): the long body's final line is missing (markdown = %d chars); tail:\n%.400s", len(pr.Markdown), pr.Markdown)
 	}
 
 	// click the toggle button (REAL input events at the element's center)

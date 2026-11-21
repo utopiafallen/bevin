@@ -26,7 +26,7 @@ const webBrowserDescriptionBase = `Browse the web in a real desktop browser the 
 Commands:
 - openTab (url?) — open a tab (becomes the current one)
 - navigate (url) — load url in the current tab (waits for load)
-- read (selector?) — the page as clean markdown + numbered interactive elements (#N: role "name"). How you see content; selector drills into a truncated page.
+- read (selector?) — the page as clean markdown + numbered interactive elements (#N: role "name"). How you see content (the whole page, untruncated); selector scopes the read to a subtree.
 - readItems (selector) — the items matching selector, in VISUAL order (not DOM order), deduped, text + first link, after the page settles.
 - scroll (direction?, viewports?) — move whole viewports (direction down|up|top|bottom, default: down 1) and wait for settle; reports position + bottom reached.
 - click (element|selector) — click #N or a CSS selector
@@ -71,7 +71,7 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 				},
 				"url":        map[string]any{"type": "string", "description": "openTab / navigate (http/https only)"},
 				"element":    map[string]any{"type": "string", "description": "click/type/select: #N id from the last read"},
-				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, drill-in scope for read, item selector for readItems, wait target for waitFor"},
+				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, scope for read, item selector for readItems, wait target for waitFor"},
 				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},
 				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
 				"direction":  map[string]any{"type": "string", "description": "scroll: down|up|top|bottom (default down)"},
@@ -154,7 +154,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			if err != nil {
 				return unavailable("read", err), nil
 			}
-			return browser.BoundRead(pr), nil
+			return browser.FormatRead(pr), nil
 		case "readItems":
 			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 			if err != nil {

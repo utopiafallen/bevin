@@ -83,6 +83,13 @@ func Dial(ctx context.Context, wsURL string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cdp connect %s: %w", wsURL, err)
 	}
+	// The library's DEFAULT read limit is 32,768 bytes per message, and a
+	// CDP response frame carrying the cleaner's full-page JSON exceeds it
+	// on real pages ("read limited at 32769 bytes" — the transport-level
+	// wall the old 32k read budget was shaped around). Disable it: the
+	// endpoint is the LOCAL browser process (trusted), and response size
+	// is bounded by the cleaner's MAX_NODES walk ceiling.
+	conn.SetReadLimit(-1)
 	rctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
 		conn:    conn,

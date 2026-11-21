@@ -152,7 +152,7 @@ func (i *Instance) Settle(ctx context.Context, tabID string) (bool, time.Duratio
 }
 
 // settleWord is the one-line settle state for the read/item/scroll
-// reports (shared by BoundRead, BoundItems, and ScrollReport).
+// reports (shared by FormatRead, BoundItems, and ScrollReport).
 func settleWord(settled bool, took time.Duration) string {
 	if settled {
 		return fmt.Sprintf("settled in %s", took.Round(time.Millisecond))
