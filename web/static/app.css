@@ -212,7 +212,14 @@ body.panel-chats .panel { display: flex; }
 #chatLog {
   flex: 1; min-height: 0; overflow-y: auto;
   max-height: none; /* overrides brand.css's 26rem card cap */
-  padding: 0.3rem 0.35rem 0.9rem;
+  padding: 0.4rem 0.5rem 0.9rem;
+  /* The framed scroll window: the log is the stage's only scrollable
+     region — the frame (border + surface) marks its boundary, so the
+     surrounding gutter reads as "not here" (a wheel event outside the
+     frame does nothing, and the frame says so). */
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
 }
 #chat {
   display: flex; gap: 0.5rem;
