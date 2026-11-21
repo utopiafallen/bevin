@@ -26,6 +26,13 @@
   --text-muted: #8A7B64;
   --border: #EBDFC7;
 
+  /* The message column width: 4:3 against the viewport height (so the
+     reading surface is ~3/4 of a full-screen tall on desktop), capped at
+     the available width. Single source of truth — .column (non-chat
+     pages), the chat message column, and the composer row all use it. */
+  --col-43: min(100%, calc((100vh - 2rem) * 4 / 3));
+  --col-43: min(100%, calc((100dvh - 2rem) * 4 / 3));
+
   /* brand — soft warm yellow */
   --brand: #F2C23C;        /* the hero fill (buttons, highlights, logo) */
   --brand-hover: #E7B62E;
@@ -216,7 +223,6 @@ input:focus, textarea:focus, select:focus {
 .thinking .tdot:nth-of-type(3) { animation-delay: 0.4s; }
 @keyframes thinking-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 @keyframes thinking-blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
-#chatLog { max-height: 26rem; overflow-y: auto; padding-right: 0.25rem; }
 
 /* ---- markdown inside message bubbles (web/static/markdown.js) ---- */
 .msg .md-bubble { white-space: normal; }

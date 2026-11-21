@@ -197,8 +197,7 @@ body.panel-chats .panel { display: flex; }
    width on normal screens, where the content simply fills it. */
 .column {
   width: 100%;
-  max-width: min(100%, calc((100vh - 2rem) * 4 / 3));
-  max-width: min(100%, calc((100dvh - 2rem) * 4 / 3));
+  max-width: var(--col-43);
   display: flex; flex-direction: column;
   min-height: 0;
 }
@@ -209,20 +208,27 @@ body.panel-chats .panel { display: flex; }
 /* The chat card: a full-height flex column — the scrolling log, the
    context controls, and the composer pinned at the bottom. */
 .chat-card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-#chatLog {
+/* In chat mode the COLUMN is full stage width: the scroll window fills
+   the whole chat page (no dead gutters — a wheel event anywhere in it
+   scrolls). The message surface inside stays the centered 4:3 column;
+   on ultrawide screens the messages sit centered with plain page space
+   either side, on narrow screens the column is 100% and nothing
+   changes. The composer + context row align to the same column. */
+body.page-chat .column { max-width: none; }
+
+#chatScroll {
   flex: 1; min-height: 0; overflow-y: auto;
-  max-height: none; /* overrides brand.css's 26rem card cap */
-  padding: 0.4rem 0.5rem 0.9rem;
-  /* The framed scroll window: the log is the stage's only scrollable
-     region — the frame (border + surface) marks its boundary, so the
-     surrounding gutter reads as "not here" (a wheel event outside the
-     frame does nothing, and the frame says so). */
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface);
+}
+#chatLog {
+  /* the centered message column inside the full-width scroll window */
+  max-width: var(--col-43);
+  margin: 0 auto;
+  padding: 0.3rem 0.35rem 0.9rem;
 }
 #chat {
   display: flex; gap: 0.5rem;
+  width: 100%; max-width: var(--col-43);
+  margin: 0 auto;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
 }
@@ -239,6 +245,7 @@ body.panel-chats .panel { display: flex; }
    context-window usage bar, sitting above the composer. */
 .chat-ctx {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  width: 100%; max-width: var(--col-43); margin: 0 auto;
   padding: 0.45rem 0.1rem 0.55rem;
 }
 .chat-ctx select {

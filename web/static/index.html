@@ -150,7 +150,9 @@
           </section>
 
           <section class="chat-card" id="chatCard" style="display:none;">
-            <div id="chatLog"></div>
+            <!-- The full-width scroll window (wheel anywhere here
+                 scrolls); the message column inside is #chatLog. -->
+            <div id="chatScroll"><div id="chatLog"></div></div>
             <!-- The context controls: the conversation's active model, the
                  per-model reasoning effort (only when the model's profile
                  supports one), and the context-window usage bar. -->
@@ -344,6 +346,7 @@
     var page = "chat";
     function showPage(name) {
       page = name;
+      document.body.classList.toggle("page-chat", name === "chat");
       $("chatCard").style.display = name === "chat" ? "" : "none";
       $("searchPage").style.display = name === "search" ? "" : "none";
       $("workspacePage").style.display = name === "workspace" ? "" : "none";
@@ -379,7 +382,7 @@
     // The document itself never scrolls (the shell is full-viewport); this
     // pins the chat log to the bottom instead.
     function scrollChat() {
-      var log = $("chatLog");
+      var log = $("chatScroll");
       if (log) log.scrollTop = log.scrollHeight;
     }
 
@@ -397,7 +400,7 @@
       // style), so a Shift+Enter line shows as a line.
       BevinMD.render(text, m.querySelector(".bubble"));
       $("chatLog").appendChild(m);
-      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+      $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
     }
 
     // Creates the assistant message element (head + optional reasoning +
@@ -487,7 +490,7 @@
       a.raf = 0;
       var thinking = a.bubble.querySelector(".thinking");
       if (thinking) thinking.remove(); // first real content landed
-      var log = $("chatLog");
+      var log = $("chatScroll");
       var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
       var full = a.buf;
       var cut = BevinMD.stableCut(full, a.cut);
@@ -518,7 +521,7 @@
       m.querySelector(".when").textContent = fmtWhen(d);
       m.querySelector(".bubble").textContent = text;
       $("chatLog").appendChild(m);
-      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+      $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
     }
 
     function addNote(text) {
@@ -860,7 +863,7 @@
       var asst = null;
       var reasoning = "";
       try {
-        var wasAtBottom = pinScroll($("chatLog"));
+        var wasAtBottom = pinScroll($("chatScroll"));
         asst = startAssistantMsg();
         if (wasAtBottom) scrollChat();
         asst.t0 = 0;
@@ -935,7 +938,7 @@
                 // scrolled up keeps their position, and returning to the
                 // bottom resumes the follow (atBottom is re-measured per
                 // delta).
-                var atBottom = pinScroll($("chatLog"));
+                var atBottom = pinScroll($("chatScroll"));
                 reasoning += p.reasoning;
                 if (asst.details.style.display === "none") {
                   asst.details.style.display = "";
@@ -958,7 +961,7 @@
                 asst.pre.textContent = reasoning;
                 if (!asst.r0) asst.r0 = performance.now(); // live thinking stats start here
                 thinkingStats(asst, reasoning);
-                if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
+                if (atBottom) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
               }
               if (p.delta) {
                 if (asst.details.open) asst.details.open = false; // the response started — collapse the thinking
@@ -978,7 +981,7 @@
               // is dropped outright. Measure the follow state BEFORE the
               // mutations (row + bubble both extend the log — the same
               // pre-measure rule as the reasoning branch).
-              var tBelow = pinScroll($("chatLog"));
+              var tBelow = pinScroll($("chatScroll"));
               if (asst) {
                 if (asst.details.style.display !== "none") {
                   asst.details.open = false; // the thinking is done
@@ -993,7 +996,7 @@
               addToolRow(p.name, false, false);
               asst = startAssistantMsg();
               reasoning = ""; // the new bubble owns a fresh thinking block
-              if (tBelow) $("chatLog").scrollTop = $("chatLog").scrollHeight;
+              if (tBelow) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
             } else if (evt === "tool_done") {
               settleToolRow(p.name, p.success);
             } else if (evt === "done") {
@@ -1074,6 +1077,7 @@
       $("profilePage").style.display = "none";
       $("chatCard").style.display = "";
       page = "chat";
+      document.body.classList.add("page-chat");
       $("searchBtn").classList.remove("active");
       $("profileBtn").classList.remove("active");
       $("userName").textContent = "@" + userName();
