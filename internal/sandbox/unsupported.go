@@ -29,6 +29,14 @@ func (b *unsupportedBackend) ExecIn(context.Context, string, string, string, tim
 	return Result{}, ErrDisabled
 }
 
+func (b *unsupportedBackend) ReadFile(context.Context, string, string) ([]byte, error) {
+	return nil, ErrDisabled
+}
+
+func (b *unsupportedBackend) WriteFileAtomic(context.Context, string, string, []byte) error {
+	return ErrDisabled
+}
+
 func (b *unsupportedBackend) ContainerDataDir() string { return "" }
 
 func (b *unsupportedBackend) Status(_ context.Context, _ string) (Info, error) {

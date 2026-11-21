@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -451,6 +452,150 @@ func drainCopies(done <-chan struct{}, timeout time.Duration) {
 			return
 		}
 	}
+}
+
+// psQuote escapes a value for a PowerShell SINGLE-quoted string (an embedded
+// single quote is doubled — the value can never break out of its argument).
+func psQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// powershellCommandLine returns the full guest command line running script
+// under the container's Windows PowerShell (the same CreateProcess path
+// ExecIn uses). The script must not contain a double-quote character
+// (single-quoted strings only) — the -Command argument is double-quoted.
+func powershellCommandLine(script string) string {
+	return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -Command "` + script + `"`
+}
+
+// ReadFile reads a file from inside the user's container
+// (container-absolute path, e.g. C:\data\workspaces\<id>\app.go).
+//
+// Mechanism: a PowerShell process in the container (HCS CreateProcess)
+// base64-encodes the file's bytes and writes them to stdout — base64 keeps
+// the byte stream ASCII-safe over the process pipe (no console-encoding
+// mangling). A missing file is ErrFileNotFound, a directory ErrIsDir (both
+// wrapped, with the path).
+func (b *windowsBackend) ReadFile(ctx context.Context, handle, path string) ([]byte, error) {
+	c, err := hcsshim.OpenContainer(b.containerID(handle))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrNotRunning, err)
+	}
+	defer c.Close()
+	execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	script := fmt.Sprintf(
+		"try { [Console]::Write([Convert]::ToBase64String([IO.File]::ReadAllBytes('%s'))); exit 0 } catch { [Console]::Error.Write($_.Exception.Message); exit 1 }",
+		psQuote(path))
+	pc := &hcsshim.ProcessConfig{
+		CommandLine:      powershellCommandLine(script),
+		WorkingDirectory: dataMount,
+		CreateStdOutPipe: true,
+		CreateStdErrPipe: true,
+	}
+	p, err := c.CreateProcess(pc)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s failed (launching the process): %v", path, err)
+	}
+	defer p.Close()
+	_, stdout, stderr, err := p.Stdio()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s failed (attaching to the process): %v", path, err)
+	}
+	var outBuf, errBuf bytes.Buffer
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(&outBuf, stdout); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(&errBuf, stderr); done <- struct{}{} }()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- p.Wait() }()
+	select {
+	case <-execCtx.Done():
+		_ = p.Kill()
+		<-waitCh
+		drainCopies(done, 2*time.Second)
+		return nil, fmt.Errorf("reading %s failed: %w", path, execCtx.Err())
+	case <-waitCh:
+		drainCopies(done, 5*time.Second)
+	}
+	if code, err := p.ExitCode(); err != nil || code != 0 {
+		msg := strings.TrimSpace(errBuf.String())
+		switch {
+		case strings.Contains(msg, "Could not find file"):
+			return nil, fmt.Errorf("%w: %s", ErrFileNotFound, path)
+		case strings.Contains(msg, "directory"):
+			return nil, fmt.Errorf("%w: %s", ErrIsDir, path)
+		default:
+			return nil, fmt.Errorf("reading %s failed (exit %d): %s", path, code, msg)
+		}
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(outBuf.String()))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s failed (decoding): %v", path, err)
+	}
+	return data, nil
+}
+
+// WriteFileAtomic atomically writes content to a container-absolute path
+// (stage next to the destination + Move-Item rename — a concurrent reader
+// never observes a half-written file; the parent directory is created when
+// missing).
+//
+// Mechanism: the content goes over the process's STDIN as base64 (byte-safe
+// over the pipe); PowerShell in the container decodes it, writes the staged
+// file, and renames it into place (same volume = an atomic rename, over an
+// existing file when there is one).
+func (b *windowsBackend) WriteFileAtomic(ctx context.Context, handle, path string, content []byte) error {
+	c, err := hcsshim.OpenContainer(b.containerID(handle))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNotRunning, err)
+	}
+	defer c.Close()
+	execCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	suffix, err := randomHex(8)
+	if err != nil {
+		return err
+	}
+	staged := path + ".bevin-" + suffix
+	script := fmt.Sprintf(
+		"try { $p='%s'; $s='%s'; $d=Split-Path -Parent $p; if (!(Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; [IO.File]::WriteAllBytes($s, [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim())); Move-Item -LiteralPath $s -Destination $p -Force; exit 0 } catch { [Console]::Error.Write($_.Exception.Message); exit 1 }",
+		psQuote(path), psQuote(staged))
+	pc := &hcsshim.ProcessConfig{
+		CommandLine:      powershellCommandLine(script),
+		WorkingDirectory: dataMount,
+		CreateStdInPipe:  true,
+		CreateStdErrPipe: true,
+	}
+	p, err := c.CreateProcess(pc)
+	if err != nil {
+		return fmt.Errorf("writing %s failed (launching the process): %v", path, err)
+	}
+	defer p.Close()
+	stdin, _, stderr, err := p.Stdio()
+	if err != nil {
+		return fmt.Errorf("writing %s failed (attaching to the process): %v", path, err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(content)
+	_, _ = io.WriteString(stdin, b64)
+	_ = stdin.Close() // EOF — the guest ReadToEnd returns
+	var errBuf bytes.Buffer
+	done := make(chan struct{}, 1)
+	go func() { _, _ = io.Copy(&errBuf, stderr); done <- struct{}{} }()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- p.Wait() }()
+	select {
+	case <-execCtx.Done():
+		_ = p.Kill()
+		<-waitCh
+		drainCopies(done, 2*time.Second)
+		return fmt.Errorf("writing %s failed: %w", path, execCtx.Err())
+	case <-waitCh:
+		drainCopies(done, 5*time.Second)
+	}
+	if code, err := p.ExitCode(); err != nil || code != 0 {
+		return fmt.Errorf("writing %s failed (exit %d): %s", path, code, strings.TrimSpace(errBuf.String()))
+	}
+	return nil
 }
 
 // Stop stops the user's container (the storage is preserved).

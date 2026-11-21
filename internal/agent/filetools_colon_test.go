@@ -5,30 +5,31 @@ import (
 	"testing"
 )
 
-// TestFileSafeRelPathColon pins the NTFS ADS gate (security 2026-11-20):
-// on Windows a colon in a path targets an alternate data stream (content
-// invisible to listings, retrievable by name) — rejected. On other OSes a
-// colon is a legal filename character — allowed. The existing gates (..,
-// absolute, NUL) hold either way.
-func TestFileSafeRelPathColon(t *testing.T) {
+// TestContainerPath pins the container-absolute path gates: a relative
+// path is rejected everywhere; on Windows the path is drive-absolute and a
+// colon after the drive letter is rejected (NTFS alternate data stream —
+// content invisible to listings, retrievable by name); on other OSes a
+// colon is a legal filename character.
+func TestContainerPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		if _, err := fileSafeRelPath("file.txt:evil"); err == nil {
-			t.Fatal("a colon must be rejected on Windows (NTFS ADS)")
+		if _, err := containerPath(`C:\data\file.txt:evil`); err == nil {
+			t.Fatal("a colon after the drive letter must be rejected on Windows (NTFS ADS)")
 		}
-		if _, err := fileSafeRelPath("C:\\Users\\x"); err == nil {
-			t.Fatal("an absolute Windows path must be rejected (its drive colon is an ADS)")
+		if _, err := containerPath(`relative\path`); err == nil {
+			t.Fatal("a relative path must be rejected")
 		}
 	} else {
-		if rel, err := fileSafeRelPath("notes: draft.txt"); err != nil {
+		if _, err := containerPath("/data/notes: draft.txt"); err != nil {
 			t.Fatalf("a colon must be legal on non-Windows: %v", err)
-		} else if rel == "" {
-			t.Fatal("empty rel")
+		}
+		if _, err := containerPath("relative/path"); err == nil {
+			t.Fatal("a relative path must be rejected")
 		}
 	}
-	if _, err := fileSafeRelPath("../x"); err == nil {
-		t.Fatal(".. must be rejected")
+	if _, err := containerPath(""); err == nil {
+		t.Fatal("an empty path must be rejected")
 	}
-	if _, err := fileSafeRelPath("/abs"); err == nil {
-		t.Fatal("an absolute path must be rejected")
+	if _, err := containerPath("/a\x00b"); err == nil {
+		t.Fatal("a NUL byte must be rejected")
 	}
 }

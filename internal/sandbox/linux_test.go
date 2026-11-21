@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,12 @@ type fakeRun struct {
 	// iptablesRules holds the rules added so far (real -C/-A semantics:
 	// -C reports existence, -A inserts).
 	iptablesRules map[string]bool
+	// fs is the fake container filesystem (the ReadFile/WriteFileAtomic
+	// tests); dirs marks its directories.
+	fs   map[string][]byte
+	dirs map[string]bool
+	// mkdirs records the directories `mkdir -p` was asked to create.
+	mkdirs []string
 }
 
 func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([]byte, []byte, int, error) {
@@ -108,15 +115,37 @@ func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([
 		}
 		return nil, nil, 0, nil
 	case "systemd-run":
-		// `systemd-run -M <m> --wait --unit <u> /bin/sh -c <wrapper>` —
-		// the fake "machine" runs it: exit 0, and it writes the output
-		// files the wrapper names (so copy-from can fetch them).
+		// `systemd-run -M <m> --wait --unit <u> ... <prog> <args...>` —
+		// the fake "machine" runs the program: the exec wrapper writes its
+		// output files (so copy-from can fetch them), and the file
+		// primitives' programs manipulate the fake fs.
+		code := 0
 		for i, a := range argv {
-			if a == "-c" && i+1 < len(argv) {
-				f.writeExecFiles(argv[i+1])
+			switch a {
+			case "/bin/mkdir":
+				f.mu.Lock()
+				f.mkdirs = append(f.mkdirs, argv[i+2])
+				f.mu.Unlock()
+			case "/bin/mv":
+				src, dst := argv[i+2], argv[i+3]
+				f.mu.Lock()
+				f.fs[dst] = append([]byte(nil), f.fs[src]...)
+				delete(f.fs, src)
+				f.mu.Unlock()
+			case "/bin/rm":
+				f.mu.Lock()
+				delete(f.fs, argv[i+2])
+				f.mu.Unlock()
+			case "-c":
+				wrapper := argv[i+1]
+				if strings.Contains(wrapper, "cat --") {
+					code = f.runCat(wrapper)
+				} else {
+					f.writeExecFiles(wrapper)
+				}
 			}
 		}
-		return nil, nil, 0, nil
+		return nil, nil, code, nil
 	case "machinectl":
 		// `machinectl copy-from <m> <containerPath> <hostPath>`
 		if len(argv) >= 4 && argv[0] == "copy-from" {
@@ -129,6 +158,18 @@ func (f *fakeRun) call(ctx context.Context, dir, name string, argv ...string) ([
 			if err := os.WriteFile(argv[3], []byte(content), 0o644); err != nil {
 				return nil, []byte(err.Error()), 1, nil
 			}
+			return nil, nil, 0, nil
+		}
+		// `machinectl copy-to <m> <hostPath> <containerPath>` (the
+		// WriteFileAtomic stage).
+		if len(argv) >= 4 && argv[0] == "copy-to" {
+			data, err := os.ReadFile(argv[2])
+			if err != nil {
+				return nil, []byte(err.Error()), 1, nil
+			}
+			f.mu.Lock()
+			f.fs[argv[3]] = data
+			f.mu.Unlock()
 			return nil, nil, 0, nil
 		}
 	case "journalctl":
@@ -231,7 +272,7 @@ func newTestBackend(t *testing.T) (*linuxBackend, *fakeRun, string) {
 	if err := os.WriteFile(filepath.Join(baseRoot, "etc", "machine-id"), []byte("fixed-template-id\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeRun{copyFrom: map[string]string{}, started: map[string]bool{}, dataDir: dataDir, iptablesRules: map[string]bool{}}
+	fake := &fakeRun{copyFrom: map[string]string{}, started: map[string]bool{}, dataDir: dataDir, iptablesRules: map[string]bool{}, fs: map[string][]byte{}, dirs: map[string]bool{}}
 	b := &linuxBackend{
 		dataDir:     dataDir,
 		cfg:         Config{Enabled: true, Network: "veth"},
@@ -688,5 +729,145 @@ func TestLinuxRuntimeDetail(t *testing.T) {
 	rt = b.Runtime(context.Background())
 	if strings.Contains(rt.Detail, "base") {
 		t.Fatalf("runtime check cites the base image (it is not a runtime gate): %q", rt.Detail)
+	}
+}
+
+// runCat simulates the ReadFile wrapper `( cat -- '<path>' > out 2> err )`:
+// it copies the file's content (or the cat error) into the capture files
+// the wrapper names, and returns the exit code.
+func (f *fakeRun) runCat(wrapper string) int {
+	i := strings.Index(wrapper, "cat -- ")
+	if i < 0 {
+		return 0
+	}
+	rest := wrapper[i+len("cat -- "):]
+	q1 := strings.IndexByte(rest, '\'')
+	if q1 < 0 {
+		return 0
+	}
+	q2 := strings.IndexByte(rest[q1+1:], '\'')
+	if q2 < 0 {
+		return 0
+	}
+	pth := rest[q1+1 : q1+1+q2]
+	var out, errPath string
+	fields := strings.Fields(wrapper)
+	for j := 0; j < len(fields); j++ {
+		switch fields[j] {
+		case ">":
+			if j+1 < len(fields) {
+				out = fields[j+1]
+			}
+		case "2>":
+			if j+1 < len(fields) {
+				errPath = fields[j+1]
+			}
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dirs[pth] {
+		f.copyFrom[errPath] = "cat: " + pth + ": Is a directory"
+		return 1
+	}
+	if data, ok := f.fs[pth]; ok {
+		f.copyFrom[out] = string(data)
+		return 0
+	}
+	f.copyFrom[errPath] = "cat: " + pth + ": No such file or directory"
+	return 1
+}
+
+// TestLinuxReadFile reads a file from the (fake) container, and classifies
+// a missing file / a directory as ErrFileNotFound / ErrIsDir; a stopped
+// container and a relative path are refused.
+func TestLinuxReadFile(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	ctx := context.Background()
+	if _, err := b.Ensure(ctx, "alice"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	fake.mu.Lock()
+	fake.fs["/etc/hostname"] = []byte("bevin\n")
+	fake.dirs["/etc"] = true
+	fake.mu.Unlock()
+
+	data, err := b.ReadFile(ctx, "alice", "/etc/hostname")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "bevin\n" {
+		t.Fatalf("ReadFile = %q, want %q", data, "bevin\n")
+	}
+	if _, err := b.ReadFile(ctx, "alice", "/nope/missing"); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("missing file: %v, want ErrFileNotFound", err)
+	}
+	if _, err := b.ReadFile(ctx, "alice", "/etc"); !errors.Is(err, ErrIsDir) {
+		t.Fatalf("directory: %v, want ErrIsDir", err)
+	}
+	if _, err := b.ReadFile(ctx, "alice", "relative/path"); err == nil {
+		t.Fatal("relative path accepted, want an error")
+	}
+	if _, err := b.ReadFile(ctx, "bob", "/etc/hostname"); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("stopped container: %v, want ErrNotRunning", err)
+	}
+}
+
+// TestLinuxWriteFileAtomic stages next to the destination and renames
+// (atomic), creates the parent directories, overwrites an existing file,
+// leaves no staged artifact behind, and refuses a stopped container or a
+// relative path.
+func TestLinuxWriteFileAtomic(t *testing.T) {
+	b, fake, _ := newTestBackend(t)
+	ctx := context.Background()
+	if _, err := b.Ensure(ctx, "alice"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	if err := b.WriteFileAtomic(ctx, "alice", "/data/workspaces/w1/src/app.go", []byte("package main\n")); err != nil {
+		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+	fake.mu.Lock()
+	if string(fake.fs["/data/workspaces/w1/src/app.go"]) != "package main\n" {
+		t.Fatalf("fs after write = %q", fake.fs["/data/workspaces/w1/src/app.go"])
+	}
+	var leftover []string
+	for k := range fake.fs {
+		if strings.HasPrefix(k, "/data/workspaces/w1/src/app.go.bevin-") {
+			leftover = append(leftover, k)
+		}
+	}
+	mkdirs := append([]string(nil), fake.mkdirs...)
+	fake.mu.Unlock()
+	if len(leftover) > 0 {
+		t.Fatalf("staged artifact left behind: %v", leftover)
+	}
+	// The parent directories were created.
+	foundMkdir := false
+	for _, d := range mkdirs {
+		if strings.Contains(d, "/data/workspaces/w1/src") {
+			foundMkdir = true
+		}
+	}
+	if !foundMkdir {
+		t.Fatalf("parent directories not created: %v", mkdirs)
+	}
+	// Overwrite: the existing file is replaced by the rename.
+	if err := b.WriteFileAtomic(ctx, "alice", "/data/workspaces/w1/src/app.go", []byte("package main // v2\n")); err != nil {
+		t.Fatalf("WriteFileAtomic (overwrite): %v", err)
+	}
+	fake.mu.Lock()
+	got := string(fake.fs["/data/workspaces/w1/src/app.go"])
+	fake.mu.Unlock()
+	if got != "package main // v2\n" {
+		t.Fatalf("fs after overwrite = %q", got)
+	}
+	// A stopped container is refused.
+	if err := b.WriteFileAtomic(ctx, "bob", "/x", []byte("y")); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("stopped container: %v, want ErrNotRunning", err)
+	}
+	// A relative path is rejected.
+	if err := b.WriteFileAtomic(ctx, "alice", "relative/x", []byte("y")); err == nil {
+		t.Fatal("relative path accepted, want an error")
 	}
 }

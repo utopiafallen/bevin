@@ -23,6 +23,7 @@ import (
 	"github.com/utopiafallen/bevin/internal/prompt"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/qdrant"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
@@ -60,6 +61,12 @@ type Agent struct {
 	// learn is the idle learning loop (the memory model's idle reflection).
 	llmWork *llmWorkTracker
 	learn   *learningMgr
+
+	// containerBk resolves the LIVE container backend (nil = a platform
+	// with no container backend, where the file tools answer
+	// "unavailable"). Set once at startup by the server; it resolves on
+	// every use because the backend is (re)built on config save.
+	containerBk func() sandbox.Backend
 
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
@@ -305,11 +312,39 @@ func (a *Agent) Reload(cfg *config.ServerConfig) error {
 }
 
 // SetDiskFrozen wires the disk-cap frozen check into the scheduler: a user
-// over their disk cap has their queued work deferred (kept in the queue) until
-// they're back under the cap. The host (the server's disk monitor) installs
-// this. Nil-safe: passing nil defers no one.
+// over their disk cap has their queued work deferred (kept in the queue)
+// until they're back under the cap. The host (the server's disk monitor)
+// installs this. Nil-safe: passing nil defers no one.
 func (a *Agent) SetDiskFrozen(f func(handle string) bool) {
 	a.sched.SetFrozen(f)
+}
+
+// SetContainerBackend wires a resolver for the LIVE container backend into
+// the file tools (edit_file operates INSIDE the user's container — the
+// container is the shared medium between the user's parallel
+// conversations). The resolver is called on every use: the backend is
+// (re)built on config save, and the file tools must always reach the live
+// one.
+func (a *Agent) SetContainerBackend(resolve func() sandbox.Backend) {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	a.containerBk = resolve
+}
+
+// containerBackend resolves the live container backend (nil = unavailable).
+func (a *Agent) containerBackend() sandbox.Backend {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	if a.containerBk == nil {
+		return nil
+	}
+	return a.containerBk()
+}
+
+// diskIsFrozen reports whether the user is over their disk cap (the same
+// check the scheduler defers on — file writes refuse while frozen).
+func (a *Agent) diskIsFrozen(handle string) bool {
+	return a.sched.Frozen(handle)
 }
 
 // PokeAll re-dispatches every model pool — used when a user unfreezes (their

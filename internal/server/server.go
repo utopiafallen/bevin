@@ -139,6 +139,11 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	dm := a.diskMon
 	a.ag.SetDiskFrozen(func(h string) bool { return dm.Frozen(h) })
 	a.diskMon.SetOnUnfreeze(func(string) { a.ag.PokeAll() })
+	// Wire the container backend into the file tools (edit_file operates
+	// INSIDE the user's container — the shared medium between the user's
+	// parallel conversations). The resolver tracks the LIVE backend across
+	// config-save rebuilds.
+	a.ag.SetContainerBackend(func() sandbox.Backend { return a.sandboxBackend() })
 	a.diskMon.Prime()
 	diskCtx, diskCancel := context.WithCancel(context.Background())
 	a.diskCancel = diskCancel

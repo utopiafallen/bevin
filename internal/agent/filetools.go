@@ -8,28 +8,32 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 
-	"github.com/utopiafallen/bevin/internal/config"
-	"github.com/utopiafallen/bevin/internal/store"
+	"github.com/utopiafallen/bevin/internal/sandbox"
 )
 
-// edit_file (WS4): exact-match file edits over the USER'S WORKSPACES
-// (workspace STATE; the agent's execution surface for code is the
-// container). Relative paths resolve against a workspace and are confined
-// to its root. All failure modes are RESULTS back to the model (the
-// self-healing signal) — never a turn error, the same contract as
+// edit_file (WS4): exact-match file edits anywhere in the USER'S CONTAINER
+// (container STATE — the container is the shared medium between the user's
+// parallel conversations). Paths are container-absolute. The match is
+// verified against the file's CURRENT content at execution time, so an edit
+// can never be applied to content that isn't there: if the file changed
+// since the model last looked, it gets the closest current region back
+// (the self-healing signal) — never a blind overwrite. All failure modes
+// are RESULTS back to the model, never a turn error — the same contract as
 // web_search/web_browser.
+//
+// The harness tracks NO state between reads and writes: the exact-match
+// anchor IS the change detector, against every writer (another conversation
+// of the same user, the user's own editor, a script). Whole-file reads and
+// writes are shell commands' job; edit_file is the surgical edit.
 
 // editArgs is the raw argument shape (unknown fields are ignored, missing
 // optional ones zero out).
 type editArgs struct {
-	Workspace  string `json:"workspace"`
 	Path       string `json:"path"`
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
@@ -37,22 +41,16 @@ type editArgs struct {
 }
 
 func registerEditTool(r *ToolRegistry, a *Agent) error {
-	wsParam := map[string]any{
-		"type":        "string",
-		"description": "workspace id or title (omit when the user has one workspace)",
-	}
-	pathParam := map[string]any{
-		"type":        "string",
-		"description": "file path, relative to the workspace root",
-	}
 	return r.Register(Tool{
 		Name:        "edit_file",
-		Description: "Replace an exact string in a text file in the user's workspace. The match must be unique unless replace_all is set; on failure it shows the closest region.",
+		Description: "Replace an exact string in a text file anywhere in the user's container (absolute path: /... on linux, C:\\... on windows; workspaces live under /data/workspaces/<id>/). The match is verified against the file's CURRENT content — if it changed since you last looked, you get the closest current region back instead of a silent overwrite.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"workspace": wsParam,
-				"path":      pathParam,
+				"path": map[string]any{
+					"type":        "string",
+					"description": "absolute path inside the user's container",
+				},
 				"old_string": map[string]any{
 					"type":        "string",
 					"description": "the exact text to find (byte-for-byte, including whitespace)",
@@ -72,70 +70,10 @@ func registerEditTool(r *ToolRegistry, a *Agent) error {
 	})
 }
 
-// resolveWorkspace resolves the workspace + its folder for a file call.
-// Omitted name = the user's single workspace (else an error listing the
-// options); a name matches by id first, then title.
-func (a *Agent) resolveWorkspace(handle, name string) (*store.Workspace, string, error) {
-	us, err := a.userStore(handle)
-	if err != nil {
-		return nil, "", err
-	}
-	wss, err := us.ListWorkspaces()
-	if err != nil {
-		return nil, "", err
-	}
-	if len(wss) == 0 {
-		return nil, "", errors.New("the user has no workspaces — ask them to create one in the workspace UI before managing files")
-	}
-	var ws *store.Workspace
-	if strings.TrimSpace(name) == "" {
-		if len(wss) == 1 {
-			ws = &wss[0]
-		} else {
-			var opts []string
-			for _, w := range wss {
-				opts = append(opts, fmt.Sprintf("%q (%s)", w.ID, w.Title))
-			}
-			sort.Strings(opts)
-			return nil, "", fmt.Errorf("the user has %d workspaces — name one with the \"workspace\" argument: %s", len(wss), strings.Join(opts, ", "))
-		}
-	} else {
-		match := func(pred func(w store.Workspace) bool) *store.Workspace {
-			for i := range wss {
-				if pred(wss[i]) {
-					return &wss[i]
-				}
-			}
-			return nil
-		}
-		ws = match(func(w store.Workspace) bool { return w.ID == name })
-		if ws == nil {
-			ws = match(func(w store.Workspace) bool { return w.Title == name })
-		}
-		if ws == nil {
-			lower := strings.ToLower(name)
-			ws = match(func(w store.Workspace) bool { return strings.ToLower(w.Title) == lower })
-		}
-		if ws == nil {
-			var opts []string
-			for _, w := range wss {
-				opts = append(opts, fmt.Sprintf("%q (%s)", w.ID, w.Title))
-			}
-			sort.Strings(opts)
-			return nil, "", fmt.Errorf("no workspace named %q — the user's workspaces: %s", name, strings.Join(opts, ", "))
-		}
-	}
-	folder := ws.FolderPath
-	if folder == "" {
-		folder = filepath.Join(a.dataDir, "users", handle, "workspaces", ws.ID)
-	}
-	return ws, folder, nil
-}
-
-// fileSafeRelPath + fileJoinSafe mirror the workspace upload endpoint's
-// path safety (forward-slash relative, no .., post-join containment).
-// Duplicated in the agent (the server package is not importable from here).
-func fileSafeRelPath(p string) (string, error) {
+// containerPath normalizes + validates a container-absolute path (the
+// platform-native form inside the container). The error text is
+// model-facing.
+func containerPath(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", errors.New("path is required")
@@ -143,162 +81,64 @@ func fileSafeRelPath(p string) (string, error) {
 	if strings.ContainsRune(p, '\x00') {
 		return "", errors.New("invalid path")
 	}
-	// Windows: a colon in a path is the NTFS alternate data stream
-	// separator — "file.txt:evil" targets a hidden stream whose content is
-	// invisible to listings but retrievable by name. Colons are legal
-	// filename characters on other OSes, so the check is Windows-only.
-	if runtime.GOOS == "windows" && strings.ContainsRune(p, ':') {
-		return "", errors.New("paths must not contain ':' (on Windows a colon is the NTFS data-stream separator)")
-	}
-	p = strings.ReplaceAll(p, `\`, "/")
-	if strings.HasPrefix(p, "/") {
-		return "", errors.New("path must be relative to the workspace (no leading /)")
-	}
-	clean := path.Clean(p)
-	if clean == "." {
-		return "", errors.New("path is required")
-	}
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", errors.New("path escapes the workspace")
-	}
-	return clean, nil
-}
-
-func fileJoinSafe(base, rel string) (string, error) {
-	abs := filepath.Join(base, filepath.FromSlash(rel))
-	back, err := filepath.Rel(base, abs)
-	if err != nil || back == ".." || strings.HasPrefix(back, ".."+string(filepath.Separator)) {
-		return "", errors.New("path escapes the workspace")
-	}
-	return abs, nil
-}
-
-// fileResolveInside re-checks, with the disk consulted, that abs stays
-// inside the workspace root. The lexical checks (fileSafeRelPath +
-// fileJoinSafe) cannot see symlinks: a link inside the workspace (created
-// out-of-band, or by a sandboxed command) can point anywhere, and
-// os.Open/os.Create would follow it. The rule: the file target must not BE
-// a symlink (a read would follow it out), and the deepest existing ancestor
-// must resolve to at or under the resolved root (security 2026-11-20).
-func fileResolveInside(base, abs string) error {
-	realBase, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		return fmt.Errorf("could not resolve the workspace root: %v", err)
-	}
-	if st, err := os.Lstat(abs); err == nil && st.Mode()&os.ModeSymlink != 0 {
-		return errors.New("path is a symlink — the file tools do not follow symlinks out of the workspace")
-	}
-	anc := abs
-	for {
-		if _, err := os.Lstat(anc); err == nil {
-			break
+	if runtime.GOOS == "windows" {
+		if len(p) < 3 || !isASCIILetter(p[0]) || p[1] != ':' || (p[2] != '\\' && p[2] != '/') {
+			return "", errors.New(`path must be absolute inside the container (e.g. C:\data\workspaces\<id>\app.go)`)
 		}
-		parent := filepath.Dir(anc)
-		if parent == anc {
-			break
+		// A colon after the drive letter targets an NTFS alternate data
+		// stream (content invisible to listings, retrievable by name).
+		if strings.ContainsRune(p[3:], ':') {
+			return "", errors.New("paths must not contain ':' after the drive letter (on Windows a colon is the NTFS data-stream separator)")
 		}
-		anc = parent
+		p = strings.ReplaceAll(p, "/", `\`)
+		return filepath.Clean(p), nil
 	}
-	realAnc, err := filepath.EvalSymlinks(anc)
-	if err != nil {
-		return fmt.Errorf("could not resolve %q: %v", abs, err)
+	if !strings.HasPrefix(p, "/") {
+		return "", errors.New("path must be absolute inside the container (e.g. /data/workspaces/<id>/app.go)")
 	}
-	if realAnc != realBase && !strings.HasPrefix(realAnc, realBase+string(filepath.Separator)) {
-		return errors.New("path escapes the workspace (a symlink points outside)")
-	}
-	return nil
+	return path.Clean(p), nil
 }
 
-// fileWriteTarget resolves the arguments to a workspace-confined absolute
-// path. The error text is model-facing.
-func (a *Agent) fileWriteTarget(handle string, ea *editArgs) (*store.Workspace, string, string, string, error) {
-	ws, folder, err := a.resolveWorkspace(handle, ea.Workspace)
-	if err != nil {
-		return nil, "", "", "", err
-	}
-	rel, err := fileSafeRelPath(ea.Path)
-	if err != nil {
-		return nil, "", "", "", err
-	}
-	abs, err := fileJoinSafe(folder, rel)
-	if err != nil {
-		return nil, "", "", "", err
-	}
-	if err := fileResolveInside(folder, abs); err != nil {
-		return nil, "", "", "", err
-	}
-	return ws, folder, abs, rel, nil
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-// writeWorkspaceFile atomically writes content under abs (parents created),
-// enforcing the user's max_workspace_size budget against the WHOLE
-// workspace's current disk total first. Returns the bytes written.
-func (a *Agent) writeWorkspaceFile(folder, abs string, content []byte) (int64, error) {
-	// Budget: the workspace's current disk total + this write must fit under
-	// the cap (the agent must not bypass the user's disk cap in one write).
-	currentTotal, err := workspaceSize(folder)
-	if err != nil {
-		return 0, fmt.Errorf("could not check the workspace size: %v", err)
+// refreshWorkspaceFileMeta updates the P12 metadata row when the edited
+// path is a WORKSPACE file (the default layout: a workspace folder under
+// the mapped data dir) so search/ingest sees the agent's edit. Non-
+// workspace container files have no P12 rows. Best-effort — the file is on
+// disk and listings walk from disk; a metadata failure is logged, never
+// returned.
+func (a *Agent) refreshWorkspaceFileMeta(handle, containerPath, dataDir string, content []byte) {
+	// Compare in slash form (the data dir is C:\data on windows, /data on
+	// linux).
+	cp := strings.ReplaceAll(containerPath, `\`, "/")
+	prefix := strings.TrimRight(strings.ReplaceAll(dataDir, `\`, "/"), "/") + "/"
+	if !strings.HasPrefix(cp, prefix) {
+		return
 	}
-	maxSize := a.liveMaxWorkspaceSize()
-	if currentTotal+int64(len(content)) > maxSize {
-		return 0, fmt.Errorf("write would exceed the workspace size limit (%d bytes free of the %d-byte cap)", maxSize-currentTotal, maxSize)
+	rel, _ := strings.CutPrefix(cp, prefix) // "workspaces/<id>/<rest>"
+	rest, ok := strings.CutPrefix(rel, "workspaces/")
+	if !ok {
+		return
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return 0, err
+	wsID, wsRel, cut := strings.Cut(rest, "/")
+	if !cut || wsID == "" || wsRel == "" {
+		return
 	}
-	tmp := abs + ".write"
-	if err := os.WriteFile(tmp, content, 0o644); err != nil {
-		return 0, err
-	}
-	if err := os.Rename(tmp, abs); err != nil {
-		os.Remove(tmp)
-		return 0, err
-	}
-	return int64(len(content)), nil
-}
-
-// liveMaxWorkspaceSize is the admin's cap (live config, the npCfg pattern).
-func (a *Agent) liveMaxWorkspaceSize() int64 {
-	a.cfgMu.Lock()
-	defer a.cfgMu.Unlock()
-	if a.cfg.MaxWorkspaceSize > 0 {
-		return a.cfg.MaxWorkspaceSize
-	}
-	return config.DefaultMaxWorkspaceSize
-}
-
-// workspaceSize walks a folder's files (the budget check only needs the
-// total, not the listing).
-func workspaceSize(folder string) (int64, error) {
-	var total int64
-	err := filepath.Walk(folder, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // unreadable entry: skip
-		}
-		if !info.IsDir() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total, err
-}
-
-// recordWorkspaceFile updates the P12 metadata row so search/ingest sees
-// the agent's edit (best-effort — the file is on disk and listings walk
-// from disk; a metadata failure is logged, never returned).
-func (a *Agent) recordWorkspaceFile(handle string, ws *store.Workspace, abs, rel string, size int64) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return
 	}
-	data, err := os.ReadFile(abs)
+	ws, err := us.GetWorkspace(wsID)
 	if err != nil {
 		return
 	}
-	sum := sha256.Sum256(data)
-	name := path.Base(rel)
-	if err := us.UpsertWorkspaceFile(ws.ID, name, rel, size, hex.EncodeToString(sum[:]), "agent", "doc"); err != nil {
+	if ws.FolderPath != "" {
+		return // custom folder: not the mapped default layout
+	}
+	sum := sha256.Sum256(content)
+	if err := us.UpsertWorkspaceFile(ws.ID, path.Base(wsRel), wsRel, int64(len(content)), hex.EncodeToString(sum[:]), "agent", "doc"); err != nil {
 		log.Printf("edit_file metadata: %v", err)
 	}
 }
@@ -315,46 +155,51 @@ func (a *Agent) execEditFile(ctx context.Context, handle string, args json.RawMe
 	if ea.OldString == ea.NewString {
 		return "old_string and new_string are identical — nothing to change.", nil
 	}
-	ws, folder, abs, rel, err := a.fileWriteTarget(handle, &ea)
+	p, err := containerPath(ea.Path)
 	if err != nil {
 		return err.Error(), nil
 	}
-	st, err := os.Stat(abs)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Sprintf("no file at %q in workspace %q — create it first.", rel, ws.ID), nil
+	bk := a.containerBackend()
+	if bk == nil {
+		return "file editing is unavailable on this platform (no container backend).", nil
 	}
+	if a.diskIsFrozen(handle) {
+		return "the user is over their disk cap — file writes are paused. Ask them to free up disk space first.", nil
+	}
+	data, err := bk.ReadFile(ctx, handle, p)
 	if err != nil {
-		return fmt.Sprintf("could not read %q: %v", rel, err), nil
-	}
-	if st.IsDir() {
-		return fmt.Sprintf("%q is a directory, not a file.", rel), nil
-	}
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return fmt.Sprintf("could not read %q: %v", rel, err), nil
+		switch {
+		case errors.Is(err, sandbox.ErrNotRunning):
+			return "the user's container isn't running — file editing needs it (start it in the container UI).", nil
+		case errors.Is(err, sandbox.ErrFileNotFound):
+			return fmt.Sprintf("no file at %s — create it first (edit_file only edits existing files).", p), nil
+		case errors.Is(err, sandbox.ErrIsDir):
+			return fmt.Sprintf("%s is a directory, not a file.", p), nil
+		default:
+			return fmt.Sprintf("could not read %s: %v", p, err), nil
+		}
 	}
 	s := string(data)
 	count := strings.Count(s, ea.OldString)
 	switch {
 	case count == 0:
-		return "no exact match in " + rel + " — " + editNearMiss(s, ea.OldString), nil
+		return "no exact match in " + p + " — " + editNearMiss(s, ea.OldString), nil
 	case count > 1 && !ea.ReplaceAll:
-		return fmt.Sprintf("%d occurrences in %q — include more surrounding context to make the match unique, or set replace_all to replace them all.", count, rel), nil
+		return fmt.Sprintf("%d occurrences in %s — include more surrounding context to make the match unique, or set replace_all to replace them all.", count, p), nil
 	}
 	n := count
 	if ea.ReplaceAll {
 		n = -1
 	}
-	updated := strings.Replace(s, ea.OldString, ea.NewString, n)
-	written, err := a.writeWorkspaceFile(folder, abs, []byte(updated))
-	if err != nil {
-		return err.Error(), nil
+	updated := []byte(strings.Replace(s, ea.OldString, ea.NewString, n))
+	if err := bk.WriteFileAtomic(ctx, handle, p, updated); err != nil {
+		return fmt.Sprintf("could not write %s: %v", p, err), nil
 	}
-	a.recordWorkspaceFile(handle, ws, abs, rel, written)
+	a.refreshWorkspaceFileMeta(handle, p, bk.ContainerDataDir(), updated)
 	if ea.ReplaceAll {
-		return fmt.Sprintf("replaced all %d occurrences in %q.", count, rel), nil
+		return fmt.Sprintf("replaced all %d occurrences in %s.", count, p), nil
 	}
-	return fmt.Sprintf("replaced the match in %q (%d bytes written).", rel, written), nil
+	return fmt.Sprintf("replaced the match in %s (%d bytes written).", p, len(updated)), nil
 }
 
 // editNearMiss turns a 0-match edit into the model's self-healing signal:
@@ -425,7 +270,7 @@ func lineOverlap(a, b string) int {
 }
 
 // foldCount counts case-insensitive occurrences (strings.Count over the
-// folded pair — old is short, content is bounded by a workspace file).
+// folded pair — old is short, content is bounded by a container text file).
 func foldCount(content, old string) int {
 	if old == "" {
 		return 0

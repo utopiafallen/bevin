@@ -4,8 +4,6 @@ package sandbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -642,6 +640,126 @@ func (b *linuxBackend) cleanupExec(ctx context.Context, m, unit, outPath, errPat
 		fmt.Sprintf("rm -f %s %s; systemctl stop %s 2>/dev/null", outPath, errPath, unit))
 }
 
+// shellQuote quotes a value for the container's /bin/sh: single quotes with
+// embedded single quotes escaped ('\”) — the value can never break out of
+// its argument (a path is one argument, nothing more).
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ReadFile reads a file from inside the user's container
+// (container-absolute path).
+//
+// Mechanism: the same capture dance as ExecIn — `systemd-run -M <m> --wait`
+// cats the file into a /run capture file (systemd-run's own stdout goes to
+// the journal; the /run file is the capture path), fetched with
+// `machinectl copy-from`. A missing file is ErrFileNotFound, a directory
+// ErrIsDir (both wrapped, with the path).
+func (b *linuxBackend) ReadFile(ctx context.Context, handle, path string) ([]byte, error) {
+	if !strings.HasPrefix(path, "/") {
+		return nil, errors.New("path must be an absolute container path")
+	}
+	if ok, err := b.running(ctx, handle); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, ErrNotRunning
+	}
+	execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	m := b.machineName(handle)
+	suffix, err := randomHex(8)
+	if err != nil {
+		return nil, err
+	}
+	unit := "bevin-file-" + suffix + ".service"
+	outPath := "/run/bevin-file-" + suffix + ".out"
+	errPath := "/run/bevin-file-" + suffix + ".err"
+	// cat the file into the capture file (the quoted path is ONE shell
+	// argument — it cannot inject).
+	wrapper := fmt.Sprintf("( cat -- %s > %s 2> %s )", shellQuote(path), outPath, errPath)
+	args := []string{"-M", m, "--wait", "--unit", unit, "/bin/sh", "-c", wrapper}
+	_, errb, code, err := b.run(execCtx, "", "systemd-run", args...)
+	if err != nil {
+		b.cleanupExec(ctx, m, unit, outPath, errPath)
+		return nil, fmt.Errorf("reading %s failed: %v (%s)", path, err, tail(errb))
+	}
+	res := b.collectOutput(ctx, m, outPath, errPath)
+	b.cleanupExec(ctx, m, unit, outPath, errPath)
+	if code != 0 {
+		msg := strings.TrimSpace(res.Stderr)
+		switch {
+		case strings.Contains(msg, "No such file"):
+			return nil, fmt.Errorf("%w: %s", ErrFileNotFound, path)
+		case strings.Contains(msg, "Is a directory"):
+			return nil, fmt.Errorf("%w: %s", ErrIsDir, path)
+		default:
+			return nil, fmt.Errorf("reading %s failed (exit %d): %s", path, code, tail([]byte(msg)))
+		}
+	}
+	return []byte(res.Stdout), nil
+}
+
+// WriteFileAtomic atomically writes content to a container-absolute path
+// (stage next to the destination + rename — a concurrent reader never
+// observes a half-written file; the parent directory is created when
+// missing).
+//
+// Mechanism: a host temp file → `machinectl copy-to` into the container,
+// staged in the destination's OWN directory (same filesystem, so the final
+// `mv` is a rename(2), not a copy) → `systemd-run -M` moves it into place.
+func (b *linuxBackend) WriteFileAtomic(ctx context.Context, handle, path string, content []byte) error {
+	if !strings.HasPrefix(path, "/") {
+		return errors.New("path must be an absolute container path")
+	}
+	if ok, err := b.running(ctx, handle); err != nil {
+		return err
+	} else if !ok {
+		return ErrNotRunning
+	}
+	execCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	m := b.machineName(handle)
+	suffix, err := randomHex(8)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	staged := path + ".bevin-" + suffix
+	// 1. The parent directory must exist (the copy + move assume it).
+	if _, errb, code, err := b.run(execCtx, "", "systemd-run", "-M", m, "--wait", "--quiet", "/bin/mkdir", "-p", dir); err != nil || code != 0 {
+		return fmt.Errorf("creating %s failed: %v (%s)", dir, err, tail(errb))
+	}
+	// 2. The content, on the host (0644 — the mode the file lands with).
+	tmp, err := os.CreateTemp(os.TempDir(), "bevin-file-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// 3. Stage inside the container, next to the destination.
+	if _, errb, code, err := b.run(execCtx, "", "machinectl", "copy-to", m, tmpName, staged); err != nil || code != 0 {
+		return fmt.Errorf("staging %s in the container failed: %v (%s)", staged, err, tail(errb))
+	}
+	// 4. The atomic move into place (same directory = rename(2), over
+	//    an existing file when there is one).
+	if _, errb, code, err := b.run(execCtx, "", "systemd-run", "-M", m, "--wait", "--quiet", "/bin/mv", "-f", staged, path); err != nil || code != 0 {
+		_, _, _, _ = b.run(execCtx, "", "systemd-run", "-M", m, "--wait", "--quiet", "/bin/rm", "-f", staged)
+		return fmt.Errorf("writing %s failed: %v (%s)", path, err, tail(errb))
+	}
+	return nil
+}
+
 // Stop stops the user's container (the storage is preserved).
 func (b *linuxBackend) Stop(ctx context.Context, handle string) (Info, error) {
 	if _, errb, code, err := b.run(ctx, "", "systemctl", "stop", "systemd-nspawn@"+b.machineName(handle)); err != nil || code != 0 {
@@ -705,14 +823,6 @@ func (b *linuxBackend) captureBaseline(handle string) {
 		st.BaseBytes = n
 		_ = b.saveState(handle, st)
 	}
-}
-
-func randomHex(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
 }
 
 // tail returns the last ≤512 bytes of b as a printable string.

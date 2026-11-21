@@ -213,6 +213,17 @@ func (s *Scheduler) SetFrozen(f func(handle string) bool) {
 	s.mu.Unlock()
 }
 
+// Frozen reports whether the user is over their disk cap (the installed
+// check; false when none is installed).
+func (s *Scheduler) Frozen(handle string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.frozen == nil {
+		return false
+	}
+	return s.frozen(handle)
+}
+
 // Load returns the live load of every pool that has seen work (busy slots +
 // waiting jobs). It never blocks.
 func (s *Scheduler) Load() map[string]PoolLoad {

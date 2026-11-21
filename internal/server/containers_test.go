@@ -44,6 +44,12 @@ func (f *fakeSandbox) Exec(context.Context, string, string, time.Duration) (sand
 func (f *fakeSandbox) ExecIn(context.Context, string, string, string, time.Duration) (sandbox.Result, error) {
 	return sandbox.Result{}, nil
 }
+func (f *fakeSandbox) ReadFile(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+func (f *fakeSandbox) WriteFileAtomic(context.Context, string, string, []byte) error {
+	return nil
+}
 func (f *fakeSandbox) ContainerDataDir() string { return "/data" }
 func (f *fakeSandbox) Status(_ context.Context, handle string) (sandbox.Info, error) {
 	f.mu.Lock()
@@ -123,12 +129,12 @@ func TestAdminContainersEndpoint(t *testing.T) {
 			DiskMB   int `json:"disk_mb"`
 		} `json:"limits"`
 		Containers []struct {
-			Handle    string  `json:"handle"`
-			State     string  `json:"state"`
-			Running   bool    `json:"running"`
-			CPUSec    float64 `json:"cpu_seconds"`
-			RAMMB     uint64  `json:"ram_mb"`
-			DiskMB    uint64  `json:"disk_mb"`
+			Handle  string  `json:"handle"`
+			State   string  `json:"state"`
+			Running bool    `json:"running"`
+			CPUSec  float64 `json:"cpu_seconds"`
+			RAMMB   uint64  `json:"ram_mb"`
+			DiskMB  uint64  `json:"disk_mb"`
 		} `json:"containers"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {

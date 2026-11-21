@@ -23,7 +23,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,14 @@ var ErrDisabled = errors.New("sandbox: not supported on this platform")
 
 // ErrNotRunning is returned by Exec when the user's container is not up.
 var ErrNotRunning = errors.New("sandbox: the user's container is not running")
+
+// ErrFileNotFound is returned by ReadFile when the container has no such
+// file (wrapped, with the path).
+var ErrFileNotFound = errors.New("sandbox: no such file in the container")
+
+// ErrIsDir is returned by ReadFile/WriteFileAtomic when the path is a
+// directory, not a file (wrapped, with the path).
+var ErrIsDir = errors.New("sandbox: the path is a directory, not a file")
 
 // State is the lifecycle state of a user's container.
 type State string
@@ -126,6 +136,20 @@ type Backend interface {
 	// container (e.g. a workspace folder under the mapped data dir —
 	// see ContainerDataDir). An empty cwd = the data dir.
 	ExecIn(ctx context.Context, handle, command, cwd string, timeout time.Duration) (Result, error)
+
+	// ReadFile reads a file from INSIDE the user's container. path is a
+	// container-absolute path (the platform-native form: /etc/hosts on
+	// linux, C:\Windows\... on windows). The container must be running
+	// (ErrNotRunning); a missing path is ErrFileNotFound (wrapped), a
+	// directory ErrIsDir (wrapped).
+	ReadFile(ctx context.Context, handle, path string) ([]byte, error)
+
+	// WriteFileAtomic atomically writes content to a container-absolute
+	// path: it stages the new content next to the destination and renames
+	// it into place, so a concurrent reader never observes a half-written
+	// file. The parent directory is created when missing. The container
+	// must be running (ErrNotRunning).
+	WriteFileAtomic(ctx context.Context, handle, path string, content []byte) error
 
 	// ContainerDataDir is where the user's data directory is mapped in
 	// inside the container ("/data" on linux, C:\data on windows).
@@ -239,9 +263,21 @@ func ContainerBaseBytes(dataDir, handle string) int64 {
 	if err != nil {
 		return 0
 	}
-	var st struct{ BaseBytes int64 `json:"base_bytes"` }
+	var st struct {
+		BaseBytes int64 `json:"base_bytes"`
+	}
 	if err := json.Unmarshal(data, &st); err != nil {
 		return 0
 	}
 	return st.BaseBytes
+}
+
+// randomHex returns n random bytes as 2n hex chars (a unique per-call
+// suffix for capture/stage files).
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
