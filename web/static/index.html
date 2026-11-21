@@ -423,6 +423,7 @@
         cut: 0,
         raf: 0,
         t0: 0, // first delta (the live tok/s estimate starts here)
+        r0: 0, // first reasoning delta (the live THINKING tok/s estimate starts here)
         lastEst: 0
       };
     }
@@ -440,6 +441,20 @@
       var tokps = est / secs;
       a.stats.hidden = false;
       a.stats.textContent = "≈ " + (tokps >= 100 ? Math.round(tokps) : tokps.toFixed(1)) + " tok/s · streaming…";
+    }
+    // Live perf estimate while the model THINKS: the reasoning trace length
+    // is the same ~4-chars/token estimate, over the time since the first
+    // reasoning delta. Only available when the model actually emits
+    // reasoning (otherwise there is nothing to show); superseded by
+    // liveStats once content starts, then by the done event.
+    function thinkingStats(a, reasoning) {
+      if (!a.r0 || !reasoning) return;
+      var secs = (performance.now() - a.r0) / 1000;
+      if (secs < 0.3) return; // too early to mean anything
+      var est = Math.max(1, Math.round(reasoning.length / 4));
+      var tokps = est / secs;
+      a.stats.hidden = false;
+      a.stats.textContent = "≈ " + (tokps >= 100 ? Math.round(tokps) : tokps.toFixed(1)) + " tok/s · thinking…";
     }
     function finalStats(a, p) {
       // p: the done event ({elapsed_ms, ttft_ms, usage}).
@@ -786,7 +801,7 @@
       var asst = null;
       var reasoning = "";
       try {
-        var wasAtBottom = pinScroll($("#chatLog"));
+        var wasAtBottom = pinScroll($("chatLog"));
         asst = startAssistantMsg();
         if (wasAtBottom) scrollChat();
         asst.t0 = 0;
@@ -851,6 +866,14 @@
             var p; try { p = JSON.parse(data); } catch (e) { continue; }
             if (evt === "message") {
               if (p.reasoning) {
+                // Measure the follow state BEFORE the mutations (opening
+                // the block + the growing text both extend the log and
+                // would trip the pin threshold by themselves); scroll only
+                // while the user is still following — sticky: a user who
+                // scrolled up keeps their position, and returning to the
+                // bottom resumes the follow (atBottom is re-measured per
+                // delta).
+                var atBottom = pinScroll($("chatLog"));
                 reasoning += p.reasoning;
                 if (asst.details.style.display === "none") {
                   asst.details.style.display = "";
@@ -870,9 +893,10 @@
                 }
                 if (ln.length > 90) ln = ln.slice(0, 90) + "…";
                 if (ln) asst.details.querySelector("summary").textContent = "thinking — " + ln;
-                var atBottom = pinScroll($("#chatLog"));
                 asst.pre.textContent = reasoning;
-                if (atBottom) $("#chatLog").scrollTop = $("#chatLog").scrollHeight;
+                if (!asst.r0) asst.r0 = performance.now(); // live thinking stats start here
+                thinkingStats(asst, reasoning);
+                if (atBottom) $("chatLog").scrollTop = $("chatLog").scrollHeight;
               }
               if (p.delta) {
                 if (asst.details.open) asst.details.open = false; // the response started — collapse the thinking
@@ -1247,7 +1271,11 @@
             }).catch(function (err) { alert("Could not delete: " + err.message); });
           });
           row.addEventListener("click", function () {
-            if (c.id !== convID) openConversation(c.id);
+            // A row ALWAYS opens that conversation — including the already-open
+            // one when we're on another page (profile/search/workspace):
+            // convID persists across page switches, so the plain id check
+            // left the user stranded off the chat page with no way back.
+            if (c.id !== convID || page !== "chat") openConversation(c.id);
             if (isMobileNav()) closeNav(); // picking a conversation returns to the chat (mobile drawer)
           });
           row.appendChild(title);
