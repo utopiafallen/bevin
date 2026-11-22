@@ -360,6 +360,11 @@
     var page = "chat";
     function showPage(name) {
       page = name;
+      // Leaving the chat page (search / profile / workspace) aborts the
+      // current conversation's in-flight live view (the turn continues
+      // server-side and is persisted). Entering the chat page does NOT
+      // abort — openConversation / startNewChat handle the stream.
+      if (name !== "chat") abortStream(convID);
       document.body.classList.toggle("page-chat", name === "chat");
       $("chatCard").style.display = name === "chat" ? "" : "none";
       $("searchPage").style.display = name === "search" ? "" : "none";
@@ -391,7 +396,24 @@
 
     var me = null;
     var convID = null;
-    var sending = false;
+    // In-flight turns are tracked PER CONVERSATION (not a global flag): the
+    // user may leave a conversation while its turn is running — the turn
+    // continues server-side (its context is detached from the request) and
+    // is persisted — and switch to / start another. streamingConvs: the set
+    // of conversations with an in-flight turn (gates the double-send + the
+    // Send button). streamAborts: each in-flight stream's AbortController,
+    // keyed by conversation (aborted when the user navigates away — the
+    // server turn keeps running, the live view stops).
+    var streamingConvs = {};
+    var streamAborts = {};
+    // Aborts the in-flight stream for a conversation (the user navigated
+    // away). The turn continues server-side and is persisted; loadHistory
+    // renders it when the user returns. A no-op when there is no stream.
+    function abortStream(conv) {
+      if (!conv) return;
+      var ac = streamAborts[conv];
+      if (ac) { try { ac.abort(); } catch (e) {} delete streamAborts[conv]; }
+    }
 
     // The document itself never scrolls (the shell is full-viewport); this
     // pins the chat log to the bottom instead.
@@ -705,9 +727,12 @@
       var name = document.createElement("span");
       name.className = "m-name";
       name.textContent = m.display_name || m.id;
+      // The max context window as a labeled COLUMN (matching the R/K/S
+      // score columns): a "Context" label on top + the humanized size
+      // below — the bare floating number had no context of its own.
       var ctx = document.createElement("span");
       ctx.className = "m-ctx";
-      ctx.textContent = ctxSize(m.max_context);
+      ctx.innerHTML = '<span class="mk">Context</span><span class="mval">' + (ctxSize(m.max_context) || "—") + "</span>";
       b.appendChild(name);
       b.appendChild(ctx);
       b.insertAdjacentHTML("beforeend", modelScoreBars(m, true));
@@ -976,7 +1001,10 @@
     }
 
     async function sendChat() {
-      if (sending) return;
+      // Double-send guard: block only if THIS conversation already has an
+      // in-flight turn (a different conversation streaming doesn't block a
+      // send here — the user may have switched to it).
+      if (convID && streamingConvs[convID]) return;
       var input = $("message");
       var text = input.value.trim();
       if (!text) return;
@@ -993,7 +1021,6 @@
         fitMsgInput();
         return;
       }
-      sending = true;
       $("sendBtn").disabled = true;
 
       // The assistant bubble (with its animated Thinking… placeholder) is
@@ -1006,9 +1033,10 @@
       // sits below the fold until the first content delta. All of this DOM
       // prep is INSIDE the try: a failure here must take the catch/finally
       // path (error note + state reset), never an unhandled rejection that
-      // leaves sending=true and the Send button disabled forever.
+      // leaves the Send button disabled and the in-flight state stuck.
       var asst = null;
       var reasoning = "";
+      var streamConvID = null; // set once the conversation exists (a new chat creates it mid-send)
       try {
         var wasAtBottom = pinScroll($("chatScroll"));
         asst = startAssistantMsg();
@@ -1044,10 +1072,20 @@
           loadConvMeta(); // the conversation exists now: the controls unlock
           refreshHistory(); // the panel list always reflects the open conversation
         }
+        // Track the in-flight stream per conversation (the user may navigate
+        // away mid-turn: the turn keeps running server-side and is persisted,
+        // and aborting the fetch just stops the live view). The
+        // AbortController is what openConversation / startNewChat / showPage
+        // abort when the user leaves this conversation.
+        var ac = new AbortController();
+        streamConvID = convID;
+        streamingConvs[convID] = true;
+        streamAborts[convID] = ac;
         var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text })
+          body: JSON.stringify({ message: text }),
+          signal: ac.signal
         });
         if (await diskRedirect(resp)) throw new Error("disk exceeded");
         if (!resp.ok) {
@@ -1187,19 +1225,32 @@
           addErrorMsg("⚠ The stream ended before the reply completed.");
         }
       } catch (err) {
-        settleAllToolRows(); // the stream died — no row may keep pulsing
-        if (asst) {
-          if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
-          else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
+        // An intentional abort (the user navigated away mid-turn) is NOT an
+        // error: the turn continues server-side (its context is detached)
+        // and is persisted — loadHistory renders it when the user returns.
+        // Clean up the in-flight state silently; no writes to the (now
+        // other) view.
+        var wasAborted = !!(err && (err.name === "AbortError" || /abort/i.test(String(err.message || ""))));
+        if (!wasAborted) {
+          settleAllToolRows(); // the stream died — no row may keep pulsing
+          if (asst) {
+            if (!asst.buf && !reasoning) asst.m.remove(); // drop the bare placeholder
+            else if (asst.t0) { asst.stats.hidden = false; asst.stats.textContent = "interrupted · ≈ " + asst.lastEst + " tokens"; }
+          }
+          // 401 = the session died mid-session (server restarted, cookie
+          // lost): re-auth instead of stranding the user on a dead page.
+          if (err && err.status === 401) { me = null; showLogin(); return; }
+          try { addErrorMsg("⚠ " + err.message); } catch (e) {}
         }
-        // 401 = the session died mid-session (server restarted, cookie
-        // lost): re-auth instead of stranding the user on a dead page.
-        if (err && err.status === 401) { me = null; showLogin(); return; }
-        try { addErrorMsg("⚠ " + err.message); } catch (e) {}
       } finally {
-        sending = false;
-        $("sendBtn").disabled = false;
-        input.focus();
+        // Per-conversation cleanup: clear THIS send's in-flight state (the
+        // user may have navigated — the current conversation is no longer
+        // necessarily the one that was streaming). Re-enable the Send
+        // button only if the CURRENT conversation is not streaming;
+        // refocus the composer only if we're still on this conversation.
+        if (streamConvID) { delete streamingConvs[streamConvID]; delete streamAborts[streamConvID]; }
+        $("sendBtn").disabled = !!(convID && streamingConvs[convID]);
+        if (convID === streamConvID) input.focus();
       }
     }
 
@@ -1445,8 +1496,11 @@
     // New conversation: the rail's + icon (and the panel's New chat
     // button) start one — the chat view's tools row no longer carries it.
     function startNewChat() {
-      if (sending) return;
+      // Leaving a conversation that has an in-flight turn: abort the live
+      // view (the turn continues server-side and is persisted).
+      abortStream(convID);
       convID = null;
+      $("sendBtn").disabled = false; // a new conversation is not streaming
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
       pendingModelID = "";
@@ -1512,7 +1566,9 @@
           del.title = "Delete this conversation";
           del.addEventListener("click", function (e) {
             e.stopPropagation();
-            if (sending) return;
+            // A conversation with an in-flight turn can't be deleted (its
+            // turn is writing to it); any other conversation can.
+            if (streamingConvs[c.id]) return;
             if (!confirm("Delete this conversation? Its messages cannot be recovered.")) return;
             fetch("/api/conversations/" + c.id, { method: "DELETE" }).then(function (rr) {
               if (rr.ok) {
@@ -1767,9 +1823,16 @@
     // row or a search hit): set the id, clear the log, and restore the
     // persisted history.
     function openConversation(id) {
-      if (!id || sending) return;
+      if (!id) return;
+      // Leaving a conversation that has an in-flight turn: abort the live
+      // view (the turn continues server-side and is persisted —
+      // loadHistory renders it when the user returns). A no-op for the
+      // same conversation.
+      var old = convID;
+      if (old && old !== id) abortStream(old);
       convID = id;
       pendingModelID = "";
+      $("sendBtn").disabled = !!(convID && streamingConvs[convID]);
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
       showPage("chat");

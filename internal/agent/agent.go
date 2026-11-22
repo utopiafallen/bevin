@@ -954,7 +954,16 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 		return nil, err
 	}
 	prof := a.profileFor(c.ActiveModelID)
-	_, tokens := buildRequest(c, hist, prof, nil)
+	// Estimate EXACTLY the way the live turn does: with the P7 tool-call
+	// rows. Passing nil here undercounted by the entire tool transcript —
+	// the model's tool calls + their results are often the LARGEST part of
+	// the context, which is why the context bar looked "wildly off" (too
+	// low) once tool loops existed.
+	tcMap, err := toolCallsForMessages(us, hist)
+	if err != nil {
+		return nil, err
+	}
+	_, tokens := buildRequest(c, hist, prof, tcMap)
 	return map[string]any{"tokens": tokens, "max_tokens": a.modelMaxContext(c.ActiveModelID)}, nil
 }
 

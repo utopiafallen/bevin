@@ -235,9 +235,15 @@ body.page-chat .column { max-width: none; }
 #chat #message {
   flex: 1;
   /* The composer grows with its content (JS auto-resize on input), up to
-     the fixed cap below, then scrolls; word-wrap is the textarea default. */
+     the fixed cap below, then scrolls; word-wrap is the textarea default.
+     overflow-wrap: break-word makes an unbreakable run (a long URL, file
+     path, or identifier) BREAK inside the width instead of spilling over
+     horizontally — without it the composer can look "unwrapped" when it
+     holds a single token wider than its own width (and the auto-grow
+     mis-measures the height). */
   resize: none;
   overflow-y: auto;
+  overflow-wrap: break-word;
   max-height: 180px;
 }
 
@@ -331,7 +337,19 @@ body.page-chat .column { max-width: none; }
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.model-row .m-ctx { font-size: 0.72rem; color: var(--text-muted); flex: none; }
+/* The context window is a labeled COLUMN (like the R/K/S score columns):
+   the "Context" label on top + the size below — the bare floating number
+   had no label of its own. */
+.model-row .m-ctx {
+  display: inline-flex; flex-direction: column; align-items: stretch; gap: 0.15rem;
+  flex: none; width: 3.4rem;
+}
+.model-row .m-ctx .mk {
+  font-size: 0.68rem; color: var(--text-muted); white-space: nowrap;
+}
+.model-row .m-ctx .mval {
+  font-size: 0.78rem; font-weight: 700; color: var(--text);
+}
 /* Card-row metrics: the label stacks ABOVE a stretched bar (the value
    sits right of the bar) — a fixed column width so the three metrics
    line up as a table across rows. */

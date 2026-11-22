@@ -755,9 +755,12 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 // call — the model's next reply lands below the rows); when the stream
 // completes a "done" event carries the conversation id, the full reply, and
 // the API-reported usage (from the final SSE chunk); a failure sends an
-// "error" event. A client disconnect cancels the request context, aborting
-// the upstream stream. The non-streaming sendMessage remains for clients that
-// don't want incremental updates.
+// "error" event. A client disconnect does NOT cancel the turn: the turn runs
+// on a context detached from the request, so in-flight work (a tool loop the
+// user walked away from) completes and is persisted even when the viewer
+// goes — the SSE stream is just a live view of it, and the emit stops writing
+// to a gone client instead of aborting the turn. The non-streaming
+// sendMessage remains for clients that don't want incremental updates.
 func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	id := r.PathValue("id")
@@ -802,24 +805,44 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	// a long time before its first token shows it honestly).
 	start := time.Now()
 	var ttft time.Duration
-	convID, reply, err := a.ag.TurnStream(r.Context(), u.Handle, id, req.Message, func(c provider.Chunk) error {
+	// The turn runs on a context DETACHED from the request: a client
+	// disconnect (the user navigating away mid-turn, or closing the tab)
+	// must not cancel the in-flight work — it completes and is persisted
+	// regardless. The SSE stream is just a live view of it; the emit below
+	// stops writing to a gone client (and swallows write errors) so the
+	// turn never aborts because its viewer left.
+	turnCtx := context.WithoutCancel(r.Context())
+	convID, reply, err := a.ag.TurnStream(turnCtx, u.Handle, id, req.Message, func(c provider.Chunk) error {
 		if c.Usage != nil {
 			lastUsage = c.Usage
+		}
+		// The client went away (navigated / closed the tab): the turn
+		// continues (its context is detached), but there is no viewer for
+		// the events — stop writing.
+		select {
+		case <-r.Context().Done():
+			return nil
+		default:
 		}
 		if c.ToolName != "" {
 			// Harness-level tool-call indicators (not model deltas): the
 			// UI renders one row per issued call — the model's next reply
-			// (processing the results) lands below the rows.
+			// (processing the results) lands below the rows. A write
+			// failure (the client just disconnected) is swallowed — it must
+			// never abort the in-flight turn.
 			if c.ToolDone {
-				return writeEvent("tool_done", map[string]any{"name": c.ToolName, "success": c.ToolSuccess})
+				_ = writeEvent("tool_done", map[string]any{"name": c.ToolName, "success": c.ToolSuccess})
+			} else {
+				_ = writeEvent("tool", map[string]any{"name": c.ToolName})
 			}
-			return writeEvent("tool", map[string]any{"name": c.ToolName})
+			return nil
 		}
 		if c.TextDelta != "" || c.ReasoningDelta != "" {
 			if ttft == 0 {
 				ttft = time.Since(start)
 			}
-			return writeEvent("message", map[string]any{"delta": c.TextDelta, "reasoning": c.ReasoningDelta})
+			_ = writeEvent("message", map[string]any{"delta": c.TextDelta, "reasoning": c.ReasoningDelta})
+			return nil
 		}
 		return nil
 	})

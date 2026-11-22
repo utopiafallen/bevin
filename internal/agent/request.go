@@ -280,6 +280,13 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	reqMsgs := wireTurnMessages(turns, tcMap, includeReasoning)
 	for _, pm := range reqMsgs {
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
+		// The tool-call ARGUMENTS ride on the assistant message's tool_calls
+		// and are part of the prompt the model sends — count them, or the
+		// estimate undercounts a tool-using turn. (The tool RESULTS are
+		// separate role=tool messages; their Text is counted above.)
+		for _, tc := range pm.ToolCalls {
+			tokens += estimateTokens(tc.Arguments, prof)
+		}
 	}
 	req := provider.ChatRequest{System: sysParts, Messages: reqMsgs, ConversationID: conv.ID}
 	// The conversation's reasoning-effort choice, when the active model's
