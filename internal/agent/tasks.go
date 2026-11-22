@@ -10,7 +10,7 @@
 // in-progress tasks to todo and works them again.
 //
 // Spawn is a harness method (v1 has no model-facing tool and no task API —
-// the first caller is the learning re-design). A completed task's final
+// the first caller is the memory curation task). A completed task's final
 // reply is its completion summary, posted to the origin conversation when
 // one was given (the audit trail: what the agent did and learned).
 package agent

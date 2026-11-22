@@ -26,10 +26,10 @@ const (
 )
 
 // maybeSpawnCuration is the growth trigger, called from the remember
-// handler after a memory persists (the only live growth path — the learning
-// pass is disabled). When the store has grown by >= curationGrowthThreshold
-// rows past the last completed curation's end, it spawns a curation task
-// over the CLOSED [watermark+1, maxID] range. Skipped when:
+// handler after a memory persists (the only live growth path). When the
+// store has grown by >= curationGrowthThreshold rows past the last
+// completed curation's end, it spawns a curation task over the CLOSED
+// [watermark+1, maxID] range. Skipped when:
 //   - the growth hasn't reached the threshold,
 //   - a curation task is already queued/running (one at a time; a BLOCKED
 //     one is terminal, so the next crossing spawns a fresh attempt),

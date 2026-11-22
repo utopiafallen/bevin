@@ -55,13 +55,6 @@ type Agent struct {
 	tools      *ToolRegistry
 	browserMgr *browser.Manager
 
-	// llmWork counts the per-user running LLM works (turns) — the gate
-	// behind the idle learning pass's "no other LLM work running" condition
-	// (the scheduler pools are per-model and shared; see learning.go).
-	// learn is the idle learning loop (the memory model's idle reflection).
-	llmWork *llmWorkTracker
-	learn   *learningMgr
-
 	// containerBk resolves the LIVE container backend (nil = a platform
 	// with no container backend, where the file tools answer
 	// "unavailable"). Set once at startup by the server; it resolves on
@@ -89,7 +82,6 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		providers: map[string]provider.Provider{},
 		users:     map[string]*store.UserStore{},
 	}
-	a.llmWork = newLLMWorkTracker()
 	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
 		if !m.Enabled {
@@ -163,9 +155,6 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// in-memory only: a restart re-announces the full roster, which is
 	// correct for a cold start).
 	a.roster = newRosterState()
-	// The idle learning loop (armed per conversation at turn completion;
-	// the pass itself runs on the timer's goroutine, never in a turn).
-	a.learn = newLearningMgr(a)
 	// The minimal task system (tier 2). Its boot reset re-works tasks that
 	// were in-progress when the process last died (runtime state is
 	// in-memory by design — see tasks.go).
@@ -1465,9 +1454,6 @@ func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText strin
 	if err != nil {
 		return "", "", err
 	}
-	// The turn is this user's LLM work for its full duration (queue + run) —
-	// the idle learning pass's "no other LLM work running" gate reads this.
-	a.llmWork.enter(handle)
 	var (
 		reply  string
 		retErr error
@@ -1482,15 +1468,7 @@ func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText strin
 		if retErr == nil {
 			retErr = jerr
 		}
-		a.llmWork.leave(handle)
 		return conv.ID, reply, retErr
 	}
-	if retErr == nil {
-		// A clean turn: arm this conversation's idle learning pass (the
-		// memory model's idle reflection — see learning.go). A canceled
-		// turn never arms (its messages may be incomplete).
-		a.learn.onTurnComplete(handle, convID)
-	}
-	a.llmWork.leave(handle)
 	return conv.ID, reply, retErr
 }
