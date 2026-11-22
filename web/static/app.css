@@ -252,10 +252,12 @@ body.page-chat .column { max-width: none; }
   width: auto; max-width: 11rem;
   padding: 0.3rem 0.5rem; font-size: 0.88rem;
 }
-/* The model chip (closed picker): name + the current model's R/K/S
-   micro-bars, so the scores are visible even when collapsed. */
+/* The model chip (closed picker): name + the current model's named
+   score bars (Reasoning / Knowledge / Speed), so the scores are
+   visible even when collapsed. Wraps its metrics on narrow screens. */
 .model-chip {
-  display: inline-flex; align-items: center; gap: 0.5rem;
+  display: inline-flex; align-items: center; gap: 0.35rem 0.6rem;
+  flex-wrap: wrap;
   padding: 0.3rem 0.55rem;
   font: inherit; font-size: 0.88rem;
   color: var(--text); background: transparent;
@@ -264,14 +266,20 @@ body.page-chat .column { max-width: none; }
 }
 .model-chip:hover { background: var(--surface-2); }
 .model-chip:disabled { opacity: 0.5; cursor: default; }
-/* One scored metric: letter + pill bar (fill = value/10). The chip's
-   micro-bars stay tiny; the card's rows are a touch bigger and add the
-   number. */
-.metric { display: inline-flex; align-items: center; gap: 0.2rem; flex: none; }
-.metric .mk { font-size: 0.66rem; color: var(--text-muted); }
+/* One scored metric (Reasoning / Knowledge / Speed): the full name as a
+   label + a pill bar (fill = value/10) + the number. In the chip the
+   label sits inline left of the bar; in a card row it stacks on top and
+   the bar stretches. Bars are deliberately readable, not tiny. */
+.metric {
+  display: inline-flex; align-items: center; gap: 0.3rem; flex: none;
+}
+.metric .mk {
+  font-size: 0.72rem; color: var(--text-muted);
+  white-space: nowrap;
+}
 .mbar {
   position: relative;
-  width: 1.1rem; height: 0.28rem;
+  width: 2.2rem; height: 0.55rem;
   border-radius: 999px; background: var(--surface-2);
   overflow: hidden;
 }
@@ -279,7 +287,11 @@ body.page-chat .column { max-width: none; }
   position: absolute; left: 0; top: 0; bottom: 0;
   border-radius: inherit; background: var(--brand);
 }
-.metric .mval { font-size: 0.68rem; color: var(--text-muted); }
+.mscore { display: inline-flex; align-items: center; gap: 0.3rem; }
+.metric .mval {
+  font-size: 0.78rem; font-weight: 700; color: var(--text);
+  min-width: 1ch; text-align: center;
+}
 /* The model card (open picker): a block sibling between the ctx row
    and the composer — its own flow line at the column's left edge,
    capped + scrolling so any model count stays usable. Flat card
@@ -320,7 +332,17 @@ body.page-chat .column { max-width: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .model-row .m-ctx { font-size: 0.72rem; color: var(--text-muted); flex: none; }
-.model-row .mbar { width: 1.5rem; height: 0.32rem; }
+/* Card-row metrics: the label stacks ABOVE a stretched bar (the value
+   sits right of the bar) — a fixed column width so the three metrics
+   line up as a table across rows. */
+.model-row .metric {
+  flex-direction: column; align-items: stretch; gap: 0.15rem;
+  width: 3.8rem;
+}
+.model-row .mk { font-size: 0.68rem; }
+.model-row .mscore { display: flex; align-items: center; gap: 0.3rem; }
+.model-row .mbar { flex: 1; width: auto; height: 0.6rem; }
+.model-row .mval { font-size: 0.78rem; }
 .ctx-viz {
   flex: 1; min-width: 11rem;
   display: flex; align-items: center; gap: 0.5rem;

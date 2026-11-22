@@ -162,7 +162,7 @@
                    below this row (filter + one row per model with its
                    scores). The card is normal flow — it pushes the
                    composer down while open. -->
-              <button id="modelChip" class="model-chip" type="button" disabled aria-haspopup="true" aria-expanded="false" title="This conversation's model — R/K/S = reasoning / knowledge / speed, each 1-10. Changes apply from the next message."></button>
+              <button id="modelChip" class="model-chip" type="button" disabled aria-haspopup="true" aria-expanded="false" title="This conversation's model — Reasoning / Knowledge / Speed, each scored 1-10. Changes apply from the next message."></button>
               <select id="effortSelect" hidden title="Reasoning effort — how hard the model thinks (this model's supported levels)"></select>
               <div class="ctx-viz" id="ctxViz" hidden title="Context window usage for this conversation">
                 <div class="ctx-bar"><div class="ctx-fill" id="ctxFill"></div></div>
@@ -640,14 +640,15 @@
       $("ctxLabel").textContent = Math.round(used).toLocaleString() + " / " + ctxMax.toLocaleString() + " tokens (" + Math.round(pct) + "%)";
     }
 
-    // The model picker: a compact CHIP (current model + its R/K/S
-    // micro-bars — the scores stay visible even when collapsed) that
-    // expands the model CARD inline below the ctx row. The card lists
-    // every available model with its scores (name + max context left,
-    // R/K/S bars with values right); the current model leads the list
-    // (highlighted) and a filter narrows it, so any model count stays
-    // usable (the list caps at ~42vh and scrolls). The card is normal
-    // document flow — it pushes the composer down while open.
+    // The model picker: a compact CHIP (current model + its Reasoning /
+    // Knowledge / Speed score bars — the scores stay visible even when
+    // collapsed) that expands the model CARD inline below the ctx row.
+    // The card lists every available model with its scores (name + max
+    // context left, the three named score bars with values right); the
+    // current model leads the list (highlighted) and a filter narrows
+    // it, so any model count stays usable (the list caps at ~42vh and
+    // scrolls). The card is normal document flow — it pushes the
+    // composer down while open.
     //
     // Pre-selection mirrors the old select: the conversation's active
     // model (a model that fell out of the list — auto-disabled, removed
@@ -667,14 +668,22 @@
     var modelCardOpen = false;
     var modelFilterText = "";
 
-    // One R/K/S metric: letter + a small pill bar (fill = value/10)
-    // + the number (card rows only — the chip's micro-bars stay tiny).
+    // One scored metric (Reasoning / Knowledge / Speed, each 1-10): the
+    // full name as a label + a pill bar (fill = value/10) + the number
+    // (card rows only — the chip's bars stay compact). The full name is
+    // shown, never a cryptic single letter.
+    var SCORE_METRICS = [
+      ["reasoning", "Reasoning"],
+      ["knowledge", "Knowledge"],
+      ["speed", "Speed"]
+    ];
     function modelScoreBars(m, withValues) {
       var out = "";
-      [["reasoning", "R"], ["knowledge", "K"], ["speed", "S"]].forEach(function (kv) {
+      SCORE_METRICS.forEach(function (kv) {
         var v = Math.max(0, Math.min(10, m[kv[0]] || 0));
-        out += '<span class="metric"><span class="mk">' + kv[1] + '</span><span class="mbar"><i style="width:' + (v * 10) + '%"></i></span>' +
-          (withValues ? '<span class="mval">' + v + '</span>' : "") + "</span>";
+        out += '<span class="metric"><span class="mk">' + kv[1] + '</span>' +
+          '<span class="mscore"><span class="mbar"><i style="width:' + (v * 10) + '%"></i></span>' +
+          (withValues ? '<span class="mval">' + v + '</span>' : "") + "</span></span>";
       });
       return out;
     }
