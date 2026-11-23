@@ -308,11 +308,19 @@ func (a *Agent) profileFor(modelID string) profile.Profile {
 // ReasoningEffortsFor returns the model's profile's supported reasoning-effort
 // levels — the per-conversation control's option list for that model (the
 // chat UI populates its dropdown from it; an EMPTY slice means the model
-// takes no explicit effort, and the UI hides the control). The live-config
+// takes no explicit effort, and the UI hides the control). The argument is a
+// model REFERENCE (a display name or a concrete model ID) — it resolves to
+// the concrete provider first (a display name takes the least-loaded; all
+// providers of a display name share the model's profile, so the efforts are
+// the same regardless of which provider it lands on). The live-config
 // resolution is the same as profileFor: a profile reassignment applies from
 // the next read, no restart.
-func (a *Agent) ReasoningEffortsFor(modelID string) []string {
-	efforts := a.profileFor(modelID).ReasoningEfforts
+func (a *Agent) ReasoningEffortsFor(ref string) []string {
+	resolved, ok := a.resolveModelRef(ref)
+	if !ok {
+		return []string{}
+	}
+	efforts := a.profileFor(resolved).ReasoningEfforts
 	if efforts == nil {
 		return []string{}
 	}
@@ -424,6 +432,82 @@ func (a *Agent) AllModels() []config.Model {
 	return out
 }
 
+// DisplayModel is one row of the user's model picker: a DISPLAY NAME (the
+// stable user-facing model identity — the picker's key) + the POOLED
+// execution-slot count (the sum of the slots of every available provider
+// serving that display name — adding a provider adds to the display model's
+// pool) + the representative context/scores/effort (from the first provider
+// in catalog order). The concrete provider a conversation actually lands on
+// is chosen at selection time (the least-loaded — see resolveModelRef) and
+// is an internal detail; the picker shows the display model, not the
+// providers.
+type DisplayModel struct {
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"display_name"`
+	MaxContext       int      `json:"max_context"`
+	Slots            int      `json:"slots"`
+	Reasoning        int      `json:"reasoning"`
+	Knowledge        int      `json:"knowledge"`
+	Speed            int      `json:"speed"`
+	ReasoningEfforts []string `json:"reasoning_efforts"`
+}
+
+// DisplayModels returns the user's model-picker rows: one per DISPLAY NAME
+// (deduped — a display name maps one-to-many to model providers, and the
+// picker surfaces each display name once), with the pooled slot count (the
+// sum of the slots of every available provider serving it) + the
+// representative context/scores/effort (from the first provider in catalog
+// order).
+func (a *Agent) DisplayModels() []DisplayModel {
+	models := a.Models() // available (concrete) models, catalog order
+	type group struct {
+		repID string // the representative provider's concrete model ID (first in catalog order)
+		slots int    // the pooled slot count
+	}
+	order := []string{}
+	groups := map[string]*group{}
+	for _, m := range models {
+		g, ok := groups[m.DisplayName]
+		if !ok {
+			g = &group{repID: m.ID}
+			groups[m.DisplayName] = g
+			order = append(order, m.DisplayName)
+		}
+		slots := m.Slots
+		if slots < 1 {
+			slots = 1
+		}
+		g.slots += slots
+	}
+	out := make([]DisplayModel, 0, len(order))
+	for _, dn := range order {
+		g := groups[dn]
+		var rep config.Model
+		found := false
+		for _, m := range models {
+			if m.ID == g.repID {
+				rep = m
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		out = append(out, DisplayModel{
+			ID:               dn,
+			DisplayName:      dn,
+			MaxContext:       rep.MaxContext,
+			Slots:            g.slots,
+			Reasoning:        rep.Metadata.Reasoning,
+			Knowledge:        rep.Metadata.Knowledge,
+			Speed:            rep.Metadata.Speed,
+			ReasoningEfforts: a.ReasoningEffortsFor(g.repID),
+		})
+	}
+	return out
+}
+
 // isAutoDisabled reports whether the model is currently auto-disabled.
 func (a *Agent) isAutoDisabled(modelID string) bool {
 	a.cfgMu.Lock()
@@ -512,40 +596,45 @@ func (a *Agent) UserStoreFor(handle string) (*store.UserStore, error) {
 	return a.userStore(handle)
 }
 
-// NewConversationModel resolves the model a brand-new conversation for the
-// user takes when the request does not pin one: their per-user default from
-// agent.toml (set in first-time onboarding) while it is still configured +
-// available, else the server default ("" when no model is available at all).
-// The create endpoint and the chat's new-conversation preview (the client
-// mirrors it from /api/me + /api/models) MUST agree — this is the single
-// source of truth for the resolution.
+// NewConversationModel resolves the model REFERENCE a brand-new conversation
+// for the user takes when the request does not pin one: their per-user
+// default from agent.toml (set in first-time onboarding — a DISPLAY NAME,
+// since the picker is keyed by display name) while it still resolves to an
+// available model, else the server default's display name ("" when no model
+// is available at all). It returns a display name so the client's
+// new-conversation preview (which mirrors it by matching /api/me's
+// default_model_id against the deduped /api/models rows' ids) agrees. The
+// create endpoint and the preview MUST agree — this is the single source of
+// truth for the resolution; the concrete provider is chosen when the
+// reference is resolved (newUserConversation → resolveModelRef).
 func (a *Agent) NewConversationModel(handle string) string {
-	modelID := a.DefaultModelID()
 	if ac, err := config.LoadAgent(filepath.Join(a.dataDir, "users", handle)); err == nil && ac.DefaultModelID != "" {
-		for _, m := range a.Models() {
-			if m.ID == ac.DefaultModelID && m.Available() {
-				modelID = ac.DefaultModelID
-				break
-			}
+		if resolved, ok := a.resolveModelRef(ac.DefaultModelID); ok {
+			return a.displayNameFor(resolved)
 		}
 	}
-	return modelID
+	return a.DefaultModelDisplayName()
 }
 
 // newUserConversation creates a conversation with modelID + an optional
 // reasoning effort, the frozen system prompt set at creation. modelID "" =
-// the user's preferred model (NewConversationModel); a pinned modelID must
-// be available. effort "" = the model's profile default; a pinned effort
-// must be one of the model's profile levels.
+// the user's preferred model (NewConversationModel, a display name); a
+// pinned modelID is a model reference (a display name OR a concrete model
+// ID). The reference is RESOLVED to a concrete model ID (a display name
+// takes the least-loaded available provider that serves it — the execution
+// pool; a concrete id keeps itself), and the conversation KEEPS that
+// concrete id (a stable provider — its KV cache is preserved across the
+// conversation's turns). effort "" = the model's profile default; a pinned
+// effort must be one of the model's profile levels.
 func (a *Agent) newUserConversation(us *store.UserStore, handle, title, modelID, effort string) (*store.Conversation, error) {
 	if modelID == "" {
 		modelID = a.NewConversationModel(handle)
-	} else if !a.ModelAvailable(modelID) {
+	}
+	resolved, ok := a.resolveModelRef(modelID)
+	if !ok || resolved == "" {
 		return nil, fmt.Errorf("model %s is not available", modelID)
 	}
-	if modelID == "" {
-		return nil, fmt.Errorf("no available models to start a conversation")
-	}
+	modelID = resolved
 	if effort != "" {
 		supported := false
 		for _, e := range a.ReasoningEffortsFor(modelID) {
@@ -639,14 +728,19 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 		}
 		return conv.ID, nil
 	}
-	// modelID was validated by the caller against the enabled set; fall back
-	// to the server default if it is somehow not available.
+	// modelID was validated by the caller (a model reference — a display name
+	// or a concrete model ID); resolve it to a concrete model ID (a display
+	// name takes the least-loaded available provider that serves it). Fall
+	// back to the server default (a concrete model ID, resolves to itself) if
+	// it is somehow not available.
 	if modelID == "" || !a.ModelAvailable(modelID) {
 		modelID = a.DefaultModelID()
 	}
-	if modelID == "" {
+	resolved, ok := a.resolveModelRef(modelID)
+	if !ok || resolved == "" {
 		return "", fmt.Errorf("no available models to start a conversation")
 	}
+	modelID = resolved
 	c, err := us.CreateConversation(onboardingTitle, modelID)
 	if err != nil {
 		return "", err
@@ -664,15 +758,90 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	return c.ID, nil
 }
 
-// ModelAvailable reports whether modelID is configured, enabled and not
-// auto-disabled (i.e. usable for new work right now).
-func (a *Agent) ModelAvailable(modelID string) bool {
-	for _, m := range a.Models() {
-		if m.ID == modelID {
-			return m.Available()
+// resolveModelRef resolves a model reference (a display name OR a concrete
+// model ID) to a concrete model ID. A concrete model ID (available)
+// resolves to itself. A display name resolves to the least-loaded available
+// provider that serves it — the many-to-one display-name→provider mapping
+// (the execution pool is the union of the providers' slots, and a new
+// conversation takes the provider with the most idle capacity, ties broken
+// by catalog order via config.ResolveDisplayName). ok=false when the
+// reference names no available model.
+//
+// This is the single entry point for model SELECTION (conversation create +
+// switch + the per-user default). The conversation KEEPS the resolved
+// concrete model ID (a stable provider — its KV cache is preserved across
+// the conversation's turns); it is not re-resolved per turn.
+func (a *Agent) resolveModelRef(ref string) (string, bool) {
+	a.cfgMu.Lock()
+	models := make([]config.Model, len(a.cfg.Models))
+	copy(models, a.cfg.Models)
+	a.cfgMu.Unlock()
+	// 1. A concrete model ID (exact match, available) resolves to itself.
+	for _, m := range models {
+		if m.ID == ref && m.Available() {
+			return m.ID, true
 		}
 	}
-	return false
+	// 2. A display name resolves to the least-loaded available provider.
+	for _, m := range models {
+		if m.DisplayName == ref && m.Available() {
+			if resolved, ok := config.ResolveDisplayName(models, ref, a.idleSlotsFor); ok && resolved.ID != "" {
+				return resolved.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+// idleSlotsFor returns a model's idle execution slots (its slot count minus
+// how many are busy right now, from the scheduler) — the score
+// config.ResolveDisplayName uses to pick the least-loaded provider for a
+// display name. Never negative.
+func (a *Agent) idleSlotsFor(m config.Model) int {
+	slots := a.modelSlots(m.ID)
+	busy := 0
+	if l, ok := a.sched.Load()[m.ID]; ok {
+		busy = l.Busy
+	}
+	if slots > busy {
+		return slots - busy
+	}
+	return 0
+}
+
+// displayNameFor returns a concrete model ID's display name (the user-facing
+// model identity) — "" when the ID is unknown (a model removed from the
+// config). The conversation summary carries it so the picker (keyed by
+// display name) can highlight the active model.
+func (a *Agent) displayNameFor(concreteModelID string) string {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	for _, m := range a.cfg.Models {
+		if m.ID == concreteModelID {
+			return m.DisplayName
+		}
+	}
+	return ""
+}
+
+// DefaultModelDisplayName returns the server default model's display name —
+// the /api/models "default" field, the client's new-conversation preview
+// fallback when the user has no per-user default (now a display name, to
+// match the deduped picker rows).
+func (a *Agent) DefaultModelDisplayName() string {
+	a.mu.Lock()
+	id := a.defaultModel
+	a.mu.Unlock()
+	return a.displayNameFor(id)
+}
+
+// ModelAvailable reports whether the model reference (a display name or a
+// concrete model ID) resolves to an available model — usable for new work
+// right now. A model that is merely offline can still be referenced by a
+// conversation in flight.
+func (a *Agent) ModelAvailable(ref string) bool {
+	_, ok := a.resolveModelRef(ref)
+	return ok
 }
 
 // indexMessage embeds + upserts a persisted message into the user's vector
@@ -852,10 +1021,24 @@ type ConversationSummary struct {
 	CreatedAt      string `json:"created_at"`
 	LastActivityAt string `json:"last_activity_at"`
 	ActiveModelID  string `json:"active_model_id"`
+	// DisplayName: the active model's display name (the user-facing model
+	// identity — the picker row key). A display name maps one-to-many to
+	// model providers; active_model_id is the CONCRETE provider the
+	// conversation is pinned to (its KV cache is preserved), and this is
+	// how the picker (keyed by display name) highlights the active model.
+	// "" when the model was removed from the config.
+	DisplayName string `json:"display_name"`
 	// ReasoningEffort: the conversation's stored reasoning-effort choice
 	// ("" = the model's own default — the UI's dropdown then shows the
 	// default).
 	ReasoningEffort string `json:"reasoning_effort"`
+}
+
+// conversationSummary builds a ConversationSummary from a store conversation,
+// resolving the display name (the user-facing model identity) from the
+// concrete active model ID.
+func (a *Agent) conversationSummary(c store.Conversation) ConversationSummary {
+	return ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, DisplayName: a.displayNameFor(c.ActiveModelID), ReasoningEffort: c.ReasoningEffort}
 }
 
 // Conversations lists the user's conversations, most recently active first
@@ -871,7 +1054,7 @@ func (a *Agent) Conversations(handle string) ([]ConversationSummary, error) {
 	}
 	out := make([]ConversationSummary, 0, len(convos))
 	for _, c := range convos {
-		out = append(out, ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort})
+		out = append(out, a.conversationSummary(c))
 	}
 	return out, nil
 }
@@ -888,7 +1071,8 @@ func (a *Agent) Conversation(handle, convID string) (*ConversationSummary, error
 	if err != nil {
 		return nil, err
 	}
-	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort}, nil
+	s := a.conversationSummary(*c)
+	return &s, nil
 }
 
 // UpdateConversation changes a conversation's active model, title, and/or
@@ -908,7 +1092,16 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 		return nil, err
 	}
 	if modelID != nil && *modelID != "" {
-		if err := us.SetConversationModel(convID, *modelID); err != nil {
+		// Resolve the model reference (a display name or a concrete model ID)
+		// to a concrete model ID: a display name takes the least-loaded
+		// available provider that serves it (the execution pool), a concrete id
+		// keeps itself. The conversation KEEPS the resolved concrete id (a
+		// stable provider — its KV cache is preserved).
+		resolved, ok := a.resolveModelRef(*modelID)
+		if !ok || resolved == "" {
+			return nil, fmt.Errorf("model %s is not available", *modelID)
+		}
+		if err := us.SetConversationModel(convID, resolved); err != nil {
 			return nil, err
 		}
 	}
@@ -930,7 +1123,8 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 	if err != nil {
 		return nil, err
 	}
-	return &ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, ReasoningEffort: c.ReasoningEffort}, nil
+	s := a.conversationSummary(*c)
+	return &s, nil
 }
 
 // ContextUsage reports what the conversation's NEXT turn would send: the

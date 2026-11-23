@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -244,16 +245,30 @@ func TestConversationIDWire(t *testing.T) {
 	}
 
 	// llama.cpp shares the OAI wire: the STREAMING path (the one the UI
-	// uses) carries the field the same way.
+	// uses) carries the field the same way. The mock routes the new native
+	// slot API (GET /slots + POST /slots/{id}/save|restore, used for the
+	// per-conversation KV cache) separately from the chat completions call.
 	var llamaBody map[string]any
+	var slotCalls []string
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		llamaBody = mustDecodeBody(t, r)
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/slots":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":0},{"id":1}]`))
+			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/slots/"):
+			slotCalls = append(slotCalls, r.URL.Path)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		default:
+			llamaBody = mustDecodeBody(t, r)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
 
 data: [DONE]
 
 `)
+		}
 	}))
 	defer srv2.Close()
 	_, err = NewLlama(srv2.URL, "").Stream(context.Background(), "m", ChatRequest{
@@ -268,6 +283,22 @@ data: [DONE]
 	}
 	if llamaBody["stream"] != true {
 		t.Fatalf("llama stream flag = %v, want true", llamaBody["stream"])
+	}
+	// Slot pinning: the request carries id_slot (the conversation is pinned
+	// to a slot so its KV cache lives there).
+	if _, present := llamaBody["id_slot"]; !present {
+		t.Fatalf("llama streaming request must pin a slot (id_slot), got %v", llamaBody)
+	}
+	// Cache management: the first turn for a conversation restores its cache
+	// (no save — there is no prior conversation on the slot to save).
+	foundRestore := false
+	for _, c := range slotCalls {
+		if strings.HasSuffix(c, "/restore") {
+			foundRestore = true
+		}
+	}
+	if !foundRestore {
+		t.Fatalf("expected a cache restore on the conversation's first turn, slot calls = %v", slotCalls)
 	}
 
 	// Anthropic: silently dropped — its request never carries the field.
@@ -286,6 +317,165 @@ data: [DONE]
 	}
 	if _, present := antBody["conversation_id"]; present {
 		t.Fatalf("the Anthropic provider must drop conversation_id (no such API field), got %v", antBody)
+	}
+}
+
+// TestLlamaSlotCache verifies the per-conversation KV cache management on the
+// llama provider: the slot pinning (id_slot), the save/restore of
+// cache_conv_<id>.bin when a slot's conversation changes, the 8k-token resave
+// cadence, and the best-effort guarantee (a failed save/restore never breaks
+// the request). A mock llama server records the native slot API calls (their
+// filenames) + serves a configurable completion-token count.
+func TestLlamaSlotCache(t *testing.T) {
+	type call struct {
+		action   string // "save" | "restore"
+		slot     int
+		filename string
+	}
+	var mu sync.Mutex
+	var calls []call
+	completionTokens := 100 // default per-turn completion tokens
+	failSlots := false      // when true, the slot API returns 500 (best-effort)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/slots":
+			// A single-slot server: every conversation pins slot 0, so a
+			// conversation switch always saves the prior conversation's cache
+			// + restores the new one's (the user's "last conversation per
+			// provider" model).
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":0}]`))
+			return
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/save"):
+			mu.Lock()
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			calls = append(calls, call{action: "save", filename: fmt.Sprintf("%v", b["filename"])})
+			mu.Unlock()
+			if failSlots {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"save failed"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/restore"):
+			mu.Lock()
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			calls = append(calls, call{action: "restore", filename: fmt.Sprintf("%v", b["filename"])})
+			mu.Unlock()
+			if failSlots {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"restore failed"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		default:
+			// chat completions: return a configurable completion-token count.
+			mu.Lock()
+			ct := completionTokens
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":%d,"total_tokens":%d}}`, ct, 5+ct)
+		}
+	}))
+	defer srv.Close()
+
+	p := NewLlama(srv.URL, "")
+	chat := func(convID string) error {
+		_, err := p.Chat(context.Background(), "m", ChatRequest{
+			Messages:       []Message{{Role: RoleUser, Text: "hi"}},
+			ConversationID: convID,
+		})
+		return err
+	}
+	snapshot := func() []call {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]call, len(calls))
+		copy(out, calls)
+		return out
+	}
+	hasCall := func(cs []call, action, filename string) bool {
+		for _, c := range cs {
+			if c.action == action && c.filename == filename {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Turn 1: conversation A's FIRST turn — restores A's cache (no save: the
+	// slot has no prior conversation).
+	if err := chat("convA"); err != nil {
+		t.Fatalf("turn A1: %v", err)
+	}
+	cs := snapshot()
+	if !hasCall(cs, "restore", cacheFile("convA")) {
+		t.Fatalf("A1 must restore cache_conv_convA.bin, calls = %v", cs)
+	}
+	if len(cs) != 1 {
+		t.Fatalf("A1 must make exactly one slot call (the restore — no prior conversation to save), calls = %v", cs)
+	}
+
+	// Turn 2: conversation B (a switch) — saves A's cache + restores B's.
+	if err := chat("convB"); err != nil {
+		t.Fatalf("turn B1: %v", err)
+	}
+	cs = snapshot()
+	if !hasCall(cs, "save", cacheFile("convA")) {
+		t.Fatalf("B1 must save cache_conv_convA.bin (the prior conversation), calls = %v", cs)
+	}
+	if !hasCall(cs, "restore", cacheFile("convB")) {
+		t.Fatalf("B1 must restore cache_conv_convB.bin, calls = %v", cs)
+	}
+
+	// Turn 3: back to conversation A — saves B's cache + restores A's.
+	if err := chat("convA"); err != nil {
+		t.Fatalf("turn A2: %v", err)
+	}
+	cs = snapshot()
+	if !hasCall(cs, "save", cacheFile("convB")) {
+		t.Fatalf("A2 must save cache_conv_convB.bin, calls = %v", cs)
+	}
+	if !hasCall(cs, "restore", cacheFile("convA")) {
+		t.Fatalf("A2 must re-restore cache_conv_convA.bin, calls = %v", cs)
+	}
+
+	// 8k resave: a turn with >= 8000 completion tokens re-saves the cache
+	// WITHOUT a conversation switch (no restore — same conversation).
+	mu.Lock()
+	completionTokens = 8000
+	mu.Unlock()
+	before := len(snapshot())
+	if err := chat("convA"); err != nil {
+		t.Fatalf("turn A3 (8k): %v", err)
+	}
+	cs = snapshot()
+	newCalls := cs[before:]
+	if !hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("A3 (8k tokens) must re-save cache_conv_convA.bin, new calls = %v", newCalls)
+	}
+	restored := false
+	for _, c := range newCalls {
+		if c.action == "restore" {
+			restored = true
+		}
+	}
+	if restored {
+		t.Fatalf("A3 must NOT restore (same conversation, no switch), new calls = %v", newCalls)
+	}
+
+	// Best-effort: a failing slot API (500) never breaks the request.
+	mu.Lock()
+	failSlots = true
+	completionTokens = 100
+	mu.Unlock()
+	if err := chat("convC"); err != nil {
+		t.Fatalf("a failing slot API must not break the request, got: %v", err)
 	}
 }
 

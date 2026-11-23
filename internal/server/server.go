@@ -451,27 +451,17 @@ func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// models is the user's model picker data: one row per DISPLAY NAME
+// (deduped — a display name maps one-to-many to model providers, and the
+// picker surfaces each display name once, with the POOLED slot count: the
+// sum of the slots of every available provider serving it). The "default"
+// field is the server default's display name — the client's new-conversation
+// preview matches it (and the per-user default) against the rows' ids.
 func (a *App) models(w http.ResponseWriter, _ *http.Request) {
-	type pubModel struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"display_name"`
-		ModelID     string `json:"model_id"`
-		MaxContext  int    `json:"max_context"`
-		Slots       int    `json:"slots"`
-		Reasoning   int    `json:"reasoning"`
-		Knowledge   int    `json:"knowledge"`
-		Speed       int    `json:"speed"`
-		// ReasoningEfforts: the model's profile's supported reasoning-effort
-		// levels (the chat's per-conversation control is populated from them;
-		// EMPTY = the model takes no explicit effort, so the UI hides the
-		// control).
-		ReasoningEfforts []string `json:"reasoning_efforts"`
-	}
-	out := []pubModel{}
-	for _, m := range a.ag.Models() {
-		out = append(out, pubModel{m.ID, m.DisplayName, m.ModelID, m.MaxContext, m.Slots, m.Metadata.Reasoning, m.Metadata.Knowledge, m.Metadata.Speed, a.ag.ReasoningEffortsFor(m.ID)})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": out, "default": a.ag.DefaultModelID()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"models":  a.ag.DisplayModels(),
+		"default": a.ag.DefaultModelDisplayName(),
+	})
 }
 
 // createConversation is the chat's "new conversation" + first message: the

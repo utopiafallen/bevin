@@ -52,25 +52,40 @@ func (l *Llama) do(ctx context.Context, method, path string, body []byte, out an
 }
 
 func (l *Llama) Chat(ctx context.Context, model string, req ChatRequest) (*Result, error) {
-	ocr, err := buildOAIChatRequest(req, model, false, true) // videoOK
+	ocr, err := buildOAIChatRequest(req, model, false, true)
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(ocr)
+	// Pin the conversation to a slot + manage its KV cache (save/restore,
+	// best-effort). Meta-calls carry no ConversationID, so this is a no-op
+	// for them.
+	slot := l.prepareSlotCache(ctx, req.ConversationID)
+	if slot >= 0 {
+		ocr.SlotID = &slot
+	}
+	body, _ := json.Marshal(ocr)
 	var cr oaiChatResponse
-	if err := l.do(ctx, http.MethodPost, "/chat/completions", b, &cr); err != nil {
+	if err := l.do(ctx, http.MethodPost, "/chat/completions", body, &cr); err != nil {
 		return nil, err
 	}
-	return decodeOAIResult(cr), nil
+	res := decodeOAIResult(cr)
+	l.noteTurnCompletion(ctx, req.ConversationID, slot, completionTokens(res))
+	return res, nil
 }
 
 func (l *Llama) Stream(ctx context.Context, model string, req ChatRequest, emit func(Chunk) error) (*Result, error) {
-	ocr, err := buildOAIChatRequest(req, model, true, true) // videoOK
+	ocr, err := buildOAIChatRequest(req, model, true, true)
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(ocr)
-	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, l.BaseURL+"/chat/completions", bytes.NewReader(b))
+	// Pin the conversation to a slot + manage its KV cache (best-effort); a
+	// no-op for meta-calls (no ConversationID).
+	slot := l.prepareSlotCache(ctx, req.ConversationID)
+	if slot >= 0 {
+		ocr.SlotID = &slot
+	}
+	body, _ := json.Marshal(ocr)
+	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, l.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +145,25 @@ func (l *Llama) Stream(ctx context.Context, model string, req ChatRequest, emit 
 		}
 	}
 	res.ToolCalls = acc.Result()
+	l.noteTurnCompletion(ctx, req.ConversationID, slot, completionTokens(&res))
 	return &res, scanner.Err()
+}
+
+// authorize sets the bearer auth header on a request when the provider has an
+// API key (shared by the OpenAI wire calls and the native slot API).
+func (l *Llama) authorize(req *http.Request) {
+	if l.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+l.APIKey)
+	}
+}
+
+// completionTokens returns a result's completion-token count (0 when the
+// backend didn't report usage).
+func completionTokens(r *Result) int {
+	if r == nil || r.Usage == nil {
+		return 0
+	}
+	return r.Usage.CompletionTokens
 }
 
 // Models lists models with their modalities (llama exposes

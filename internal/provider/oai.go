@@ -78,9 +78,14 @@ type oaiChatRequest struct {
 	// proxy reads it to save/load the slot's KV cache per conversation.
 	// Omitted when empty (internal meta-calls); backends without the
 	// feature ignore the unknown field.
-	ConversationID string            `json:"conversation_id,omitempty"`
-	Stream         bool              `json:"stream,omitempty"`
-	StreamOptions  *oaiStreamOptions `json:"stream_options,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	// SlotID: the llama slot to pin the request to (id_slot). llama.cpp's
+	// OpenAI path copies unknown body fields into its slot allocator, so
+	// this pins the conversation to a slot (its KV cache then lives there).
+	// nil for non-llama providers + llama meta-calls (no conversation cache).
+	SlotID        *int              `json:"id_slot,omitempty"`
+	Stream        bool              `json:"stream,omitempty"`
+	StreamOptions *oaiStreamOptions `json:"stream_options,omitempty"`
 }
 
 type oaiUsage struct {

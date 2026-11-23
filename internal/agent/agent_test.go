@@ -285,27 +285,134 @@ func TestCreateConversationModelAndEffort(t *testing.T) {
 	}
 
 	// The per-user agent.toml default (m2) beats the server default while
-	// it is available.
+	// it is available. NewConversationModel returns the model REFERENCE (the
+	// display name — the user-facing identity; the create path resolves it
+	// to the least-loaded provider that serves it).
 	if err := config.SaveAgent(filepath.Join(dir, "users", "u1"), &config.AgentConfig{DefaultModelID: "m2"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.NewConversationModel("u1"); got != "m2" {
-		t.Fatalf("NewConversationModel = %q, want the user default m2", got)
+	if got := a.NewConversationModel("u1"); got != "Y" {
+		t.Fatalf("NewConversationModel = %q, want the user default's display name Y (m2)", got)
 	}
 	id, err = a.CreateConversation(context.Background(), "u1", "user-default", "", "")
 	if err != nil {
 		t.Fatalf("create with user default: %v", err)
 	}
 	if m, _ := getModel(id); m != "m2" {
-		t.Fatalf("user-default create = %q, want m2", m)
+		t.Fatalf("user-default create = %q, want m2 (the concrete provider resolved from the display name)", m)
 	}
 
 	// A user default that is no longer available falls back to the server
-	// default.
+	// default (its display name).
 	if err := config.SaveAgent(filepath.Join(dir, "users", "u1"), &config.AgentConfig{DefaultModelID: "m-gone"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := a.NewConversationModel("u1"); got != "m1" {
-		t.Fatalf("NewConversationModel with a dead default = %q, want the server default m1", got)
+	if got := a.NewConversationModel("u1"); got != "X" {
+		t.Fatalf("NewConversationModel with a dead default = %q, want the server default's display name X (m1)", got)
+	}
+}
+
+// newPoolAgent builds an agent with two providers that serve the SAME display
+// name ("Qwen") — the many-to-one mapping — with different slot counts, plus
+// a third, distinct display name ("Solo").
+func newPoolAgent(t *testing.T) (*Agent, *config.ServerConfig) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := &config.ServerConfig{
+		Version: config.ConfigVersion,
+		Auth:    config.Auth{Mode: "internal", SessionSecret: "test-secret"},
+		Models: []config.Model{
+			{ID: "q1", Provider: "openai", BaseURL: "http://a", ModelID: "q", DisplayName: "Qwen", MaxContext: 8000, Slots: 2, Enabled: true},
+			{ID: "q2", Provider: "openai", BaseURL: "http://b", ModelID: "q", DisplayName: "Qwen", MaxContext: 8000, Slots: 3, Enabled: true},
+			{ID: "s1", Provider: "openai", BaseURL: "http://c", ModelID: "s", DisplayName: "Solo", MaxContext: 4000, Slots: 1, Enabled: true},
+		},
+	}
+	a, err := New(cfg, dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return a, cfg
+}
+
+// TestDisplayModelsDedup pins the picker dedup: two providers serving the
+// same display name surface ONCE, with the POOLED slot count (the sum of the
+// providers' slots).
+func TestDisplayModelsDedup(t *testing.T) {
+	a, _ := newPoolAgent(t)
+	defer a.Close()
+
+	dms := a.DisplayModels()
+	// Two display names (Qwen deduped from two providers + Solo).
+	if len(dms) != 2 {
+		t.Fatalf("DisplayModels() = %d rows, want 2 (Qwen deduped + Solo): %+v", len(dms), dms)
+	}
+	byName := map[string]DisplayModel{}
+	for _, d := range dms {
+		byName[d.DisplayName] = d
+	}
+	q, ok := byName["Qwen"]
+	if !ok {
+		t.Fatalf("Qwen row missing: %+v", dms)
+	}
+	// The pooled slot count = 2 (q1) + 3 (q2) = 5.
+	if q.Slots != 5 {
+		t.Fatalf("Qwen pooled slots = %d, want 5 (2+3)", q.Slots)
+	}
+	// The representative context = the first provider's (8000).
+	if q.MaxContext != 8000 {
+		t.Fatalf("Qwen max context = %d, want 8000", q.MaxContext)
+	}
+	// The row's id IS the display name (the picker row key).
+	if q.ID != "Qwen" {
+		t.Fatalf("Qwen row id = %q, want the display name", q.ID)
+	}
+	s, ok := byName["Solo"]
+	if !ok {
+		t.Fatalf("Solo row missing: %+v", dms)
+	}
+	if s.Slots != 1 {
+		t.Fatalf("Solo slots = %d, want 1", s.Slots)
+	}
+}
+
+// TestResolveModelRef pins the many-to-one resolution: a display name
+// resolves to the least-loaded available provider that serves it (more idle
+// slots wins; ties keep catalog order), and a concrete model ID resolves to
+// itself. An unavailable reference resolves to nothing.
+func TestResolveModelRef(t *testing.T) {
+	a, _ := newPoolAgent(t)
+	defer a.Close()
+
+	// Nothing is busy: Qwen resolves to the provider with the most slots
+	// (q2, 3 idle beats q1's 2 idle).
+	if id, ok := a.resolveModelRef("Qwen"); !ok || id != "q2" {
+		t.Fatalf("resolveModelRef(Qwen) = (%q, %v), want (q2, true) — the most-idle provider", id, ok)
+	}
+	// A concrete model ID resolves to itself.
+	if id, ok := a.resolveModelRef("q1"); !ok || id != "q1" {
+		t.Fatalf("resolveModelRef(q1) = (%q, %v), want (q1, true)", id, ok)
+	}
+	// Solo resolves to its only provider.
+	if id, ok := a.resolveModelRef("Solo"); !ok || id != "s1" {
+		t.Fatalf("resolveModelRef(Solo) = (%q, %v), want (s1, true)", id, ok)
+	}
+	// An unknown reference resolves to nothing.
+	if id, ok := a.resolveModelRef("Nope"); ok || id != "" {
+		t.Fatalf("resolveModelRef(Nope) = (%q, %v), want (\"\", false)", id, ok)
+	}
+
+	// Auto-disable q2 (the most-idle provider): Qwen now resolves to q1.
+	a.SetModelAutoDisabled("q2", true)
+	if id, ok := a.resolveModelRef("Qwen"); !ok || id != "q1" {
+		t.Fatalf("resolveModelRef(Qwen) after q2 auto-disable = (%q, %v), want (q1, true)", id, ok)
+	}
+	// Auto-disable q1 too: the display name has no available provider.
+	a.SetModelAutoDisabled("q1", true)
+	if id, ok := a.resolveModelRef("Qwen"); ok || id != "" {
+		t.Fatalf("resolveModelRef(Qwen) with all providers auto-disabled = (%q, %v), want (\"\", false)", id, ok)
+	}
+	// Solo is unaffected.
+	if id, ok := a.resolveModelRef("Solo"); !ok || id != "s1" {
+		t.Fatalf("resolveModelRef(Solo) = (%q, %v), want (s1, true)", id, ok)
 	}
 }

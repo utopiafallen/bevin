@@ -872,7 +872,10 @@
         if (!r.ok) return;
         var j = await r.json();
         var c = j.conversation || {};
-        buildModelSelect(c.active_model_id || null, c.reasoning_effort || "");
+        // Highlight the active model by its DISPLAY NAME (the picker row key)
+        // — active_model_id is the concrete provider (an internal detail; a
+        // display name maps one-to-many to providers).
+        buildModelSelect(c.display_name || null, c.reasoning_effort || "");
         if (j.context) updateCtx(j.context.tokens || 0, j.context.max_tokens || 0);
       } catch (e) { /* best-effort — the chat itself still works */ }
     }
@@ -910,7 +913,9 @@
         }
         var j = await r.json();
         var c = j.conversation || {};
-        currentModelID = c.active_model_id || next;
+        // The conversation's model by DISPLAY NAME (the picker row key) —
+        // active_model_id is the concrete provider it resolved to.
+        currentModelID = c.display_name || next;
         buildModelSelect(currentModelID, c.reasoning_effort || "");
         // The old effort choice may not be valid for the new model — clear
         // it so the stored state matches what will actually run.
