@@ -45,15 +45,15 @@ var scrollJS = `(() => {
 
 // ScrollResult is one scroll call's outcome (before the tool renders it).
 type ScrollResult struct {
-	Target  string  // "document" or "<tag>#<id>"
-	Prev    float64 // the scroll position before the move
-	Top     float64 // the new scroll position
-	Max     float64 // the furthest scrollable position
-	Vh      float64 // the target's viewport height
-	Bottom  bool    // the bottom was reached (nothing more below)
-	Nudge   bool    // the move was large (>2 viewports) — the seatbelt line
-	Settled bool
-	Took    time.Duration
+	Target string  // "document" or "<tag>#<id>"
+	Prev   float64 // the scroll position before the move
+	Top    float64 // the new scroll position
+	Max    float64 // the furthest scrollable position
+	Vh     float64 // the target's viewport height
+	Bottom bool    // the bottom was reached (nothing more below)
+	Nudge  bool    // the move was large (>2 viewports) — the seatbelt line
+	Settle SettleState
+	Took   time.Duration
 }
 
 // Scroll moves the tab's page (or its inner scroll container) by whole
@@ -120,15 +120,15 @@ func (i *Instance) Scroll(ctx context.Context, tabID, direction string, viewport
 		return nil, err
 	}
 	return &ScrollResult{
-		Target:  raw.Target,
-		Prev:    raw.Prev,
-		Top:     raw.Top,
-		Max:     raw.Max,
-		Vh:      raw.Vh,
-		Bottom:  raw.Top >= raw.Max-2,
-		Nudge:   largeScrollNudgeNeeded(raw.Prev, raw.Top, raw.Vh),
-		Settled: settled,
-		Took:    took,
+		Target: raw.Target,
+		Prev:   raw.Prev,
+		Top:    raw.Top,
+		Max:    raw.Max,
+		Vh:     raw.Vh,
+		Bottom: raw.Top >= raw.Max-2,
+		Nudge:  largeScrollNudgeNeeded(raw.Prev, raw.Top, raw.Vh),
+		Settle: settled,
+		Took:   took,
 	}, nil
 }
 
@@ -140,7 +140,7 @@ func ScrollReport(sr *ScrollResult) string {
 	} else {
 		out += " (more content may be below)"
 	}
-	out += fmt.Sprintf(" — page %s", settleWord(sr.Settled, sr.Took))
+	out += fmt.Sprintf(" — page %s", settleNote(sr.Settle, sr.Took))
 	if sr.Nudge {
 		out += "\nNOTE: " + LargeScrollNudge
 	}

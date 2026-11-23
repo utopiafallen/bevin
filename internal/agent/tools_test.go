@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/utopiafallen/bevin/internal/browser"
 	"github.com/utopiafallen/bevin/internal/profile"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
@@ -533,50 +532,8 @@ func TestTurnStreamExecutesToolCalls(t *testing.T) {
 	}
 }
 
-// TestParseElementID: the #N ids the model references (from the last read's
-// element table) — the parse is strict (a bare number or a non-number is a
-// model error the tool reports, not a crash).
-func TestParseElementID(t *testing.T) {
-	cases := []struct {
-		in      string
-		want    int
-		wantErr bool
-	}{
-		{"#1", 1, false},
-		{"  #42 ", 42, false},
-		{"#0", 0, true},
-		{"5", 0, true},
-		{"#abc", 0, true},
-		{"#", 0, true},
-		{"", 0, true},
-	}
-	for _, c := range cases {
-		got, err := parseElementID(c.in)
-		if c.wantErr {
-			if err == nil {
-				t.Fatalf("parseElementID(%q) = %d, want an error", c.in, got)
-			}
-			continue
-		}
-		if err != nil || got != c.want {
-			t.Fatalf("parseElementID(%q) = %d, %v; want %d", c.in, got, err, c.want)
-		}
-	}
-}
-
-// TestResolveTarget: click/type/select resolve their target from a #N id
-// (server-side, against the LATEST read's table — a stale id fails with the
-// read-again hint) or from a raw selector (the advanced fallback); neither
-// is an argument error the model must fix.
-func TestResolveTarget(t *testing.T) {
-	inst := &browser.Instance{} // zero value: no read yet
-	if _, err := resolveTarget(inst, "", "#3", ""); err == nil || !strings.Contains(err.Error(), "not in the last read") {
-		t.Fatalf("stale #N err = %v, want the read-again hint", err)
-	}
-	if _, err := resolveTarget(inst, "", "", ""); err == nil {
-		t.Fatal("no target must be an error")
-	}
-	if got, err := resolveTarget(inst, "", "", "body > a"); err != nil || got != "body > a" {
-		t.Fatalf("raw selector = %q, %v", got, err)
-	}
-}
+// The #N target resolution (parse + the read-again hint on a stale id + the
+// raw-selector pass-through) moved to the browser package's ElementTarget
+// (2026-11-23, with the re-match) — it needs a live page for the full path,
+// so the live e2e pins it (the #N click after a DOM rearrange) instead of
+// a unit test on the parse alone.

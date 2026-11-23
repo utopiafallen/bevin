@@ -24,17 +24,19 @@ import (
 // details live in the parameter descriptions, not the body.
 const webBrowserDescriptionBase = `Browse the web in a real desktop browser the bevin server runs in a dedicated profile (logins made in it persist). #N = an interactive element id from the last read.
 Commands:
-- openTab (url?) — open a tab (becomes the current one)
-- navigate (url) — load url in the current tab (waits for load)
-- read (selector?) — the page as clean markdown + numbered interactive elements (#N: role "name"). How you see content (the whole page, untruncated); selector scopes the read to a subtree.
-- readItems (selector) — the items matching selector, in VISUAL order (not DOM order), deduped, text + first link, after the page settles.
+- openTab (url?) — open a tab (becomes the current one); the result carries the page title (a 404 title is visible without a read)
+- navigate (url) — load url in the current tab (waits for load); the result carries the page title
+- read (selector?) — the page as clean markdown + numbered interactive elements (#N: role "name"). How you see content (the whole page, untruncated); selector scopes the read to a subtree. A settle note under the url says whether the content is final, stable, or a snapshot.
+- readItems (selector) — the items matching selector, in VISUAL order (not DOM order), deduped, text + first link, after the page settles (boilerplate — nav/header/footer/dialogs — is excluded).
+- collect (selector) — EVERY item matching selector on the page, lazy-loaded ones included: scrolls + settles + dedupes until the bottom or nothing new; ONE call, and the result says exactly how it stopped.
 - scroll (direction?, viewports?) — move whole viewports (direction down|up|top|bottom, default: down 1) and wait for settle; reports position + bottom reached.
 - click (element|selector) — click #N or a CSS selector
 - type (element|selector, text) — click + type (a trailing newline = Enter)
 - select (element|selector, value) — pick a <select> option (value or visible text)
+- fill (fields, submit?) — type text into SEVERAL fields in one call (fields: a map, each key = #N or selector), then click submit; if a field fails, submit is NOT clicked
 - waitFor (selector, timeout_ms?) — wait until a selector is present+visible (default 10 s)
 - listTabs / closeTab (tab?)
-Workflow: openTab/navigate → read → act with #N → read again after each action (the page changes; stale #N ids fail). Lazy-loaded/virtualized list pages: read to find the item's selector, then loop scroll + readItems until nothing new appears or the bottom is reached.`
+Workflow: openTab/navigate → read → act with #N → read again after each action (the page changes; #N ids that fail are re-matched by their text, so a re-rendered page usually still works). List pages: collect (the item's selector) gets the whole list in one call; the manual loop (read → find the selector → scroll + readItems) still works when you need per-batch control.`
 
 // webBrowserWireDescription is the web_browser description for ONE turn's
 // wire request: the base + the search note matching this instance's
@@ -67,13 +69,15 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type": "string",
-					"enum": []string{"openTab", "navigate", "read", "readItems", "scroll", "click", "type", "select", "waitFor", "listTabs", "closeTab"},
+					"enum": []string{"openTab", "navigate", "read", "readItems", "collect", "scroll", "click", "type", "select", "fill", "waitFor", "listTabs", "closeTab"},
 				},
 				"url":        map[string]any{"type": "string", "description": "openTab / navigate (http/https only)"},
-				"element":    map[string]any{"type": "string", "description": "click/type/select: #N id from the last read"},
-				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, scope for read, item selector for readItems, wait target for waitFor"},
+				"element":    map[string]any{"type": "string", "description": "click/type/select and each key of fill: #N id from the last read"},
+				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, scope for read, item selector for readItems/collect (ONE item in the list), wait target for waitFor"},
 				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},
 				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
+				"fields":     map[string]any{"type": "object", "description": "fill: a map of field (a #N id or selector) → text to type"},
+				"submit":     map[string]any{"type": "string", "description": "fill: the #N id or selector of the submit control to click after the fields (optional)"},
 				"direction":  map[string]any{"type": "string", "description": "scroll: down|up|top|bottom (default down)"},
 				"viewports":  map[string]any{"type": "number", "description": "scroll: viewport heights to move (default 1)"},
 				"tab":        map[string]any{"type": "string", "description": "tab id from listTabs (default: this conversation's current tab — the last one it opened or used)"},
@@ -89,16 +93,18 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 // There is deliberately NO expression/JS field: model-controlled JS
 // execution in the page was removed (security — see registerWebBrowser).
 type webBrowserArgs struct {
-	Command   string `json:"command"`
-	URL       string `json:"url"`
-	Element   string `json:"element"`
-	Selector  string `json:"selector"`
-	Text      string `json:"text"`
-	Value     string `json:"value"`
-	Direction string `json:"direction"`
-	Viewports int    `json:"viewports"`
-	Tab       string `json:"tab"`
-	TimeoutMS int    `json:"timeout_ms"`
+	Command   string            `json:"command"`
+	URL       string            `json:"url"`
+	Element   string            `json:"element"`
+	Selector  string            `json:"selector"`
+	Text      string            `json:"text"`
+	Value     string            `json:"value"`
+	Fields    map[string]string `json:"fields"`
+	Submit    string            `json:"submit"`
+	Direction string            `json:"direction"`
+	Viewports int               `json:"viewports"`
+	Tab       string            `json:"tab"`
+	TimeoutMS int               `json:"timeout_ms"`
 }
 
 // executeWebBrowser is the web_browser executor bound to the browser manager.
@@ -132,6 +138,9 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 				}
 				return unavailable("openTab", err), nil
 			}
+			if t.Title != "" {
+				return fmt.Sprintf("opened tab %s at %s (loaded — title: %q). read to see the page.", t.ID, t.URL, t.Title), nil
+			}
 			return fmt.Sprintf("opened tab %s at %s (loaded). read to see the page.", t.ID, t.URL), nil
 		case "navigate":
 			if a.URL == "" {
@@ -143,6 +152,9 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			if err := inst.Navigate(ctx, tab, a.URL); err != nil {
 				return unavailable("navigate", err), nil
+			}
+			if title := inst.Title(ctx, tab); title != "" {
+				return fmt.Sprintf("navigated to %s (loaded — title: %q). read to see the page.", a.URL, title), nil
 			}
 			return fmt.Sprintf("navigated to %s (loaded). read to see the page.", a.URL), nil
 		case "read":
@@ -165,6 +177,26 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 				return unavailable("readItems", err), nil
 			}
 			return browser.BoundItems(pi), nil
+		case "collect":
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
+			if err != nil {
+				return unavailable("collect", err), nil
+			}
+			rep, err := inst.Collect(ctx, tab, a.Selector)
+			if err != nil {
+				return unavailable("collect", err), nil
+			}
+			return browser.FormatCollect(rep), nil
+		case "fill":
+			tab, err := inst.ResolveTab(ctx, convID, a.Tab)
+			if err != nil {
+				return unavailable("fill", err), nil
+			}
+			out, err := inst.Fill(ctx, convID, tab, a.Fields, a.Submit)
+			if err != nil {
+				return unavailable("fill", err), nil
+			}
+			return out, nil
 		case "scroll":
 			dir := strings.ToLower(a.Direction)
 			if dir == "" {
@@ -192,7 +224,7 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return browser.ScrollReport(sr), nil
 		case "click", "type", "select":
-			return doElementAction(ctx, inst, convID, a, handle)
+			return doElementAction(ctx, inst, convID, a)
 		case "waitFor":
 			if a.Selector == "" {
 				return "waitFor needs a selector (a CSS selector that should become present and visible).", nil
@@ -236,53 +268,22 @@ func executeWebBrowser(bm *browser.Manager) func(ctx context.Context, handle str
 			}
 			return fmt.Sprintf("closed tab %s.", id), nil
 		default:
-			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, readItems, scroll, click, type, select, waitFor, listTabs, closeTab.", a.Command), nil
+			return fmt.Sprintf("unknown command %q — the commands are: openTab, navigate, read, readItems, collect, scroll, click, type, select, fill, waitFor, listTabs, closeTab.", a.Command), nil
 		}
 	}
 }
 
-// resolveTarget turns a click/type/select's element-or-selector arg into a
-// CSS selector: a "#N" id resolves against the CALLING conversation's
-// LATEST read's element table (the server-side resolution — the model never
-// guesses selectors); anything else is taken as a raw selector (the
-// advanced fallback).
-func resolveTarget(inst *browser.Instance, convID, element, selector string) (string, error) {
-	if element != "" {
-		n, err := parseElementID(element)
-		if err != nil {
-			return "", err
-		}
-		ref, ok := inst.ElementByN(convID, n)
-		if !ok {
-			return "", fmt.Errorf("element #%d is not in the last read's table — the page may have changed; read again and use a fresh #N", n)
-		}
-		return ref.Selector, nil
+// doElementAction runs click/type/select: resolve the target (#N re-matched
+// when the page re-rendered — the browser's ElementTarget; a raw selector
+// used exactly as given), and drive it with real input events (click) or
+// click + insert (type) or a value set + events (select).
+func doElementAction(ctx context.Context, inst *browser.Instance, convID string, a webBrowserArgs) (string, error) {
+	key := a.Element
+	if key == "" {
+		key = a.Selector
 	}
-	if selector != "" {
-		return selector, nil
-	}
-	return "", fmt.Errorf("needs an element (#N from the last read) or a selector")
-}
-
-func parseElementID(s string) (int, error) {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "#") {
-		return 0, fmt.Errorf("%q is not an element id (ids look like #12, from the last read)", s)
-	}
-	var n int
-	if _, err := fmt.Sscanf(s[1:], "%d", &n); err != nil || n < 1 {
-		return 0, fmt.Errorf("%q is not an element id (ids look like #12, from the last read)", s)
-	}
-	return n, nil
-}
-
-// doElementAction runs click/type/select: resolve the target, get its
-// viewport center, and drive it with real input events (click) or click +
-// insert (type) or a value set + events (select).
-func doElementAction(ctx context.Context, inst *browser.Instance, convID string, a webBrowserArgs, handle string) (string, error) {
-	selector, err := resolveTarget(inst, convID, a.Element, a.Selector)
-	if err != nil {
-		return err.Error(), nil
+	if key == "" {
+		return "needs an element (#N from the last read) or a selector.", nil
 	}
 	tab, err := inst.ResolveTab(ctx, convID, a.Tab)
 	if err != nil {
@@ -292,28 +293,24 @@ func doElementAction(ctx context.Context, inst *browser.Instance, convID string,
 	if err != nil {
 		return unavailable(a.Command, err), nil
 	}
+	x, y, selector, err := inst.ElementTarget(ctx, session, convID, key)
+	if err != nil {
+		return err.Error(), nil
+	}
 	switch a.Command {
 	case "click":
-		x, y, err := inst.ElementCenter(ctx, session, selector)
-		if err != nil {
-			return err.Error(), nil
-		}
 		if err := inst.ClickAt(ctx, session, x, y); err != nil {
 			return unavailable("click", err), nil
 		}
-		return fmt.Sprintf("clicked %s — the page may have changed; read again before the next action.", selector), nil
+		return fmt.Sprintf("clicked %s — the page may have changed; read again before the next action.", key), nil
 	case "type":
 		if a.Text == "" {
 			return "type needs a text.", nil
 		}
-		x, y, err := inst.ElementCenter(ctx, session, selector)
-		if err != nil {
-			return err.Error(), nil
-		}
 		if err := inst.TypeAt(ctx, session, x, y, a.Text); err != nil {
 			return unavailable("type", err), nil
 		}
-		return fmt.Sprintf("typed %d characters into %s.", len(a.Text), selector), nil
+		return fmt.Sprintf("typed %d characters into %s.", len(a.Text), key), nil
 	case "select":
 		if a.Value == "" {
 			return "select needs a value.", nil

@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// TestSettleDecision pins the pure stability rule: stable when nothing is
-// in flight AND the last DOM mutation is at least the quiet window old in
-// PAGE time (no cross-clock comparison).
+// TestSettleDecision pins the pure ready-indicator rule: stable when
+// nothing is in flight AND the last DOM mutation is at least the quiet
+// window old in PAGE time (no cross-clock comparison).
 func TestSettleDecision(t *testing.T) {
 	const quietMs = 300.0
 	type tc struct {
@@ -34,6 +34,52 @@ func TestSettleDecision(t *testing.T) {
 		if got := settleDecision(c.now, c.lastMut, c.qms, c.inFlight); got != c.want {
 			t.Errorf("%s: settleDecision = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestSettleOutcome pins the settle wait's three outcomes: the ready
+// indicator, the stall abandon (a quiet DOM with a busy network — the
+// content is what it's going to be), and the churn backstop (a page that
+// never goes quiet). The order matters: stalled beats churn (a quiet DOM
+// past the churn cap is still the truer "content-stable" claim), and
+// neither fires while the page is still progressing.
+func TestSettleOutcome(t *testing.T) {
+	cases := []struct {
+		name        string
+		now, lastMu float64
+		inFlight    int
+		elapsed     time.Duration
+		want        SettleState
+	}{
+		{"indicator: idle + quiet past the window", 5000, 4000, 0, 4500 * time.Millisecond, SettleSettled},
+		{"indicator: idle but still churning", 5000, 4900, 0, 4500 * time.Millisecond, SettleWaiting},
+		{"busy network, fresh mutation: keep waiting", 5000, 4900, 1, 4500 * time.Millisecond, SettleWaiting},
+		{"busy network, quiet for 5s: keep waiting", 5000, 0, 1, 4500 * time.Millisecond, SettleWaiting},
+		{"busy network, quiet for 10.5s: stalled (content-stable)", 10500, 0, 1, 8000 * time.Millisecond, SettleStalled},
+		{"stalled beats churn: quiet 11s + elapsed 15s is content-stable", 11000, 0, 1, 15 * time.Second, SettleStalled},
+		{"idle + churning at the 15s cap: snapshot", 15500, 15400, 0, 15 * time.Second, SettleChurning},
+		{"busy network, churning at the 15s cap: snapshot", 15500, 15400, 1, 15 * time.Second, SettleChurning},
+		{"quiet for 9.9s, not yet stalled", 10400, 500, 1, 8000 * time.Millisecond, SettleWaiting},
+	}
+	for _, c := range cases {
+		if got := settleOutcome(c.now, c.lastMu, c.inFlight, c.elapsed); got != c.want {
+			t.Errorf("%s: settleOutcome = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSettleNote pins the three wordings (the tool never leaves the model
+// guessing what it got): settled says how long it took, stalled says the
+// content is complete-unless-interactive, churning says snapshot.
+func TestSettleNote(t *testing.T) {
+	if got := settleNote(SettleSettled, 420*time.Millisecond); got != "settled in 420ms" {
+		t.Fatalf("settled note = %q", got)
+	}
+	if got := settleNote(SettleStalled, 10*time.Second); !strings.Contains(got, "network is still busy") || !strings.Contains(got, "complete") {
+		t.Fatalf("stalled note = %q", got)
+	}
+	if got := settleNote(SettleChurning, 15*time.Second); !strings.Contains(got, "never went quiet") || !strings.Contains(got, "snapshot") {
+		t.Fatalf("churning note = %q", got)
 	}
 }
 
@@ -63,7 +109,7 @@ func TestLargeScrollNudge(t *testing.T) {
 // TestScrollReport pins the scroll result's rendering: the position line,
 // the bottom/no-bottom wording, and the settle state.
 func TestScrollReport(t *testing.T) {
-	sr := &ScrollResult{Target: "document", Top: 900, Max: 4500, Settled: true, Took: 420 * time.Millisecond}
+	sr := &ScrollResult{Target: "document", Top: 900, Max: 4500, Settle: SettleSettled, Took: 420 * time.Millisecond}
 	out := ScrollReport(sr)
 	for _, want := range []string{
 		"scrolled document to 900 of 4500",
@@ -74,12 +120,12 @@ func TestScrollReport(t *testing.T) {
 			t.Fatalf("ScrollReport missing %q:\\n%s", want, out)
 		}
 	}
-	sr2 := &ScrollResult{Target: "div#list", Top: 4500, Max: 4500, Bottom: true, Settled: false, Took: 5 * time.Second}
+	sr2 := &ScrollResult{Target: "div#list", Top: 4500, Max: 4500, Bottom: true, Settle: SettleChurning, Took: 15 * time.Second}
 	out2 := ScrollReport(sr2)
 	for _, want := range []string{
 		"scrolled div#list to 4500 of 4500",
 		"bottom reached — no more content below",
-		"still settling after 5s",
+		"the page never went quiet — content is a snapshot",
 	} {
 		if !strings.Contains(out2, want) {
 			t.Fatalf("ScrollReport (bottom) missing %q:\\n%s", want, out2)
@@ -91,7 +137,7 @@ func TestScrollReport(t *testing.T) {
 
 	// A large move (the nudge flag set by Scroll from the measured
 	// delta) carries the one-line seatbelt.
-	sr3 := &ScrollResult{Target: "document", Prev: 0, Top: 4500, Max: 4500, Vh: 900, Bottom: true, Nudge: true, Settled: true, Took: 600 * time.Millisecond}
+	sr3 := &ScrollResult{Target: "document", Prev: 0, Top: 4500, Max: 4500, Vh: 900, Bottom: true, Nudge: true, Settle: SettleSettled, Took: 600 * time.Millisecond}
 	if out3 := ScrollReport(sr3); !strings.Contains(out3, "step one viewport at a time instead") {
 		t.Fatalf("a nudged scroll must carry the nudge line:\\n%s", out3)
 	}
@@ -102,9 +148,9 @@ func TestScrollReport(t *testing.T) {
 // notice, and the empty-view notice.
 func TestBoundItems(t *testing.T) {
 	pi := &PageItems{
-		Dups:    2,
-		Settled: true,
-		Took:    400 * time.Millisecond,
+		Dups:   2,
+		Settle: SettleSettled,
+		Took:   400 * time.Millisecond,
 		Items: []ItemRef{
 			{N: 1, Text: "First item"},
 			{N: 2, Text: "Second item", URL: "https://example.com/2"},

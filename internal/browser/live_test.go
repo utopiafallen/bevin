@@ -48,6 +48,10 @@ func TestWebBrowserLive(t *testing.T) {
 <div id="after" style="display:none"></div>
 <input id="q" type="text" placeholder="search">
 <select id="pick"><option value="a">Option A</option><option value="b">Option B</option></select>
+<span id="actwrap"><button class="applybtn" onclick="var d=document.getElementById('after2');d.style.display='block';d.textContent='applied!'">apply</button></span>
+<div id="after2" style="display:none"></div>
+<div id="formwrap"><input id="f1" type="text" placeholder="first field"><input id="f2" type="text" placeholder="second field"><button class="submitbtn" onclick="var d=document.getElementById('after3');d.style.display='block';d.textContent=document.getElementById('f1').value+'|'+document.getElementById('f2').value">send</button></div>
+<div id="after3" style="display:none"></div>
 ` + longBody.String() + `</body></html>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, page)
@@ -173,6 +177,74 @@ func TestWebBrowserLive(t *testing.T) {
 	}
 	if !strings.Contains(out, "Option B") {
 		t.Fatalf("SelectValue = %q, want the chosen option", out)
+	}
+
+	// Re-match (BROWSER-ROBUST batch 1): the "apply" button has NO id —
+	// the read stored it an nth-of-type PATH. The page re-renders (a new
+	// button inserted before it — the path now matches the WRONG
+	// element), and the stored #N must still resolve to the right
+	// element: the resolver verifies the stored hit's identity (tag +
+	// name) and re-matches by (tag + name) — the failure that killed 10
+	// of 12 clicks in the car-research session.
+	apply := find("button", "apply")
+	if apply.N < 1 {
+		t.Fatalf("the apply button is not in the element table:\n%s", FormatRead(pr))
+	}
+	if _, err := inst.Evaluate(ctx, session, `(() => { const b = document.createElement("button"); b.textContent = "other"; b.id = "otherbtn"; document.getElementById("actwrap").insertBefore(b, document.querySelector(".applybtn")); return "ok"; })()`); err != nil {
+		t.Fatalf("DOM rearrange: %v", err)
+	}
+	ax, ay, aSel, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N))
+	if err != nil {
+		t.Fatalf("ElementTarget (re-match) = %v — the stored #N must survive a re-render", err)
+	}
+	if strings.Contains(aSel, "otherbtn") {
+		t.Fatalf("re-match resolved %q — that is the WRONG element (the shifted path's hit)", aSel)
+	}
+	if err := inst.ClickAt(ctx, session, ax, ay); err != nil {
+		t.Fatalf("ClickAt (re-match): %v", err)
+	}
+	ok3, took3, err := inst.Wait(ctx, tab.ID, "#after2", 15*time.Second)
+	if err != nil {
+		t.Fatalf("Wait (re-match): %v", err)
+	}
+	if !ok3 {
+		t.Fatalf("the re-matched click had no effect after %s (it landed on the wrong element)", took3)
+	}
+
+	// Ambiguity: two buttons with the same name — the resolver must
+	// refuse to guess (the "read again and use a fresh #N" outcome, not
+	// a silent mis-click).
+	if _, err := inst.Evaluate(ctx, session, `(() => { const b = document.createElement("button"); b.textContent = "apply"; b.id = "applydup"; document.getElementById("actwrap").appendChild(b); return "ok"; })()`); err != nil {
+		t.Fatalf("DOM ambiguity: %v", err)
+	}
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N)); err == nil || !strings.Contains(err.Error(), "multiple elements match") {
+		t.Fatalf("ambiguous re-match err = %v, want the multiple-match refusal", err)
+	}
+
+	// Fill (BROWSER-ROBUST batch 2): one call fills BOTH fields (by their
+	// placeholder names — not selectors) and clicks the submit; the
+	// per-field outcomes come back in the result (the car-research
+	// session needed four separate calls for this).
+	res, err := inst.Fill(ctx, "", tab.ID, map[string]string{"first field": "alpha", "second field": "beta"}, "send")
+	if err != nil {
+		t.Fatalf("Fill: %v", err)
+	}
+	if strings.Contains(res, "failed") || strings.Contains(res, "not found") {
+		t.Fatalf("fill must succeed on a static form:\\n%s", res)
+	}
+	v3, err := inst.Evaluate(ctx, session, `[document.getElementById("f1").value, document.getElementById("f2").value]`)
+	if err != nil {
+		t.Fatalf("Evaluate (fill check): %v", err)
+	}
+	if strings.TrimSpace(string(v3)) != `["alpha","beta"]` {
+		t.Fatalf("filled values = %s, want [\"alpha\",\"beta\"]", v3)
+	}
+	ok4, took4, err := inst.Wait(ctx, tab.ID, "#after3", 15*time.Second)
+	if err != nil {
+		t.Fatalf("Wait (fill submit): %v", err)
+	}
+	if !ok4 {
+		t.Fatalf("the fill's submit click had no effect after %s", took4)
 	}
 
 	// tab management: the browser was launched with ONE initial tab (the
@@ -339,7 +411,7 @@ for (let n = 1; n <= 20; n++) render(n);
 	if pi.Dups != 1 {
 		t.Fatalf("initial dups = %d, want 1 (the duplicate-text item)", pi.Dups)
 	}
-	if !pi.Settled {
+	if pi.Settle != SettleSettled {
 		t.Fatal("the initial read must settle (a static page settles within the quiet window)")
 	}
 	for i, it := range pi.Items {
@@ -436,4 +508,138 @@ for (let n = 1; n <= 20; n++) render(n);
 	if sr2.Nudge && !strings.Contains(ScrollReport(sr2), "step one viewport at a time instead") {
 		t.Fatalf("a nudged scroll must carry the nudge line: %q", ScrollReport(sr2))
 	}
+}
+
+// TestWebBrowserCollectLive (design log BROWSER-ROBUST batch 2,
+// 2026-11-23): collect is the TASK-SHAPED lazy-list command — one call
+// does the scroll+settle+extract+dedupe loop that the model used to do
+// itself (the car-research transcript: 15+ scroll/readItems pairs to
+// gather one list). Same lazy page as TestWebBrowserLazyListLive: the
+// single call must return the whole list in order with a stop reason —
+// no model-side bookkeeping, no partial snapshot.
+func TestWebBrowserCollectLive(t *testing.T) {
+	if os.Getenv("BEVIN_E2E_BROWSER") != "1" {
+		t.Skip("set BEVIN_E2E_BROWSER=1 to run the live browser e2e (needs a desktop host with a browser)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	const totalItems = 60
+	var mu sync.Mutex
+	fetches := 0
+	// The same lazy-list page as the manual-loop test (20 sync, then
+	// batches of 10 after a 250 ms fetch on scroll-near-bottom, plus the
+	// duplicate-text item).
+	listPage := fmt.Sprintf(`<html><head><meta charset="utf-8"><title>Lazy List</title>
+<style>body{margin:0}.item{height:50px;line-height:50px;padding:0 8px;box-sizing:border-box;border-bottom:1px solid #ccc}</style>
+</head><body>
+<div id="list"></div>
+<div class="item" id="dup">Product 1 — some details about item 1</div>
+<script>
+const total = %d;
+let next = 21, busy = false, done = false;
+const list = document.getElementById("list");
+function render(n) {
+  const d = document.createElement("div");
+  d.className = "item";
+  d.textContent = "Product " + n + " — some details about item " + n;
+  list.appendChild(d);
+}
+async function more() {
+  if (busy || done) return;
+  busy = true;
+  try {
+    const res = await fetch("/more?from=" + next);
+    if (!res.ok) return;
+    const batch = await res.json();
+    if (batch.length) {
+      for (const n of batch) render(n);
+      next = batch[batch.length - 1] + 1;
+      if (next > total) done = true;
+    }
+  } finally { busy = false; }
+}
+window.addEventListener("scroll", () => {
+  const de = document.scrollingElement;
+  if (de.scrollTop + window.innerHeight >= de.scrollHeight - 100) {
+    setTimeout(more, 100);
+  }
+});
+for (let n = 1; n <= 20; n++) render(n);
+</script>
+</body></html>`, totalItems)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/lazy":
+			fmt.Fprint(w, listPage)
+		case "/more":
+			from, err := strconv.Atoi(r.URL.Query().Get("from"))
+			if err != nil || from < 1 {
+				http.Error(w, "bad from", http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			fetches++
+			mu.Unlock()
+			time.Sleep(250 * time.Millisecond)
+			batch := []int{}
+			for n := from; n <= totalItems && n < from+10; n++ {
+				batch = append(batch, n)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(batch)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dataDir := t.TempDir()
+	mgr := NewManager(dataDir)
+	t.Cleanup(func() {
+		mgr.Close()
+		time.Sleep(2 * time.Second)
+	})
+	inst, err := mgr.ForUser(ctx, "e2e-collect")
+	if err != nil {
+		t.Fatalf("ForUser (browser launch): %v", err)
+	}
+	tab, err := inst.OpenTab(ctx, "", srv.URL+"/lazy")
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+
+	// THE pin: one call, the whole list.
+	cr, err := inst.Collect(ctx, tab.ID, ".item")
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if cr.Stop != "bottom" {
+		t.Fatalf("stop = %q, want bottom (the list is finite): %d items", cr.Stop, len(cr.Items))
+	}
+	if len(cr.Items) != totalItems {
+		t.Fatalf("collected %d items, want %d — content was dropped inside one call:\\n%.400s", len(cr.Items), totalItems, FormatCollect(cr))
+	}
+	// In order, deduped (the duplicate-text item collapsed into #1).
+	numRe := regexp.MustCompile(`Product (\d+)`)
+	for i, it := range cr.Items {
+		m := numRe.FindStringSubmatch(it.Text)
+		if m == nil {
+			t.Fatalf("position %d is not a list item: %q", i+1, it.Text)
+		}
+		n, _ := strconv.Atoi(m[1])
+		if n != i+1 {
+			t.Fatalf("collection order: position %d = item %d, want %d", i+1, n, i+1)
+		}
+	}
+	// The lazy path was actually exercised (async fetches, not the sync
+	// initial batch alone).
+	mu.Lock()
+	f := fetches
+	mu.Unlock()
+	if f < 4 {
+		t.Fatalf("fetches = %d, want >= 4 (the async lazy path must have been used)", f)
+	}
+	t.Logf("collect: %d items (stop: %s, %d fetches)", len(cr.Items), cr.Stop, f)
 }

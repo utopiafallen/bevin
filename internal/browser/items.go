@@ -15,13 +15,17 @@ const (
 )
 
 // readItemsJS is the stateless item extractor (the design log's LAZY-LIST
-// TIER; the shelved scrollNextPage reuses it verbatim): the matched
-// VISIBLE elements, normalized text, the first href inside, SORTED BY
-// BOUNDING BOX (top, left) — visual order, not DOM order (on a virtualized
-// grid DOM order is an accident of render timing) — DEDUPED within the
-// call by exact normalized text (the PRE-truncation text is the key, so a
-// truncation can never merge two distinct items). %s = the selector (a
-// JSON string literal — the pageCleanerJS pattern), %d = the caps.
+// TIER; collect reuses it with a higher cap): the matched VISIBLE
+// elements, normalized text, the first href inside, SORTED BY BOUNDING
+// BOX (top, left) — visual order, not DOM order (on a virtualized grid
+// DOM order is an accident of render timing) — DEDUPED within the call by
+// exact normalized text (the PRE-truncation text is the key, so a
+// truncation can never merge two distinct items). Items inside
+// boilerplate (the same REMOVE set the markdown cleaner uses, plus
+// DIALOG) are skipped — pagination numbers and footer CTAs are not list
+// items. %s = the selector (a JSON string literal — the pageCleanerJS
+// pattern), %d = the caps. Each item carries `full` (the pre-truncation
+// text) — the cross-call dedupe key collect uses.
 var readItemsJS = `(() => {
   const sel = %s;
   if (!sel) return JSON.stringify({ error: "readItems needs a selector" });
@@ -29,6 +33,16 @@ var readItemsJS = `(() => {
   try { els = Array.from(document.querySelectorAll(sel)); }
   catch (e) { return JSON.stringify({ error: "bad selector: " + e.message, items: [] }); }
   if (!els.length) return JSON.stringify({ error: "selector matched nothing: " + sel, items: [] });
+  const BOILERPLATE = new Set(['NAV','HEADER','FOOTER','ASIDE','DIALOG','SEARCH','MAP']);
+  function inBoilerplate(el) {
+    let n = el, depth = 0;
+    while (n && n.nodeType === 1 && depth < 24) {
+      if (BOILERPLATE.has(n.tagName)) return true;
+      n = n.parentElement;
+      depth++;
+    }
+    return false;
+  }
   const out = [];
   const seen = new Set();
   let dups = 0;
@@ -38,6 +52,7 @@ var readItemsJS = `(() => {
     if (s.display === "none" || s.visibility === "hidden") continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
+    if (inBoilerplate(el)) continue;
     const full = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
     if (!full) continue;
     if (seen.has(full)) { dups++; continue; }
@@ -47,28 +62,30 @@ var readItemsJS = `(() => {
     let url = "";
     const a = el.querySelector("a[href]");
     if (a) url = a.href;
-    out.push({ top: r.top, left: r.left, text, url });
+    out.push({ top: r.top, left: r.left, text, full, url });
   }
   out.sort((a, b) => a.top - b.top || a.left - b.left);
-  return JSON.stringify({ dups, items: out.map((it, i) => ({ n: i + 1, text: it.text, url: it.url || "" })) });
+  return JSON.stringify({ dups, items: out.map((it, i) => ({ n: i + 1, text: it.text, full: it.full, url: it.url || "" })) });
 })()`
 
 // ItemRef is one collected item: n = its 1-based position in VISUAL
-// order, Text the normalized item text (truncated at itemTextCap), URL
-// the first link inside the item ("" when it has none).
+// order, Text the normalized item text (truncated at itemTextCap), Full
+// the PRE-truncation text (collect's cross-call dedupe key — not for the
+// model), URL the first link inside the item ("" when it has none).
 type ItemRef struct {
 	N    int    `json:"n"`
 	Text string `json:"text"`
+	Full string `json:"full"`
 	URL  string `json:"url"`
 }
 
 // PageItems is one readItems result (before bounding).
 type PageItems struct {
-	Error   string
-	Dups    int // items dropped by the in-call text dedup
-	Items   []ItemRef
-	Settled bool
-	Took    time.Duration
+	Error  string
+	Dups   int // items dropped by the in-call text dedup
+	Items  []ItemRef
+	Settle SettleState
+	Took   time.Duration
 }
 
 // ReadItems settles the page first (the mid-render fix — see Settle) then
@@ -104,7 +121,7 @@ func (i *Instance) ReadItems(ctx context.Context, tabID, selector string) (*Page
 	if raw.Items == nil {
 		raw.Items = []ItemRef{}
 	}
-	return &PageItems{Dups: raw.Dups, Items: raw.Items, Settled: settled, Took: took}, nil
+	return &PageItems{Dups: raw.Dups, Items: raw.Items, Settle: settled, Took: took}, nil
 }
 
 // BoundItems renders a readItems result for the model: the header (count,
@@ -113,7 +130,7 @@ func (i *Instance) ReadItems(ctx context.Context, tabID, selector string) (*Page
 // and the empty view.
 func BoundItems(pi *PageItems) string {
 	out := fmt.Sprintf("items: %d (visual order, deduped within the view; %d duplicate texts dropped; page %s)",
-		len(pi.Items), pi.Dups, settleWord(pi.Settled, pi.Took))
+		len(pi.Items), pi.Dups, settleNote(pi.Settle, pi.Took))
 	for _, it := range pi.Items {
 		if it.URL != "" {
 			out += fmt.Sprintf("\n%d. %s (%s)", it.N, it.Text, it.URL)

@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,16 +57,20 @@ var detectBrowser = Detect
 
 // ForUser returns the user's browser instance, launching it on first use.
 // A dead instance (the user closed the window, the CDP endpoint went down)
-// is relaunched fresh on the next call.
+// is relaunched fresh on the next call — and the fresh instance is
+// flagged (restarted) so a tab-less call right after can say what
+// happened instead of the misleading "no tab yet" (see ResolveTab).
 func (m *Manager) ForUser(ctx context.Context, handle string) (*Instance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	replacing := false
 	if inst, ok := m.instances[handle]; ok {
 		if inst.alive() {
 			return inst, nil
 		}
 		inst.Close()
 		delete(m.instances, handle)
+		replacing = true
 	}
 	det, err := detectBrowser()
 	if err != nil {
@@ -78,6 +83,9 @@ func (m *Manager) ForUser(ctx context.Context, handle string) (*Instance, error)
 	inst, err := launchInstance(ctx, det, profileDir)
 	if err != nil {
 		return nil, err
+	}
+	if replacing {
+		inst.restarted.Store(true)
 	}
 	m.instances[handle] = inst
 	return inst, nil
@@ -116,6 +124,14 @@ type Instance struct {
 	port       int
 	cdp        *Client
 	profileDir string
+
+	// restarted is set when the manager relaunches a DEAD instance (the
+	// CDP endpoint went down — every tab is gone): a tab-less call right
+	// after says "the browser restarted" instead of the misleading "this
+	// conversation has no tab yet". Coarse by design: it clears on the
+	// first successful openTab/navigate of ANY conversation on the
+	// instance (after that, "no tab yet" is again the true wording).
+	restarted atomic.Bool
 
 	mu sync.Mutex
 	// Per-conversation state (keyed by conversation id; "" = the shared

@@ -36,12 +36,12 @@ type PageRead struct {
 	// (a pathological page size): the clean is PARTIAL — the result says
 	// so, it never silently truncates.
 	Aborted bool `json:"aborted"`
-	// The settle state (the read waits for stability before extracting —
-	// the mid-render fix, design log LAZY-LIST TIER): settled=false means
-	// the page was still churning at the cap and the content is a
-	// snapshot.
-	Settled bool          `json:"settled"`
-	Took    time.Duration `json:"took"`
+	// The settle state (the read waits for readiness before extracting —
+	// the mid-render fix, design log LAZY-LIST TIER, redesigned
+	// 2026-11-23: a page still progressing is never cut off mid-load;
+	// the state says exactly what the wait found).
+	Settle SettleState `json:"settle"`
+	Took   time.Duration
 }
 
 // pageCleanerJS is the deterministic cleaner, run in the page via
@@ -59,6 +59,27 @@ var pageCleanerJS = `(() => {
     if (!el) return false;
     const s = getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden';
+  }
+  // Consent/cookie dialogs (the industry-standard vendors: OneTrust,
+  // Didomi, Cookiebot, Quantcast, Iubenda, StackPath) + any role=dialog/
+  // alert box: their controls (Accept / Close / Manage Preferences) are
+  // not page content — they padded the element table to 300+ entries on
+  // real dealer pages and distracted the reader. Heuristic by design
+  // (recorded, design log BROWSER-ROBUST): a site about cookies loses
+  // its cookie buttons from the table, an acceptable price.
+  const CONSENT = /onetrust|didomi|cookiebot|quantcast|iubenda|sp_message|consent/i;
+  function inConsentBox(el) {
+    let n = el, depth = 0;
+    while (n && n.nodeType === 1 && depth < 30) {
+      const role = n.getAttribute && n.getAttribute('role');
+      if (role === 'dialog' || role === 'alert') return true;
+      const id = n.id || '';
+      const cls = typeof n.className === 'string' ? n.className : '';
+      if (CONSENT.test(id) || CONSENT.test(cls)) return true;
+      n = n.parentElement;
+      depth++;
+    }
+    return false;
   }
   function inlineText(node) {
     let out = '';
@@ -119,6 +140,7 @@ var pageCleanerJS = `(() => {
     if (!visible(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
+    if (inConsentBox(el)) continue;
     const tag = el.tagName.toLowerCase();
     let name = (el.getAttribute('aria-label') || '').trim();
     if (!name) name = (el.getAttribute('title') || '').trim();
@@ -235,7 +257,7 @@ func (i *Instance) Read(ctx context.Context, convID, tabID, selector string) (*P
 	if pr.Error != "" {
 		return nil, fmt.Errorf("%s", pr.Error)
 	}
-	pr.Settled = settled
+	pr.Settle = settled
 	pr.Took = took
 	if pr.Elements == nil {
 		pr.Elements = []elementRef{}
@@ -261,8 +283,8 @@ func FormatRead(pr *PageRead) string {
 		els += fmt.Sprintf("#%d %s %q <%s>\n", e.N, e.Role, e.Name, e.Tag)
 	}
 	out := fmt.Sprintf("title: %s\nurl: %s\n", pr.Title, pr.URL)
-	if !pr.Settled {
-		out += fmt.Sprintf("(the page was still settling after %s — content is a snapshot; a later read may differ)\n", settleCap)
+	if pr.Settle != SettleSettled {
+		out += "(" + settleNote(pr.Settle, pr.Took) + ")\n"
 	}
 	if pr.Aborted {
 		out += "(the page is enormous — the clean hit its node ceiling and the content may be PARTIAL; read with a selector to get a subtree)\n"

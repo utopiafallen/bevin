@@ -108,12 +108,14 @@ func (i *Instance) OpenTab(ctx context.Context, convID, url string) (Tab, error)
 	i.mu.Lock()
 	i.convTab[convID] = out.TargetID
 	i.mu.Unlock()
+	i.restarted.Store(false) // a first use: the restart wording has served
 	tab := Tab{ID: out.TargetID, URL: url}
 	if url != "about:blank" {
 		if nerr := i.Navigate(ctx, out.TargetID, url); nerr != nil {
 			tab.URL = "about:blank"
 			return tab, nerr
 		}
+		tab.Title = i.Title(ctx, out.TargetID)
 	}
 	return tab, nil
 }
@@ -167,6 +169,14 @@ func (i *Instance) ResolveTab(ctx context.Context, convID, id string) (string, e
 		pinned = true
 		if id == "" {
 			i.mu.Unlock()
+			// A restarted instance (the CDP endpoint died and the manager
+			// relaunched) has NO tabs — but the model's conversation
+			// remembers opening one, so the plain "no tab yet" wording
+			// reads as a lie. The coarse flag clears on the first
+			// successful openTab/navigate (see OpenTab/Navigate).
+			if i.restarted.Load() {
+				return "", errors.New("the browser just restarted — its previous tabs are gone; openTab again")
+			}
 			return "", errors.New("this conversation has no tab yet — openTab first (listTabs shows the existing tabs if you want to work in one)")
 		}
 	} else {
@@ -305,7 +315,29 @@ func (i *Instance) Navigate(ctx context.Context, tabID, url string) error {
 	if err := json.Unmarshal(res, &out); err == nil && out.ErrorText != "" {
 		return fmt.Errorf("navigation failed: %s", out.ErrorText)
 	}
-	return i.waitForLoad(ctx, session)
+	err = i.waitForLoad(ctx, session)
+	i.restarted.Store(false) // a first use: the restart wording has served
+	return err
+}
+
+// Title reads the tab's current document.title (the openTab/navigate
+// results carry it — a 404's title is visible without burning a read).
+// Best-effort: a probe failure yields "" (the result renders the plain
+// "loaded" form).
+func (i *Instance) Title(ctx context.Context, tabID string) string {
+	session, err := i.SessionFor(ctx, tabID)
+	if err != nil {
+		return ""
+	}
+	t, err := i.evaluateString(ctx, session, "JSON.stringify(document.title)")
+	if err != nil {
+		return ""
+	}
+	t = strings.TrimSpace(t)
+	if len(t) > 120 {
+		t = t[:117] + "..."
+	}
+	return t
 }
 
 // waitForLoad polls document.readyState until complete (30 s ceiling).
@@ -398,6 +430,162 @@ func (i *Instance) ElementCenter(ctx context.Context, session, selector string) 
 		return 0, 0, fmt.Errorf("element geometry: %w", err)
 	}
 	return c.X, c.Y, nil
+}
+
+// elementCenterRefJS resolves a #N element ref against the LIVE page,
+// tolerating a page that RE-RENDERED after the read (the observed failure
+// on carousel-heavy sites — 10 of 12 clicks in the first research session
+// died when the stored structural selector stopped matching): the stored
+// selector first — trusted only if it still points at the RECORDED
+// element (an id selector always, an nth-of-type path only if the hit's
+// tag + name still match: a re-render that keeps the path's shape can
+// match a DIFFERENT element) — then a (tag + name) re-match among the
+// page's visible INTERACTIVE elements of that tag (the same candidate
+// set the read listed). The recorded name is what the read saw (the
+// read's derivation, mirrored here: aria-label → title → text → the
+// input fallbacks, 80-char truncated); exact match before
+// case-insensitive. More than one candidate at the best stage is
+// reported as ambiguous — never guessed.
+// Returns {x, y, selector} (a fresh path selector for the resolved
+// element — select needs it) or {why: "missing" | "multiple"}.
+// %s x3 = selector, name, tag (JSON string literals — the pageCleanerJS
+// pattern).
+var elementCenterRefJS = `(() => {
+  const sel = %s, name = %s, tag = %s;
+  const norm = s => String(s || "").replace(/\s+/g, " ").trim();
+  function visible(el) {
+    const s = getComputedStyle(el);
+    return s.display !== "none" && s.visibility !== "hidden";
+  }
+  // The read's name derivation (pageCleanerJS, mirrored — the stored
+  // name must be compared the same way it was made).
+  function nameOf(el) {
+    let n = norm(el.getAttribute("aria-label"));
+    if (!n) n = norm(el.getAttribute("title"));
+    if (!n && el.tagName.toLowerCase() !== "input") n = norm(el.textContent);
+    if (!n && el.tagName.toLowerCase() === "input") n = norm(el.placeholder || el.value || el.name || el.type || "input");
+    return String(n).slice(0, 80);
+  }
+  function pathOf(el) {
+    const parts = [];
+    let n = el;
+    while (n && n.nodeType === 1 && n.tagName.toLowerCase() !== "body" && parts.length < 8) {
+      if (n.id) { parts.unshift("#" + CSS.escape(n.id)); break; }
+      let part = n.tagName.toLowerCase();
+      const parent = n.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter(c => c.tagName === n.tagName);
+        if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(n) + 1) + ")";
+      }
+      parts.unshift(part);
+      n = parent;
+    }
+    return "body > " + parts.join(" > ");
+  }
+  function centerOf(el) {
+    el.scrollIntoView({ block: "center" });
+    const r = el.getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2, selector: pathOf(el) });
+  }
+  let el = null;
+  try { el = document.querySelector(sel); } catch (e) {}
+  if (el && visible(el) && el.getBoundingClientRect().width > 0) {
+    const same = el.tagName.toLowerCase() === tag && nameOf(el) === norm(name);
+    if (sel.startsWith("#") || same) return centerOf(el);
+  }
+  const nm = norm(name);
+  if (!nm) return JSON.stringify({ why: "missing" });
+  const INTERACTIVE = 'a[href],button,[role="button"],[role="link"],input,select,textarea,summary,[onclick],label[for]';
+  let cands = [];
+  try { cands = Array.from(document.querySelectorAll(INTERACTIVE)).filter(c => (tag === "*" || c.tagName.toLowerCase() === tag) && visible(c)); } catch (e) {}
+  const stages = [
+    c => nameOf(c) === nm,
+    c => nameOf(c).toLowerCase() === nm.toLowerCase()
+  ];
+  for (const stage of stages) {
+    const hits = cands.filter(stage);
+    if (hits.length === 1) return centerOf(hits[0]);
+    if (hits.length > 1) return JSON.stringify({ why: "multiple" });
+  }
+  return JSON.stringify({ why: "missing" });
+})()`
+
+// ResolveRef resolves a #N element ref for input events (see
+// elementCenterRefJS): the stored selector when it still matches, a
+// tag+name re-match when the page re-rendered. The returned selector is
+// fresh (select re-queries it).
+func (i *Instance) ResolveRef(ctx context.Context, session string, ref elementRef) (x, y float64, selector string, err error) {
+	sel, _ := json.Marshal(ref.Selector)
+	name, _ := json.Marshal(ref.Name)
+	tag, _ := json.Marshal(ref.Tag)
+	body, err := i.evaluateString(ctx, session, fmt.Sprintf(elementCenterRefJS, sel, name, tag))
+	if err != nil {
+		return 0, 0, "", err
+	}
+	var res struct {
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		Selector string  `json:"selector"`
+		Why      string  `json:"why"`
+	}
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return 0, 0, "", fmt.Errorf("element geometry: %w", err)
+	}
+	switch res.Why {
+	case "":
+		return res.X, res.Y, res.Selector, nil
+	case "multiple":
+		return 0, 0, "", fmt.Errorf("multiple elements match %q — read again and use a fresh #N, or a more specific selector", ref.Name)
+	default:
+		return 0, 0, "", fmt.Errorf("element not found (the page may have changed since the last read — read again and use a fresh #N)")
+	}
+}
+
+// ElementTarget resolves a click/type/select/fill target the way the
+// model gives it: a #N id from the CALLING conversation's last read
+// (re-matched when the page re-rendered — ResolveRef), a CSS selector
+// (used exactly as given — a "#..." key that is not "#N" is an id
+// selector), or — last resort — a NAME (a label, a button's text, an
+// input's placeholder: not a selector at all) re-matched by name alone
+// across the page's interactive elements. Ambiguity at any stage is an
+// error, never a guess.
+func (i *Instance) ElementTarget(ctx context.Context, session, convID, key string) (x, y float64, selector string, err error) {
+	if strings.HasPrefix(key, "#") {
+		var n int
+		if _, e := fmt.Sscanf(key, "#%d", &n); e == nil && n > 0 {
+			ref, ok := i.ElementByN(convID, n)
+			if !ok {
+				return 0, 0, "", fmt.Errorf("element #%d is not in the last read's table — the page may have changed; read again and use a fresh #N", n)
+			}
+			return i.ResolveRef(ctx, session, ref)
+		}
+	}
+	cx, cy, e := i.ElementCenter(ctx, session, key)
+	if e == nil {
+		return cx, cy, key, nil
+	}
+	// The key is not a working selector — try it as a NAME (the fill
+	// contract: a label/placeholder/text).
+	name, _ := json.Marshal(key)
+	tag, _ := json.Marshal("*")
+	body, e2 := i.evaluateString(ctx, session, fmt.Sprintf(elementCenterRefJS, `"missing-selector"`, name, tag))
+	if e2 == nil {
+		var res struct {
+			X        float64 `json:"x"`
+			Y        float64 `json:"y"`
+			Selector string  `json:"selector"`
+			Why      string  `json:"why"`
+		}
+		if json.Unmarshal([]byte(body), &res) == nil {
+			switch res.Why {
+			case "":
+				return res.X, res.Y, res.Selector, nil
+			case "multiple":
+				return 0, 0, "", fmt.Errorf("multiple elements match %q — read again and use a fresh #N, or a more specific selector", key)
+			}
+		}
+	}
+	return 0, 0, "", e
 }
 
 // ClickAt sends a real mouse click at viewport coordinates (move, press,
