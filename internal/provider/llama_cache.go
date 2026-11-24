@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -184,38 +185,77 @@ func (l *Llama) noteTurnCompletion(ctx context.Context, convID string, slot int,
 	}
 }
 
-// saveSlotCache saves a slot's KV cache to a file (POST /slots/{id}/save).
+// saveSlotCache saves a slot's KV cache to a file (POST /slots/{id}?action=save).
 // Best-effort: failures are logged, never fatal.
 func (l *Llama) saveSlotCache(ctx context.Context, slot int, filename string) {
-	l.slotAction(ctx, "/save", slot, map[string]any{
-		"filename":                filename,
-		"compress":                false,
-		"save_last_message_token": true,
-	}, "save", filename)
+	l.slotAction(ctx, "save", slot, map[string]any{"filename": filename}, "save", filename)
 }
 
 // restoreSlotCache restores a slot's KV cache from a file
-// (POST /slots/{id}/restore). Best-effort: a missing/mismatched file is a
-// non-fatal failure (the slot then starts with a cold cache).
+// (POST /slots/{id}?action=restore). Best-effort: a missing/mismatched file is
+// a non-fatal failure (the slot then starts with a cold cache).
 func (l *Llama) restoreSlotCache(ctx context.Context, slot int, filename string) {
-	l.slotAction(ctx, "/restore", slot, map[string]any{
-		"filename":              filename,
-		"ignore_state_mismatch": true,
-	}, "restore", filename)
+	l.slotAction(ctx, "restore", slot, map[string]any{"filename": filename}, "restore", filename)
 }
 
-// slotAction issues a native slot API call (save/restore) at the server root.
-// Best-effort: the failure is logged and swallowed (the request continues
-// normally — the user's explicit requirement).
-func (l *Llama) slotAction(ctx context.Context, suffix string, slot int, body map[string]any, verb, filename string) {
+// eraseSlotCache clears a slot's in-memory KV cache (POST /slots/{id}?action=erase).
+// Best-effort: a deferred/unavailable slot or a server failure is logged, never fatal.
+func (l *Llama) eraseSlotCache(ctx context.Context, slot int, convID string) {
+	l.slotAction(ctx, "erase", slot, nil, "erase", cacheFile(convID))
+}
+
+// DeleteLlamaConversationCache deletes a conversation's KV cache on the llama
+// server at baseURL — the conversation-delete path. It clears bevin's slot
+// tracking for the conversation (so it is never restored again) and issues the
+// slot's delete (erase) action on the slot the conversation was pinned to, so
+// the llama server releases the conversation's KV cache (in memory and on disk
+// — the server's delete action owns the filesystem). It is a no-op when the
+// conversation was never pinned to a slot on this server. Best-effort: the
+// erase failure is logged, never returned. Called once per distinct llama
+// server (baseURL) when a conversation is deleted.
+func DeleteLlamaConversationCache(ctx context.Context, baseURL, convID, apiKey string) {
+	if convID == "" {
+		return
+	}
+	sc := slotCacheFor(baseURL)
+	sc.mu.Lock()
+	slot, pinned := sc.convSlot[convID]
+	if pinned {
+		delete(sc.convSlot, convID)
+		delete(sc.tokensNew, convID)
+		// Reset the slot's "last conversation" so the next conversation to
+		// run on this slot restores ITS OWN cache (not the deleted one's).
+		if sc.slotLast[slot] == convID {
+			sc.slotLast[slot] = ""
+		}
+	}
+	sc.mu.Unlock()
+	if !pinned {
+		return
+	}
+	NewLlama(baseURL, apiKey).eraseSlotCache(ctx, slot, convID)
+}
+
+// slotAction issues a native slot API call at the server root:
+// POST /slots/{slot}?action={save|restore|erase}. A non-nil body is sent as
+// JSON (save/restore carry {filename}; erase has none). Best-effort: the
+// failure is logged and swallowed (the request continues normally — the
+// user's explicit requirement).
+func (l *Llama) slotAction(ctx context.Context, action string, slot int, body map[string]any, verb, filename string) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	payload, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(cctx, http.MethodPost, fmt.Sprintf("%s/slots/%d%s", l.serverRoot(), slot, suffix), strings.NewReader(string(payload)))
+	var rd io.Reader
+	if body != nil {
+		payload, _ := json.Marshal(body)
+		rd = strings.NewReader(string(payload))
+	}
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, fmt.Sprintf("%s/slots/%d?action=%s", l.serverRoot(), slot, action), rd)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	l.authorize(req)
 	resp, err := l.HTTP.Do(req)
 	if err != nil {

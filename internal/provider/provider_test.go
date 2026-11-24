@@ -245,8 +245,8 @@ func TestConversationIDWire(t *testing.T) {
 	}
 
 	// llama.cpp shares the OAI wire: the STREAMING path (the one the UI
-	// uses) carries the field the same way. The mock routes the new native
-	// slot API (GET /slots + POST /slots/{id}/save|restore, used for the
+	// uses) carries the field the same way. The mock routes the native slot
+	// API (GET /slots + POST /slots/{id}?action=save|restore, used for the
 	// per-conversation KV cache) separately from the chat completions call.
 	var llamaBody map[string]any
 	var slotCalls []string
@@ -257,7 +257,7 @@ func TestConversationIDWire(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id":0},{"id":1}]`))
 			return
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/slots/"):
-			slotCalls = append(slotCalls, r.URL.Path)
+			slotCalls = append(slotCalls, r.URL.Query().Get("action"))
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 			return
 		default:
@@ -293,7 +293,7 @@ data: [DONE]
 	// (no save — there is no prior conversation on the slot to save).
 	foundRestore := false
 	for _, c := range slotCalls {
-		if strings.HasSuffix(c, "/restore") {
+		if c == "restore" {
 			foundRestore = true
 		}
 	}
@@ -347,28 +347,22 @@ func TestLlamaSlotCache(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":0}]`))
 			return
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/save"):
-			mu.Lock()
-			var b map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&b)
-			calls = append(calls, call{action: "save", filename: fmt.Sprintf("%v", b["filename"])})
-			mu.Unlock()
-			if failSlots {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"save failed"}`))
-				return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/slots/"):
+			// Native slot API: POST /slots/{id}?action=save|restore|erase.
+			// save/restore carry {filename}; erase has no body.
+			action := r.URL.Query().Get("action")
+			var filename string
+			if action == "save" || action == "restore" {
+				var b map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&b)
+				filename = fmt.Sprintf("%v", b["filename"])
 			}
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-			return
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/restore"):
 			mu.Lock()
-			var b map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&b)
-			calls = append(calls, call{action: "restore", filename: fmt.Sprintf("%v", b["filename"])})
+			calls = append(calls, call{action: action, filename: filename})
 			mu.Unlock()
 			if failSlots {
 				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"restore failed"}`))
+				_, _ = w.Write([]byte(`{"error":"slot action failed"}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -476,6 +470,98 @@ func TestLlamaSlotCache(t *testing.T) {
 	mu.Unlock()
 	if err := chat("convC"); err != nil {
 		t.Fatalf("a failing slot API must not break the request, got: %v", err)
+	}
+}
+
+// TestLlamaConversationCacheDelete verifies the conversation-delete KV-cache
+// cleanup on the llama provider: deleting a conversation issues the slot's
+// delete (erase) action on the slot the conversation was pinned to AND clears
+// bevin's slot tracking (so the conversation is never restored again, and the
+// slot's "last conversation" resets so the next conversation restores its own
+// cache — not the deleted one's). A delete of a conversation that was never
+// pinned to this server is a no-op (no erase).
+func TestLlamaConversationCacheDelete(t *testing.T) {
+	var mu sync.Mutex
+	var actions []string // the slot API actions issued, in order
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/slots":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":0}]`))
+			return
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/slots/"):
+			mu.Lock()
+			actions = append(actions, r.URL.Query().Get("action"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}`))
+		}
+	}))
+	defer srv.Close()
+
+	p := NewLlama(srv.URL, "")
+	chat := func(convID string) error {
+		_, err := p.Chat(context.Background(), "m", ChatRequest{
+			Messages:       []Message{{Role: RoleUser, Text: "hi"}},
+			ConversationID: convID,
+		})
+		return err
+	}
+	snapshot := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]string, len(actions))
+		copy(out, actions)
+		return out
+	}
+	count := func(cs []string, a string) int {
+		n := 0
+		for _, x := range cs {
+			if x == a {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Pin convA to the slot (its first turn restores its cache).
+	if err := chat("convA"); err != nil {
+		t.Fatalf("turn A: %v", err)
+	}
+	if got := snapshot(); count(got, "restore") != 1 {
+		t.Fatalf("A's first turn must restore once, actions = %v", got)
+	}
+
+	// Delete convA: erases its slot + clears the tracking.
+	DeleteLlamaConversationCache(context.Background(), srv.URL, "convA", "")
+	got := snapshot()
+	if count(got, "erase") != 1 {
+		t.Fatalf("deleting convA must issue exactly one erase (its pinned slot), actions = %v", got)
+	}
+
+	// convA again: it is a FRESH pin (tracking cleared) — it restores its own
+	// cache with NO erase (the delete already ran) and NO save (the slot's
+	// last-conversation was reset by the delete).
+	if err := chat("convA"); err != nil {
+		t.Fatalf("turn A (post-delete): %v", err)
+	}
+	got = snapshot()
+	if count(got, "restore") != 2 {
+		t.Fatalf("post-delete convA must restore its own cache (a fresh pin), actions = %v", got)
+	}
+	if count(got, "erase") != 1 {
+		t.Fatalf("post-delete convA must NOT re-erase (no new delete), actions = %v", got)
+	}
+
+	// Deleting a conversation that was never pinned to this server: a no-op
+	// (no erase).
+	before := len(snapshot())
+	DeleteLlamaConversationCache(context.Background(), srv.URL, "neverPinned", "")
+	if after := snapshot(); len(after) != before {
+		t.Fatalf("deleting an unpinned conversation must not issue any slot action, actions = %v", after)
 	}
 }
 

@@ -1010,7 +1010,39 @@ func (a *Agent) DeleteConversation(ctx context.Context, handle, convID string) e
 			logVectorIndexError("delete points", err)
 		}
 	}
+	// Delete the conversation's KV cache across every llama provider: each
+	// distinct llama server releases the conversation's slot cache (in memory
+	// and on disk — the server's delete action owns the filesystem). Best-
+	// effort — a failure never affects the conversation deletion itself.
+	a.deleteLlamaConversationCache(ctx, convID)
 	return nil
+}
+
+// deleteLlamaConversationCache issues a KV-cache delete for a deleted
+// conversation on every distinct llama server in the config (the server
+// releases the conversation's slot cache — memory and disk). It dedupes by
+// base URL (several models may share one llama server; the cache is a
+// per-server resource) and is best-effort (a server blip is logged inside the
+// provider, never returned).
+func (a *Agent) deleteLlamaConversationCache(ctx context.Context, convID string) {
+	a.cfgMu.Lock()
+	type srv struct{ base, key string }
+	seen := map[string]struct{}{}
+	var servers []srv
+	for _, m := range a.cfg.Models {
+		if m.Provider != "llama" {
+			continue
+		}
+		if _, ok := seen[m.BaseURL]; ok {
+			continue
+		}
+		seen[m.BaseURL] = struct{}{}
+		servers = append(servers, srv{m.BaseURL, m.APIKey})
+	}
+	a.cfgMu.Unlock()
+	for _, s := range servers {
+		provider.DeleteLlamaConversationCache(ctx, s.base, convID, s.key)
+	}
 }
 
 // ConversationSummary is one row of the user's conversation list: the
