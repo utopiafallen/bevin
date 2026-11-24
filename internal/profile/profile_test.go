@@ -18,8 +18,8 @@ func TestGeneralIsTheDefault(t *testing.T) {
 	if g.CharsPerToken != 4 {
 		t.Fatalf("CharsPerToken = %d, want 4 (chars/4, the rule of thumb it formalizes)", g.CharsPerToken)
 	}
-	if g.KeepLastTurns != 5 {
-		t.Fatalf("KeepLastTurns = %d, want 5 (the keepLastTurns constant it formalizes)", g.KeepLastTurns)
+	if g.KeepLastMessages != 5 {
+		t.Fatalf("KeepLastMessages = %d, want 5 (the verbatim tail the request builder relies on)", g.KeepLastMessages)
 	}
 	if !g.ReasoningInTranscript {
 		t.Fatal("ReasoningInTranscript = false, want true (the send-all-reasoning-back default)")
@@ -102,7 +102,7 @@ func TestQwen38Profile(t *testing.T) {
 	}
 	g := Default()
 	if p.ReasoningInTranscript != g.ReasoningInTranscript ||
-		p.KeepLastTurns != g.KeepLastTurns ||
+		p.KeepLastMessages != g.KeepLastMessages ||
 		p.CompactionTriggerFraction != g.CompactionTriggerFraction ||
 		p.CharsPerToken != g.CharsPerToken {
 		t.Fatalf("qwen3.8 deviates from general's harness behavior: %+v", p)

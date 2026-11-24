@@ -15,9 +15,10 @@ import (
 const summarizationSystemPrompt = `You are producing a context summary of a conversation so it can be continued. Write a concise but complete summary that preserves the key facts, decisions, tasks in flight, constraints, and open threads the user has. Fold in the previous summary (if provided) AND the new turns. Output ONLY the summary text — no preamble, no questions, no commentary.`
 
 // summarize calls the conversation's active model to produce a new context
-// summary that folds in the previous summary (if any) + the raw turns since
-// it. The result is the content of the next role=summary message (chained: each
-// new summary folds in the previous, so the latest alone carries the history).
+// summary that folds in the previous summary (if any) + the raw messages
+// since it. The result is the content of the next role=summary message
+// (chained: each new summary folds in the previous, so the latest alone
+// carries the history).
 // The summarizer sees the turns in the same model-facing form as the chat
 // request builder (user turns stamped with their timestamp, assistant turns
 // plain + stored reasoning replayed in the API's native field when the
@@ -54,14 +55,15 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 }
 
 // compactIfNeeded checks whether the conversation's prompt (frozen system
-// prompt + latest summary + raw turns since it) exceeds the summarization
-// budget, and if so produces + stores a new chained summary. The summary
-// folds in the previous summary + the older raw turns — EXCEPT the last
-// KeepLastTurns turns (the profile's), which are preserved verbatim so the
-// chat resumes exactly where it left off. Full history is retained in the
-// store; the summary only changes what the request builder sends. It is a
-// no-op when the prompt is under budget or there is no older turn to fold
-// (only the last KeepLastTurns remain).
+// prompt + latest summary + raw messages since it) exceeds the
+// summarization budget, and if so produces + stores a new chained summary.
+// The summary folds in the previous summary + the older raw messages —
+// EXCEPT the last KeepLastMessages messages (the profile's), which are
+// preserved verbatim so the chat resumes exactly where it left off. Full
+// history is retained in the store; the summary only changes what the
+// request builder sends. It is a no-op when the prompt is under budget or
+// there is no older message to fold (only the last KeepLastMessages
+// remain).
 //
 // prof is the conversation's active model's model profile — the budget
 // fraction, the verbatim tail, and the reasoning replay in the summarization
@@ -87,19 +89,19 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 		return nil
 	}
-	prevSummary, turns := latestSummaryAndTurns(hist)
-	if len(turns) <= prof.KeepLastTurns {
-		// Nothing older to fold — the last KeepLastTurns turns are always
-		// kept verbatim (the chat resumes exactly where it left off). Leave
-		// it.
+	prevSummary, messages := latestSummaryAndMessages(hist)
+	if len(messages) <= prof.KeepLastMessages {
+		// Nothing older to fold — the last KeepLastMessages messages are
+		// always kept verbatim (the chat resumes exactly where it left
+		// off). Leave it.
 		return nil
 	}
-	// Summarize the older turns; the last KeepLastTurns stay as raw turns so
-	// the chat resumes exactly where it left off. The summarization call is a
-	// provider call too — the wire request carries the provider-side model
-	// name (the internal ID would be rejected for slug-mangled upstream
-	// names).
-	toSummarize := turns[:len(turns)-prof.KeepLastTurns]
+	// Summarize the older messages; the last KeepLastMessages stay as raw
+	// messages so the chat resumes exactly where it left off. The
+	// summarization call is a provider call too — the wire request carries
+	// the provider-side model name (the internal ID would be rejected for
+	// slug-mangled upstream names).
+	toSummarize := messages[:len(messages)-prof.KeepLastMessages]
 	// The tool-call rows of the FOLDED assistant messages ride along with
 	// their messages (pair-safe: the builder derives both sides from the
 	// same row set).

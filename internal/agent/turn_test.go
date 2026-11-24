@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -149,8 +150,8 @@ func TestTurnUsesProviderModelName(t *testing.T) {
 	}
 	defer a.Close()
 	// Reports 900 total tokens (over the 800 budget) so the post-turn
-	// compaction fires once the conversation has > keepLastTurns turns —
-	// exercising the summarization provider call too.
+	// compaction fires once the conversation has > KeepLastMessages
+	// messages — exercising the summarization provider call too.
 	fp := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
 	a.providers[slug] = fp
 
@@ -170,8 +171,9 @@ func TestTurnUsesProviderModelName(t *testing.T) {
 	if conv.ActiveModelID != slug {
 		t.Fatalf("active model = %q, want the internal slug %q", conv.ActiveModelID, slug)
 	}
-	// Four turns: enough for > keepLastTurns messages so a summarization
-	// call happens (fires from the 3rd turn's post-compact onward).
+	// Four user turns = eight messages: enough (> KeepLastMessages) for a
+	// summarization call to happen (fires from the 3rd turn's post-compact
+	// onward).
 	for i := 0; i < 4; i++ {
 		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
@@ -368,7 +370,8 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 	// The summarization (compaction) call is a provider call too — it must run
 	// under the same effort as the chat turns. The fake reports 900 total
 	// tokens every call (over the 800 budget), so the post-turn compaction
-	// fires once the conversation has more than KeepLastTurns raw turns.
+	// fires once the conversation has more than KeepLastMessages raw
+	// messages.
 	cfg.Models[0].Profile = "qwen3.8"
 	fp2 := &fakeProvider{usage: &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900}}
 	a.providers["m1"] = fp2
@@ -728,10 +731,10 @@ func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 	}
 }
 
-// TestCompactPreservesLastTurns verifies a compaction preserves the last
-// keepLastTurns messages verbatim (only the older turns are folded into the
-// summary, so the chat resumes exactly where it left off).
-func TestCompactPreservesLastTurns(t *testing.T) {
+// TestCompactPreservesLastMessages verifies a compaction preserves the last
+// KeepLastMessages messages verbatim (only the older messages are folded
+// into the summary, so the chat resumes exactly where it left off).
+func TestCompactPreservesLastMessages(t *testing.T) {
 	a, cfg, _ := newTestAgent(t)
 	defer a.Close()
 	if cfg.Models[0].MaxContext != 1000 {
@@ -765,10 +768,10 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default()); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
-	// The request builder now sends the summary + the last keepLastTurns
-	// messages verbatim — not the full history (the older turns are folded into
-	// the summary). The store retains the full history (the summary only
-	// changes what the request builder sends).
+	// The request builder now sends the summary + the last KeepLastMessages
+	// messages verbatim — not the full history (the older messages are
+	// folded into the summary). The store retains the full history (the
+	// summary only changes what the request builder sends).
 	msgs, err := us.ListMessages(convID)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
@@ -786,8 +789,96 @@ func TestCompactPreservesLastTurns(t *testing.T) {
 	if len(req.System) < 2 {
 		t.Fatalf("request System = %d parts, want >= 2 (frozen prompt + summary)", len(req.System))
 	}
-	if len(req.Messages) != profile.Default().KeepLastTurns {
-		t.Fatalf("request sent %d messages, want %d (the last KeepLastTurns verbatim)", len(req.Messages), profile.Default().KeepLastTurns)
+	if len(req.Messages) != profile.Default().KeepLastMessages {
+		t.Fatalf("request sent %d messages, want %d (the last KeepLastMessages verbatim)", len(req.Messages), profile.Default().KeepLastMessages)
+	}
+}
+
+// TestCompactCountsToolLoopIterationsAsMessages pins the compaction's unit:
+// the verbatim tail is the last KeepLastMessages MESSAGES (stored rows), not
+// the last user turns. Each tool-loop iteration is its OWN assistant message
+// (the row that carries that iteration's tool calls) and counts as one, so a
+// long tool loop under a single user message folds the user message (and the
+// early iterations) into the summary and keeps only the loop's last
+// iterations verbatim.
+func TestCompactCountsToolLoopIterationsAsMessages(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	if cfg.Models[0].MaxContext != 1000 {
+		t.Fatalf("test precondition: m1 MaxContext = %d, want 1000", cfg.Models[0].MaxContext)
+	}
+	fp := &fakeProvider{}
+	a.providers["m1"] = fp
+
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	model := conv.ActiveModelID
+	// ONE user message + SEVEN tool-loop iterations (each a separate
+	// assistant row carrying one completed P7 tool call) = eight messages.
+	if _, err := us.AppendMessage(convID, roleUser, "do the thing", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 7; i++ {
+		msg, err := us.AppendMessage(convID, roleAssistant, fmt.Sprintf("iteration %d", i), "", "", &model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := us.RecordToolCall(msg.ID, "t", `{}`, fmt.Sprintf("result %d", i), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Drive the compaction via the API-reported usage (900 > the 800
+	// budget) — the content is a few chars, so only the reported number
+	// can trigger it.
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 900, profile.Default()); err != nil {
+		t.Fatalf("compactIfNeeded: %v", err)
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var summaries int
+	for _, m := range msgs {
+		if m.Role == roleSummary {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summaries = %d, want 1 (the compaction)", summaries)
+	}
+	tcs, err := toolCallsForMessages(us, msgs)
+	if err != nil {
+		t.Fatalf("toolCallsForMessages: %v", err)
+	}
+	req, _ := buildRequest(conv, msgs, profile.Default(), tcs)
+	// Five message rows (iterations 3..7), each expanded by its one
+	// completed tool call into a synthesized role=tool result: ten wire
+	// messages. If the slice ran on user turns, all seven iterations (and
+	// the user message) would be verbatim — twenty-one wire messages.
+	if len(req.Messages) != 10 {
+		t.Fatalf("request sent %d wire messages, want 10 (the last 5 message rows, each with its tool result)", len(req.Messages))
+	}
+	// The fold boundary is ROW-level: the user message and iterations 1-2
+	// went into the summary; the tail starts at iteration 3.
+	if req.Messages[0].Role != provider.RoleAssistant || req.Messages[0].Text != "iteration 3" {
+		t.Fatalf("first wire message = %+v, want the assistant row for iteration 3 (the user message was folded)", req.Messages[0])
+	}
+	if req.Messages[1].Role != provider.RoleTool || req.Messages[1].Text != "result 3" {
+		t.Fatalf("second wire message = %+v, want iteration 3's tool result (the tail's pairs are intact)", req.Messages[1])
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != provider.RoleTool || last.Text != "result 7" {
+		t.Fatalf("last wire message = %+v, want iteration 7's tool result (the loop's end is verbatim)", last)
 	}
 }
 

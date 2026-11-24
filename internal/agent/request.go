@@ -178,16 +178,16 @@ func toolCallComplete(tc store.ToolCall) bool {
 	return tc.Result != "" || tc.Success
 }
 
-// wireTurnMessages renders the raw turns (already selected by the builder)
-// into the provider wire messages. An assistant message whose P7 tool calls
-// are complete is sent WITH its tool_calls list, immediately followed by one
-// role=tool message per call (the pairing id derived from the P7 row). This
-// is the single place the tool transcript is turned into wire messages —
-// the chat request and the summarization call both go through it, so a
-// tool-using turn is rendered identically in both.
-func wireTurnMessages(turns []store.Message, tcMap map[int64][]store.ToolCall, includeReasoning bool) []provider.Message {
-	out := make([]provider.Message, 0, len(turns)+len(tcMap))
-	for _, m := range turns {
+// wireTurnMessages renders the selected messages (already chosen by the
+// builder) into the provider wire messages. An assistant message whose P7
+// tool calls are complete is sent WITH its tool_calls list, immediately
+// followed by one role=tool message per call (the pairing id derived from
+// the P7 row). This is the single place the tool transcript is turned into
+// wire messages — the chat request and the summarization call both go
+// through it, so a tool-using message is rendered identically in both.
+func wireTurnMessages(msgs []store.Message, tcMap map[int64][]store.ToolCall, includeReasoning bool) []provider.Message {
+	out := make([]provider.Message, 0, len(msgs)+len(tcMap))
+	for _, m := range msgs {
 		pm := assistantFacing(m, includeReasoning)
 		var complete []store.ToolCall
 		if m.Role == roleAssistant {
@@ -208,15 +208,16 @@ func wireTurnMessages(turns []store.Message, tcMap map[int64][]store.ToolCall, i
 
 // buildRequest assembles the provider request for a conversation: the frozen
 // system prompt + the latest context summary (if any, as a second system
-// part) + the raw turns to send. When there's a summary, it covers the older
-// turns and the last KeepLastTurns messages (the profile's) are sent verbatim
-// (the chat resumes exactly where it left off); when there's no summary, all
-// the raw turns are sent (up to the compaction budget). It returns the
-// request + an estimated token count of the prompt (for the compaction
-// trigger). Full history is retained in the store; this selects what each
-// model call sees. tcMap carries the P7 tool-call rows for the turns'
-// assistant messages (see wireTurnMessages; an empty map = a conversation
-// with no tool activity — the request is identical to the pre-tools shape).
+// part) + the raw messages to send. When there's a summary, it covers the
+// older messages and the last KeepLastMessages messages (the profile's) are
+// sent verbatim (the chat resumes exactly where it left off); when there's
+// no summary, all the raw messages are sent (up to the compaction budget).
+// It returns the request + an estimated token count of the prompt (for the
+// compaction trigger). Full history is retained in the store; this selects
+// what each model call sees. tcMap carries the P7 tool-call rows for the
+// selected messages' assistant rows (see wireTurnMessages; an empty map = a
+// conversation with no tool activity — the request is identical to the
+// pre-tools shape).
 //
 // prof is the conversation's active model's model profile — the request
 // builder's model-facing decisions (what the model gets back of its own
@@ -234,32 +235,33 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 			latestSummarySeq = msgs[i].Seq
 		}
 	}
-	// Raw turns for the request (role in user/assistant/tool, seq after the
-	// latest summary). When the summary is the latest (stored after all the raw
-	// turns), there are no raw turns since it, so the last keepLastTurns
-	// messages are sent verbatim (the chat resumes exactly where it left off).
-	// When there's no summary, all the raw turns are sent.
-	turns := make([]store.Message, 0, len(msgs))
+	// Raw messages for the request (role in user/assistant/tool, seq after
+	// the latest summary). When the summary is the latest (stored after all
+	// the raw messages), there are no raw messages since it, so the last
+	// KeepLastMessages messages are sent verbatim (the chat resumes exactly
+	// where it left off). When there's no summary, all the raw messages are
+	// sent.
+	messages := make([]store.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role == roleSystem || m.Role == roleSummary {
 			continue
 		}
 		if m.Seq > latestSummarySeq {
-			turns = append(turns, m)
+			messages = append(messages, m)
 		}
 	}
-	if latestSummary != nil && len(turns) == 0 {
-		// The summary is the latest (stored after all the raw turns). Send the
-		// last keepLastTurns verbatim (the chat resumes exactly where it left
-		// off).
+	if latestSummary != nil && len(messages) == 0 {
+		// The summary is the latest (stored after all the raw messages).
+		// Send the last KeepLastMessages verbatim (the chat resumes exactly
+		// where it left off).
 		for _, m := range msgs {
 			if m.Role == roleSystem || m.Role == roleSummary {
 				continue
 			}
-			turns = append(turns, m)
+			messages = append(messages, m)
 		}
-		if len(turns) > prof.KeepLastTurns {
-			turns = turns[len(turns)-prof.KeepLastTurns:]
+		if len(messages) > prof.KeepLastMessages {
+			messages = messages[len(messages)-prof.KeepLastMessages:]
 		}
 	}
 
@@ -277,7 +279,7 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	// profile's decision (general: yes — the model sees its own earlier
 	// reasoning for continuity).
 	includeReasoning := prof.ReasoningInTranscript
-	reqMsgs := wireTurnMessages(turns, tcMap, includeReasoning)
+	reqMsgs := wireTurnMessages(messages, tcMap, includeReasoning)
 	for _, pm := range reqMsgs {
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 		// The tool-call ARGUMENTS ride on the assistant message's tool_calls
@@ -299,9 +301,10 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	return req, tokens
 }
 
-// latestSummaryAndTurns returns the latest summary's content + the raw turns
-// since it (role in user/assistant/tool, seq after the summary's seq).
-func latestSummaryAndTurns(msgs []store.Message) (prevSummary string, turns []store.Message) {
+// latestSummaryAndMessages returns the latest summary's content + the raw
+// messages since it (role in user/assistant/tool, seq after the summary's
+// seq).
+func latestSummaryAndMessages(msgs []store.Message) (prevSummary string, messages []store.Message) {
 	latestSummarySeq := -1
 	for _, m := range msgs {
 		if m.Role == roleSummary {
@@ -309,14 +312,14 @@ func latestSummaryAndTurns(msgs []store.Message) (prevSummary string, turns []st
 			prevSummary = m.Content
 		}
 	}
-	turns = make([]store.Message, 0, len(msgs))
+	messages = make([]store.Message, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Role == roleSummary || m.Role == roleSystem {
 			continue
 		}
 		if m.Seq > latestSummarySeq {
-			turns = append(turns, m)
+			messages = append(messages, m)
 		}
 	}
-	return prevSummary, turns
+	return prevSummary, messages
 }

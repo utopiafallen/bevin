@@ -62,9 +62,13 @@ type Profile struct {
 	// headroom for the reply).
 	CompactionTriggerFraction float64
 
-	// KeepLastTurns: the most recent turns a compaction preserves verbatim
-	// (the chat resumes exactly where it left off).
-	KeepLastTurns int
+	// KeepLastMessages: the most recent MESSAGES a compaction preserves
+	// verbatim (the chat resumes exactly where it left off). A message is a
+	// stored transcript row — each tool-loop iteration is its OWN assistant
+	// message (the row that carries that iteration's tool calls) and counts
+	// as one; tool results are P7 sidecar rows, not messages, and do not
+	// count.
+	KeepLastMessages int
 
 	// CharsPerToken: the rough prompt-size estimate factor used when the API
 	// reports no usage (no local tokenizer; ~4 chars/token for English
@@ -98,7 +102,7 @@ var registry = map[string]Profile{
 		ReasoningInTranscript:     true,
 		SummaryFraming:            generalFraming,
 		CompactionTriggerFraction: 0.8,
-		KeepLastTurns:             5,
+		KeepLastMessages:          5,
 		CharsPerToken:             4,
 	},
 	// qwen3.8: general's harness behavior + the per-conversation
@@ -114,7 +118,7 @@ var registry = map[string]Profile{
 		ReasoningInTranscript:     true,
 		SummaryFraming:            generalFraming,
 		CompactionTriggerFraction: 0.8,
-		KeepLastTurns:             5,
+		KeepLastMessages:          5,
 		CharsPerToken:             4,
 		ReasoningEfforts:          []string{"low", "medium", "xhigh"},
 	},
