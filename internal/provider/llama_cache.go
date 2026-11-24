@@ -198,21 +198,24 @@ func (l *Llama) restoreSlotCache(ctx context.Context, slot int, filename string)
 	l.slotAction(ctx, "restore", slot, map[string]any{"filename": filename}, "restore", filename)
 }
 
-// eraseSlotCache clears a slot's in-memory KV cache (POST /slots/{id}?action=erase).
-// Best-effort: a deferred/unavailable slot or a server failure is logged, never fatal.
-func (l *Llama) eraseSlotCache(ctx context.Context, slot int, convID string) {
-	l.slotAction(ctx, "erase", slot, nil, "erase", cacheFile(convID))
+// deleteSlotCache deletes a slot's KV cache (POST /slots/{id}?action=delete) —
+// it clears the slot's in-memory KV cache AND removes the on-disk cache file
+// (the fork's delete action owns the filesystem). Best-effort: a deferred/
+// unavailable slot or a server failure is logged, never fatal.
+func (l *Llama) deleteSlotCache(ctx context.Context, slot int, convID string) {
+	filename := cacheFile(convID)
+	l.slotAction(ctx, "delete", slot, map[string]any{"filename": filename}, "delete", filename)
 }
 
 // DeleteLlamaConversationCache deletes a conversation's KV cache on the llama
 // server at baseURL — the conversation-delete path. It clears bevin's slot
 // tracking for the conversation (so it is never restored again) and issues the
-// slot's delete (erase) action on the slot the conversation was pinned to, so
-// the llama server releases the conversation's KV cache (in memory and on disk
-// — the server's delete action owns the filesystem). It is a no-op when the
-// conversation was never pinned to a slot on this server. Best-effort: the
-// erase failure is logged, never returned. Called once per distinct llama
-// server (baseURL) when a conversation is deleted.
+// slot's delete action on the slot the conversation was pinned to, so the llama
+// server releases the conversation's KV cache — both the in-memory slot cache
+// and the on-disk cache file (the fork's delete action owns the filesystem). It
+// is a no-op when the conversation was never pinned to a slot on this server.
+// Best-effort: the delete failure is logged, never returned. Called once per
+// distinct llama server (baseURL) when a conversation is deleted.
 func DeleteLlamaConversationCache(ctx context.Context, baseURL, convID, apiKey string) {
 	if convID == "" {
 		return
@@ -233,12 +236,12 @@ func DeleteLlamaConversationCache(ctx context.Context, baseURL, convID, apiKey s
 	if !pinned {
 		return
 	}
-	NewLlama(baseURL, apiKey).eraseSlotCache(ctx, slot, convID)
+	NewLlama(baseURL, apiKey).deleteSlotCache(ctx, slot, convID)
 }
 
 // slotAction issues a native slot API call at the server root:
-// POST /slots/{slot}?action={save|restore|erase}. A non-nil body is sent as
-// JSON (save/restore carry {filename}; erase has none). Best-effort: the
+// POST /slots/{slot}?action={save|restore|delete}. A non-nil body is sent as
+// JSON (save/restore/delete carry {filename}). Best-effort: the
 // failure is logged and swallowed (the request continues normally — the
 // user's explicit requirement).
 func (l *Llama) slotAction(ctx context.Context, action string, slot int, body map[string]any, verb, filename string) {
