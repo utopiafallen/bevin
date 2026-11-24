@@ -22,13 +22,18 @@
   </script>
 </head>
 <body>
-  <!-- Mobile only: the always-visible brand mark + the hamburger that opens
-       the drawer (the icon rail). On desktop the rail is always visible, so
-       both hide. -->
+  <!-- Mobile only: the always-visible top bar. Left: the hamburger + the
+       current-conversation button (#roomBtn) — it represents the chat's users
+       and is the room-info entry point once rooms land; for a DIRECT chat with
+       bevin it is a deliberate no-op. Center: workspaces. Right: search (both
+       moved here from the drawer so they're always visible). On desktop the
+       rail is always visible, so all of these hide. -->
   <button class="mobile-menu" id="menuBtn" type="button" aria-label="Open navigation" title="Navigation">
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
   </button>
-  <a class="mobile-brand" href="/"><img src="/logo-mark.svg" alt=""> bevin</a>
+  <button class="mobile-brand" id="roomBtn" type="button" title="Conversation" aria-label="Conversation"><img src="/logo-mark.svg" alt=""><span class="mobile-brand-label">bevin</span></button>
+  <button class="mobile-top-btn mobile-top-center" id="mobileWorkspaceBtn" type="button" title="Workspaces" aria-label="Workspaces"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></button>
+  <button class="mobile-top-btn mobile-top-right" id="mobileSearchBtn" type="button" title="Search everything" aria-label="Search"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg></button>
 
   <div class="app">
     <!-- The icon rail: the always-visible collapsed sidebar. One icon per
@@ -45,9 +50,6 @@
       <div class="rail-nav">
         <button class="rail-btn" id="chatsBtn" type="button" title="Chats" aria-label="Chats" aria-expanded="false">
           <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-        </button>
-        <button class="rail-btn" id="newChatBtn" type="button" title="New chat" aria-label="New chat">
-          <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
         </button>
         <button class="rail-btn" id="searchBtn" type="button" title="Search everything" aria-label="Search">
           <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
@@ -387,6 +389,32 @@
       showPage("profile");
       if (isMobileNav()) closeNav();
     });
+    // Mobile top bar: workspaces + search live in the always-visible bar
+    // (moved out of the drawer) — the same actions as the rail's buttons.
+    $("mobileWorkspaceBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("workspace");
+    });
+    $("mobileSearchBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("search");
+    });
+    // The conversation button (was the bevin brand): it represents the
+    // current chat's users. Once rooms land, a multi-member room navigates
+    // to its info page; a DIRECT chat with bevin is a deliberate no-op
+    // (there's no room to open).
+    $("roomBtn").addEventListener("click", function () {
+      if (!me) return;
+      // TODO(rooms): navigate to the room info page when the current
+      // conversation is a multi-member room. Direct chats (all of them
+      // today) do nothing.
+    });
+    // The conversation button's label: the current chat's title (a direct
+    // "this chat" indicator). "bevin" when there's no open conversation.
+    function setRoomLabel(title) {
+      var el = document.querySelector(".mobile-brand-label");
+      if (el) el.textContent = title || "bevin";
+    }
 
     // Messages are timestamped in UTC (new Date().toISOString()); the display
     // localizes to the browser's current locale.
@@ -859,7 +887,7 @@
     async function loadConvMeta() {
       pendingModelID = ""; // the conversation's own model (or the fresh
       // default) now decides — a pre-create pick is spent.
-      if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); return; }
+      if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); setRoomLabel(""); return; }
       try {
         var r = await fetch("/api/conversations/" + convID);
         if (r.status === 404) {
@@ -867,6 +895,7 @@
           try { localStorage.removeItem("bevin-conv"); } catch (e) {}
           buildModelSelect(null, "");
           updateCtx(0, 0);
+          setRoomLabel("");
           return;
         }
         if (!r.ok) return;
@@ -876,6 +905,7 @@
         // — active_model_id is the concrete provider (an internal detail; a
         // display name maps one-to-many to providers).
         buildModelSelect(c.display_name || null, c.reasoning_effort || "");
+        setRoomLabel(c.title);
         if (j.context) updateCtx(j.context.tokens || 0, j.context.max_tokens || 0);
       } catch (e) { /* best-effort — the chat itself still works */ }
     }
@@ -1512,15 +1542,12 @@
       buildModelSelect(null, "");
       updateCtx(0, 0);
       addNote("New conversation started.");
+      setRoomLabel("");
       showPage("chat");
       refreshHistory();
       closeNav();
       $("message").focus();
     }
-    $("newChatBtn").addEventListener("click", function () {
-      if (!me) return;
-      startNewChat();
-    });
     $("panelNewChatBtn").addEventListener("click", startNewChat);
 
     // Conversation history: the per-user list (GET /api/conversations),

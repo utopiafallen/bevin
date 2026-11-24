@@ -147,26 +147,47 @@ body.panel-chats .panel { display: flex; }
   margin: 0.4rem 0.2rem 0.45rem;
 }
 
-/* ---- mobile: the floating hamburger + brand mark (always visible) ---- */
-.mobile-menu, .mobile-brand { display: none; }
+/* ---- mobile: the floating top bar (always visible) ----
+   Left: hamburger + the current-conversation button (#roomBtn, was the bevin
+   brand). Center: workspaces. Right: search. */
+.mobile-menu, .mobile-brand, .mobile-top-btn { display: none; }
 .mobile-menu {
   position: fixed; top: 0.7rem; left: 0.7rem; z-index: 66;
   display: none; place-items: center;
   width: 2.7rem; height: 2.7rem;
   border: 1px solid var(--border); border-radius: 12px;
   background: var(--surface); color: var(--text);
-  box-shadow: var(--shadow-sm); cursor: pointer;
+  box-shadow: var(--shadow-sm); cursor: pointer; padding: 0;
 }
+/* The conversation button: logo + the chat's title (ellipsized). It
+   represents the current chat's users; a no-op for a direct chat. Capped so
+   it never reaches the centered workspaces button. */
 .mobile-brand {
   position: fixed; top: 0.7rem; left: 3.6rem; z-index: 66;
   display: none; align-items: center; gap: 0.45rem;
+  max-width: calc(50vw - 5.6rem);
   height: 2.7rem; padding: 0 0.85rem 0 0.6rem;
   border: 1px solid var(--border); border-radius: 12px;
   background: var(--surface); box-shadow: var(--shadow-sm);
-  font-weight: 800; font-size: 1.05rem; color: var(--text);
+  font: inherit; font-weight: 800; font-size: 1.05rem; color: var(--text);
+  cursor: pointer;
 }
-.mobile-brand img { width: 24px; height: 24px; display: block; }
-.mobile-brand:hover { text-decoration: none; }
+.mobile-brand img { width: 24px; height: 24px; display: block; flex: none; }
+.mobile-brand-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mobile-brand:hover { background: var(--surface-2); }
+/* The top bar's workspaces (center) + search (right): the hamburger's size. */
+.mobile-top-btn {
+  position: fixed; top: 0.7rem; z-index: 66;
+  display: none; place-items: center;
+  width: 2.7rem; height: 2.7rem;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow-sm); cursor: pointer; padding: 0;
+}
+.mobile-top-btn svg { width: 22px; height: 22px; }
+.mobile-top-btn:hover { background: var(--surface-2); }
+.mobile-top-center { left: 50%; transform: translateX(-50%); }
+.mobile-top-right { right: 0.7rem; }
 
 /* ---- main column ---- */
 .main {
@@ -426,8 +447,11 @@ body.page-chat .column { max-width: none; }
    drawer's own content clears it with top padding, and the rail's logo is
    hidden (the floating brand already shows it). ---- */
 @media (max-width: 839px) {
-  .mobile-menu, .mobile-brand { display: grid; }
+  .mobile-menu, .mobile-top-btn { display: grid; }
   .mobile-brand { display: flex; }
+  /* Search + workspaces moved to the always-visible top bar — hide the rail
+     (drawer) copies on mobile. They stay in the rail on desktop. */
+  #searchBtn, #workspaceBtn { display: none; }
 
   .rail {
     position: fixed; top: 0; bottom: 0; left: 0;
@@ -472,6 +496,21 @@ body.page-chat .column { max-width: none; }
   .chat-ctx .ctx-viz { min-width: 100%; }
   #chat { padding: 0.5rem 0.05rem 0.55rem; }
   .page-card { max-width: 100%; }
+
+  /* Model picker rows on mobile: the score value renders INSIDE the bar (a
+     small chip at the right end) instead of beside it, so the three R/K/S
+     bars fit on one row — the speed score no longer wraps to a new line and
+     wastes vertical space. */
+  .model-row { gap: 0.4rem; }
+  .model-row .metric { width: 3.1rem; flex: none; }
+  .model-row .mk { font-size: 0.62rem; }
+  .model-row .mscore { position: relative; }
+  .model-row .mbar { width: 100%; flex: none; height: 0.68rem; }
+  .model-row .mval {
+    position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+    font-size: 0.58rem; font-weight: 700; color: var(--text);
+    background: var(--surface); border-radius: 3px; padding: 0 1.5px; line-height: 1.1;
+  }
 }
 
 /* ---- the workspaces page ---- */

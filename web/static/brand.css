@@ -174,6 +174,12 @@ input:focus, textarea:focus, select:focus {
   padding: 0.6rem 0.95rem; border-radius: 18px; font-weight: 500;
   background: var(--surface); border: 1px solid var(--border);
   white-space: pre-wrap; word-wrap: break-word;
+  /* min-width:0 lets the bubble shrink to .msg's width instead of growing to
+     fit a wide table (which would spill past the 92% message cap and force the
+     whole chat log to scroll horizontally); max-width:100% caps it. The table
+     then scrolls inside its own .md-table wrapper (overflow-x: auto) — only
+     the table scrolls, not the chat. */
+  min-width: 0; max-width: 100%;
 }
 .msg-user { align-items: flex-end; align-self: flex-end; margin-left: auto; }
 .msg-user .msg-head { justify-content: flex-end; }
