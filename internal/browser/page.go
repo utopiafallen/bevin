@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -218,6 +219,19 @@ var pageCleanerJS = `(() => {
   // is a SELECTOR SYNTAX ERROR, not a no-match).
   const root = sel ? document.querySelector(sel) : document.body;
   if (!root) return JSON.stringify({ error: 'selector not found: ' + sel, title: document.title, url: location.href, markdown: '', elements: elements });
+  // The ROOT'S OWN direct text: a drill-in to a heading/paragraph (the
+  // element's text is a direct text node — walk() below only sees ELEMENT
+  // children, so without this a read of an h1/p selector comes back
+  // EMPTY). A no-op for the default root (body's text lives in its
+  // element children).
+  {
+    const t = directTextOf(root);
+    if (t) {
+      const h = /^H([1-6])$/.exec(root.tagName);
+      if (h) md.push('\n\n' + '#'.repeat(+h[1]) + ' ' + t);
+      else md.push('\n\n' + t);
+    }
+  }
   walk(root, 0);
   return JSON.stringify({
     title: document.title,
@@ -246,16 +260,47 @@ func (i *Instance) Read(ctx context.Context, convID, tabID, selector string) (*P
 		return nil, err
 	}
 	sel, _ := json.Marshal(selector) // JSON string literal ("" when absent)
-	body, err := i.evaluateString(ctx, session, fmt.Sprintf(pageCleanerJS, sel))
+	extract := func() (PageRead, error) {
+		body, err := i.evaluateString(ctx, session, fmt.Sprintf(pageCleanerJS, sel))
+		if err != nil {
+			return PageRead{}, err
+		}
+		var pr PageRead
+		if err := json.Unmarshal([]byte(body), &pr); err != nil {
+			return PageRead{}, fmt.Errorf("parsing the page clean: %w", err)
+		}
+		return pr, nil
+	}
+	pr, err := extract()
 	if err != nil {
 		return nil, err
 	}
-	var pr PageRead
-	if err := json.Unmarshal([]byte(body), &pr); err != nil {
-		return nil, fmt.Errorf("parsing the page clean: %w", err)
-	}
 	if pr.Error != "" {
-		return nil, fmt.Errorf("%s", pr.Error)
+		// A FRESH SPA may still be rendering: the settle saw the chrome
+		// go quiet, the content arrives async (the observed car-research
+		// failure: read with "h1, h2, h3" three seconds after a navigate
+		// — "selector not found" — the page rendered its content a
+		// moment later, and the model paid a second call to find out).
+		// Wait for the selector (bounded, the Wait contract) and re-extract
+		// ONCE before reporting not-found; the error that survives says
+		// what it means and what the model should do instead.
+		if strings.HasPrefix(pr.Error, "selector not found:") && selector != "" {
+			ok, _, werr := i.Wait(ctx, tabID, selector, 5*time.Second)
+			if werr != nil {
+				return nil, werr
+			}
+			if ok {
+				if pr2, e2 := extract(); e2 == nil && pr2.Error == "" {
+					pr = pr2
+				}
+			}
+		}
+		if pr.Error != "" {
+			if strings.HasPrefix(pr.Error, "selector not found:") {
+				return nil, fmt.Errorf("%s (waited 5s for the page to render — it still doesn't use this; read without a selector to see what IS there)", pr.Error)
+			}
+			return nil, fmt.Errorf("%s", pr.Error)
+		}
 	}
 	pr.Settle = settled
 	pr.Took = took

@@ -233,7 +233,9 @@ func (i *Instance) Fill(ctx context.Context, convID, tabID string, fields map[st
 	var done, failed []string
 	for _, k := range keys {
 		text := fields[k]
-		x, y, _, err := i.ElementTarget(ctx, session, convID, k)
+		// strict (no text rescue): a field is an interactive element by
+		// its name — a text-shaped key must not "type" into a heading.
+		x, y, _, err := i.ElementTarget(ctx, session, convID, k, false)
 		if err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", k, err))
 			continue
@@ -251,7 +253,7 @@ func (i *Instance) Fill(ctx context.Context, convID, tabID string, fields map[st
 	if submit == "" {
 		return fmt.Sprintf("filled %d field(s)", len(fields)), nil
 	}
-	x, y, _, err := i.ElementTarget(ctx, session, convID, submit)
+	x, y, _, err := i.ElementTarget(ctx, session, convID, submit, false)
 	if err != nil {
 		return fmt.Sprintf("filled %d field(s) but submit %q failed (%v) — the form may be incomplete; read the page.",
 			len(fields), submit, err), nil

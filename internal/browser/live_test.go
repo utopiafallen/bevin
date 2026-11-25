@@ -193,7 +193,7 @@ func TestWebBrowserLive(t *testing.T) {
 	if _, err := inst.Evaluate(ctx, session, `(() => { const b = document.createElement("button"); b.textContent = "other"; b.id = "otherbtn"; document.getElementById("actwrap").insertBefore(b, document.querySelector(".applybtn")); return "ok"; })()`); err != nil {
 		t.Fatalf("DOM rearrange: %v", err)
 	}
-	ax, ay, aSel, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N))
+	ax, ay, aSel, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N), false)
 	if err != nil {
 		t.Fatalf("ElementTarget (re-match) = %v — the stored #N must survive a re-render", err)
 	}
@@ -217,7 +217,7 @@ func TestWebBrowserLive(t *testing.T) {
 	if _, err := inst.Evaluate(ctx, session, `(() => { const b = document.createElement("button"); b.textContent = "apply"; b.id = "applydup"; document.getElementById("actwrap").appendChild(b); return "ok"; })()`); err != nil {
 		t.Fatalf("DOM ambiguity: %v", err)
 	}
-	if _, _, _, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N)); err == nil || !strings.Contains(err.Error(), "multiple elements match") {
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", fmt.Sprintf("#%d", apply.N), false); err == nil || !strings.Contains(err.Error(), "multiple elements match") {
 		t.Fatalf("ambiguous re-match err = %v, want the multiple-match refusal", err)
 	}
 
@@ -642,4 +642,243 @@ for (let n = 1; n <= 20; n++) render(n);
 		t.Fatalf("fetches = %d, want >= 4 (the async lazy path must have been used)", f)
 	}
 	t.Logf("collect: %d items (stop: %s, %d fetches)", len(cr.Items), cr.Stop, f)
+}
+
+// TestWebBrowserSelectorVocabLive (design log BROWSER-ROBUST batch 3,
+// 2026-11-24 — the car-research redo's failures): the model writes
+// Playwright selector forms by habit (button:has-text("See Inventory")
+// came straight back as a querySelector SyntaxError) and clicks controls
+// a page renders as plain divs. Decision 2026-11-24: the tool does NOT
+// accept the Playwright forms (a working form would teach the model to
+// write more — recreating Playwright's surface); it answers with one
+// line pointing at the tool's own vocabulary (#N, CSS, the element's
+// visible text) — and the bare-text form now actually RESOLVES for
+// clicks (interactive name first, then a rescue across all visible
+// elements for the div-rendered controls). Pins: the Playwright-form
+// rejection (the redirect wording, not a SyntaxError, not a click), the
+// bare-text click (a button via the name path; a div control via the
+// rescue), the click-only strictness (type/fill keys stay interactive),
+// the ambiguity refusal (never a guess), the contains stage (partial
+// text → innermost element), and the ElementInteractivity probe behind
+// the click/type notes.
+func TestWebBrowserSelectorVocabLive(t *testing.T) {
+	if os.Getenv("BEVIN_E2E_BROWSER") != "1" {
+		t.Skip("set BEVIN_E2E_BROWSER=1 to run the live browser e2e (needs a desktop host with a browser)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// The page: a button wrapped in a div carrying the SAME text (the
+	// innermost-wins case for the rescue), a non-interactive div control
+	// (the "See Inventory" case — a JS-attached handler, no role, no
+	// cursor), two same-named buttons (ambiguity), and a unique
+	// paragraph (the contains stage: a partial text resolves to the
+	// innermost element carrying it).
+	page := `<html><head><meta charset="utf-8"><title>Selector Vocab</title></head><body>
+<h1>Forms Page</h1>
+<p>Static content here.</p>
+<div id="wrap"><button id="see-btn" onclick="window.__seen = true">See Inventory</button></div>
+<div id="sic">See Inventory 2</div>
+<div id="saves"><button id="save1">Save</button><button id="save2">Save</button></div>
+<p id="uniq">UniqueHeadingHere</p>
+<input id="q" type="text" placeholder="search">
+<script>
+document.getElementById("sic").addEventListener("click", () => { window.__sic = true; });
+</script>
+</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	dataDir := t.TempDir()
+	mgr := NewManager(dataDir)
+	t.Cleanup(func() {
+		mgr.Close()
+		time.Sleep(2 * time.Second) // let the process tree release the profile
+	})
+	inst, err := mgr.ForUser(ctx, "e2e-forms")
+	if err != nil {
+		t.Fatalf("ForUser (browser launch): %v", err)
+	}
+	tab, err := inst.OpenTab(ctx, "", srv.URL)
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+	session, err := inst.SessionFor(ctx, tab.ID)
+	if err != nil {
+		t.Fatalf("SessionFor: %v", err)
+	}
+	flag := func(js string) bool {
+		v, err := inst.Evaluate(ctx, session, js)
+		if err != nil {
+			t.Fatalf("Evaluate(%s): %v", js, err)
+		}
+		return strings.TrimSpace(string(v)) == "true"
+	}
+
+	// THE observed failure, now a REDIRECT: the model's exact Playwright
+	// form is refused with one line pointing at the tool's vocabulary —
+	// not a raw SyntaxError, and not a click.
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", `button:has-text("See Inventory")`, true); err == nil || !strings.Contains(err.Error(), "Playwright") || !strings.Contains(err.Error(), "visible text") {
+		t.Fatalf("ElementTarget(:has-text) err = %v, want the Playwright-redirect wording (not a SyntaxError, not a resolution)", err)
+	}
+
+	// The tool's own vocabulary for the same task: the element's visible
+	// text, bare. The wrapper div carries the SAME text as the button —
+	// the name path (interactive candidates only) sees just the button;
+	// the click must land on it.
+	x, y, sel, err := inst.ElementTarget(ctx, session, "", "See Inventory", true)
+	if err != nil {
+		t.Fatalf("ElementTarget(bare text) = %v — the tool's own text form must resolve", err)
+	}
+	if !strings.Contains(sel, "see-btn") {
+		t.Fatalf("bare-text resolved %q — want see-btn, not the same-text wrapper", sel)
+	}
+	if err := inst.ClickAt(ctx, session, x, y); err != nil {
+		t.Fatalf("ClickAt: %v", err)
+	}
+	if !flag("window.__seen") {
+		t.Fatal("the bare-text click did not land on the button (window.__seen unset)")
+	}
+
+	// The div control (the redo's stuck case): no interactive element
+	// bears the name — the click-only rescue finds the div among ALL
+	// visible elements; the click still LANDS (real input events — the
+	// page's JS handler fires).
+	x, y, sel, err = inst.ElementTarget(ctx, session, "", "See Inventory 2", true)
+	if err != nil {
+		t.Fatalf("ElementTarget(div text, rescue) = %v — the div-rendered control must resolve for clicks", err)
+	}
+	if !strings.Contains(sel, "sic") {
+		t.Fatalf("rescue resolved %q, want the sic div", sel)
+	}
+	if err := inst.ClickAt(ctx, session, x, y); err != nil {
+		t.Fatalf("ClickAt: %v", err)
+	}
+	if !flag("window.__sic") {
+		t.Fatal("the rescue click did not land on the div (window.__sic unset)")
+	}
+
+	// Click-only strictness: the SAME key with the rescue off (type/
+	// select/fill semantics) must NOT resolve a non-interactive div —
+	// typing into a heading would be a silent no-op.
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", "See Inventory 2", false); err == nil {
+		t.Fatal("ElementTarget(div text, no rescue) resolved — type/fill keys must stay strict (interactive names only)")
+	}
+
+	// The interactivity probe (behind the click/type notes): the button
+	// is interactive, the div control is NOT (the note the model needed
+	// instead of two re-reads), the input is text-like, the paragraph
+	// is not.
+	if tag, interactive, _, err := inst.ElementInteractivity(ctx, session, "#see-btn"); err != nil || tag != "button" || !interactive {
+		t.Fatalf("ElementInteractivity(#see-btn) = (%q, %v, %v), want (button, true)", tag, interactive, err)
+	}
+	if tag, interactive, _, err := inst.ElementInteractivity(ctx, session, "#sic"); err != nil || tag != "div" || interactive {
+		t.Fatalf("ElementInteractivity(#sic) = (%q, %v, %v), want (div, false) — a plain div is not interactive", tag, interactive, err)
+	}
+	if tag, _, textLike, err := inst.ElementInteractivity(ctx, session, "#q"); err != nil || tag != "input" || !textLike {
+		t.Fatalf("ElementInteractivity(#q) = (%q, %v, %v), want (input, textLike=true)", tag, textLike, err)
+	}
+	if tag, _, textLike, err := inst.ElementInteractivity(ctx, session, "#uniq"); err != nil || tag != "p" || textLike {
+		t.Fatalf("ElementInteractivity(#uniq) = (%q, %v, %v), want (p, textLike=false)", tag, textLike, err)
+	}
+
+	// Ambiguity: two same-named buttons — the name path refuses, never
+	// guessed (the bare-text form inherits the same refusal).
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", "Save", true); err == nil || !strings.Contains(err.Error(), "multiple elements match") {
+		t.Fatalf("ambiguous bare text err = %v, want the multiple-match refusal", err)
+	}
+
+	// The contains stage: a PARTIAL text (a phrase copied from the page
+	// that is no element's full text) resolves to the innermost element
+	// carrying it — not the ancestors, not a guess.
+	if _, _, sel, err := inst.ElementTarget(ctx, session, "", "Heading", true); err != nil || !strings.Contains(sel, "uniq") {
+		t.Fatalf("partial-text = (%q, %v), want the uniq paragraph (contains stage, innermost)", sel, err)
+	}
+
+	// Missing text: an honest not-found (no partial guesses).
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", "No Such Text Here", true); err == nil || !strings.Contains(err.Error(), "no visible element says") {
+		t.Fatalf("missing text err = %v, want the not-found wording", err)
+	}
+
+	// The Playwright forms the tool refuses — one clear line each.
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", "id=sic", true); err == nil || !strings.Contains(err.Error(), "#sic") {
+		t.Fatalf("ElementTarget(id=) err = %v, want the #sic redirect", err)
+	}
+	if _, _, _, err := inst.ElementTarget(ctx, session, "", "css=#see-btn", true); err == nil || !strings.Contains(err.Error(), "css=") {
+		t.Fatalf("ElementTarget(css=) err = %v, want the drop-the-prefix redirect", err)
+	}
+	for _, key := range []string{"text=Save", "xpath=//button", "//button", "aria/Save", "role=button"} {
+		if _, _, _, err := inst.ElementTarget(ctx, session, "", key, true); err == nil || !strings.Contains(err.Error(), "Playwright") {
+			t.Fatalf("ElementTarget(%q) err = %v, want the Playwright-redirect wording (not a SyntaxError)", key, err)
+		}
+	}
+}
+
+// TestWebBrowserReadSelectorRetryLive (design log BROWSER-ROBUST batch 3,
+// 2026-11-24 — the car-research redo's failure): a read with a selector
+// right after a navigate hit "selector not found" because the SPA's
+// content was still rendering — the model paid a second call to find out.
+// Pins: a not-found read WAITS (bounded 5 s) and re-extracts once — a
+// heading that lands 3.5 s after load is in the SAME call's result — and
+// a selector the page never uses fails with the actionable wording (read
+// without a selector).
+func TestWebBrowserReadSelectorRetryLive(t *testing.T) {
+	if os.Getenv("BEVIN_E2E_BROWSER") != "1" {
+		t.Skip("set BEVIN_E2E_BROWSER=1 to run the live browser e2e (needs a desktop host with a browser)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	page := `<html><head><meta charset="utf-8"><title>Late Render</title></head><body>
+<h1>Early Heading</h1>
+<p>Static content here.</p>
+<script>setTimeout(() => {
+  const h = document.createElement("h1");
+  h.id = "late";
+  h.textContent = "LateHeading";
+  document.body.appendChild(h);
+}, 3500);</script>
+</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+
+	dataDir := t.TempDir()
+	mgr := NewManager(dataDir)
+	t.Cleanup(func() {
+		mgr.Close()
+		time.Sleep(2 * time.Second)
+	})
+	inst, err := mgr.ForUser(ctx, "e2e-laterender")
+	if err != nil {
+		t.Fatalf("ForUser (browser launch): %v", err)
+	}
+	tab, err := inst.OpenTab(ctx, "", srv.URL)
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+
+	// THE pin: the heading lands 3.5 s after load (well after the
+	// settle) — the read must still come back WITH it (the retry waited
+	// and re-extracted inside the same call).
+	start := time.Now()
+	pr, err := inst.Read(ctx, "", tab.ID, "#late")
+	if err != nil {
+		t.Fatalf("Read(#late) = %v — the retry must catch the late-rendered heading", err)
+	}
+	if !strings.Contains(pr.Markdown, "LateHeading") {
+		t.Fatalf("read missing the late-rendered heading (the retry did not re-extract):\\n%.300s", pr.Markdown)
+	}
+	if took := time.Since(start); took < 3*time.Second {
+		t.Logf("read returned in %s (the first extract may already have seen the heading — the pin still holds)", took)
+	}
+
+	// A selector the page never uses: fails after the bounded wait, with
+	// the actionable wording (not a bare "not found").
+	if _, err := inst.Read(ctx, "", tab.ID, "table"); err == nil || !strings.Contains(err.Error(), "waited 5s") || !strings.Contains(err.Error(), "read without a selector") {
+		t.Fatalf("Read(table) err = %v, want the waited-then-not-found wording with the read-without-a-selector pointer", err)
+	}
 }

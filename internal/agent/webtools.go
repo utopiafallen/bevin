@@ -30,7 +30,7 @@ Commands:
 - readItems (selector) — the items matching selector, in VISUAL order (not DOM order), deduped, text + first link, after the page settles (boilerplate — nav/header/footer/dialogs — is excluded).
 - collect (selector) — EVERY item matching selector on the page, lazy-loaded ones included: scrolls + settles + dedupes until the bottom or nothing new; ONE call, and the result says exactly how it stopped.
 - scroll (direction?, viewports?) — move whole viewports (direction down|up|top|bottom, default: down 1) and wait for settle; reports position + bottom reached.
-- click (element|selector) — click #N or a CSS selector
+- click (element|selector) — click #N, a CSS selector, or the element's visible text (when it is not in the table)
 - type (element|selector, text) — click + type (a trailing newline = Enter)
 - select (element|selector, value) — pick a <select> option (value or visible text)
 - fill (fields, submit?) — type text into SEVERAL fields in one call (fields: a map, each key = #N or selector), then click submit; if a field fails, submit is NOT clicked
@@ -72,7 +72,7 @@ func registerWebBrowser(r *ToolRegistry, bm *browser.Manager) error {
 					"enum": []string{"openTab", "navigate", "read", "readItems", "collect", "scroll", "click", "type", "select", "fill", "waitFor", "listTabs", "closeTab"},
 				},
 				"url":        map[string]any{"type": "string", "description": "openTab / navigate (http/https only)"},
-				"element":    map[string]any{"type": "string", "description": "click/type/select and each key of fill: #N id from the last read"},
+				"element":    map[string]any{"type": "string", "description": "click/type/select and each key of fill: #N id from the last read (click: also a CSS selector or the element's visible text)"},
 				"selector":   map[string]any{"type": "string", "description": "a CSS selector — fallback for click/type/select, scope for read, item selector for readItems/collect (ONE item in the list), wait target for waitFor"},
 				"text":       map[string]any{"type": "string", "description": "type: text to type (trailing newline = Enter)"},
 				"value":      map[string]any{"type": "string", "description": "select: option value or visible text"},
@@ -293,7 +293,10 @@ func doElementAction(ctx context.Context, inst *browser.Instance, convID string,
 	if err != nil {
 		return unavailable(a.Command, err), nil
 	}
-	x, y, selector, err := inst.ElementTarget(ctx, session, convID, key)
+	// textRescue (click only): when the key is the element's visible
+	// text (not a selector), a miss among the interactive names retries
+	// against ALL visible elements — the div-rendered controls.
+	x, y, selector, err := inst.ElementTarget(ctx, session, convID, key, a.Command == "click")
 	if err != nil {
 		return err.Error(), nil
 	}
@@ -302,7 +305,11 @@ func doElementAction(ctx context.Context, inst *browser.Instance, convID string,
 		if err := inst.ClickAt(ctx, session, x, y); err != nil {
 			return unavailable("click", err), nil
 		}
-		return fmt.Sprintf("clicked %s — the page may have changed; read again before the next action.", key), nil
+		out := fmt.Sprintf("clicked %s — the page may have changed; read again before the next action.", key)
+		if note := interactionNote(ctx, inst, session, selector, "click"); note != "" {
+			out += " " + note
+		}
+		return out, nil
 	case "type":
 		if a.Text == "" {
 			return "type needs a text.", nil
@@ -310,7 +317,11 @@ func doElementAction(ctx context.Context, inst *browser.Instance, convID string,
 		if err := inst.TypeAt(ctx, session, x, y, a.Text); err != nil {
 			return unavailable("type", err), nil
 		}
-		return fmt.Sprintf("typed %d characters into %s.", len(a.Text), key), nil
+		out := fmt.Sprintf("typed %d characters into %s.", len(a.Text), key)
+		if note := interactionNote(ctx, inst, session, selector, "type"); note != "" {
+			out += " " + note
+		}
+		return out, nil
 	case "select":
 		if a.Value == "" {
 			return "select needs a value.", nil
@@ -324,10 +335,44 @@ func doElementAction(ctx context.Context, inst *browser.Instance, convID string,
 	return "internal: unknown element action " + a.Command, nil
 }
 
+// interactionNote probes the RESOLVED element after a click/type and
+// reports — when it is not the kind of element that action applies to
+// (a click on a plain div, a type into a non-field) — so the model does
+// not pay re-reads to discover the page didn't react (the observed
+// car-research failure: the model clicked a "See Inventory" control the
+// page rendered as a div, then read the unchanged page twice before
+// trying the form submit). A probe failure is silent: the action already
+// happened — the note is an aid, never a blocker.
+func interactionNote(ctx context.Context, inst *browser.Instance, session, selector, action string) string {
+	tag, interactive, textLike, err := inst.ElementInteractivity(ctx, session, selector)
+	if err != nil {
+		return ""
+	}
+	switch action {
+	case "click":
+		if !interactive {
+			return fmt.Sprintf("(note: the <%s> doesn't look interactive — no button/link role, cursor isn't pointer; the page may not have reacted. If nothing changed, look for a real button/link in the element table, or submit the form with Enter in the field.)", tag)
+		}
+	case "type":
+		if !textLike {
+			return fmt.Sprintf("(note: the <%s> doesn't look like a text field — the typed text may not have landed; type into an input or textarea from the element table.)", tag)
+		}
+	}
+	return ""
+}
+
 // unavailable renders a command's infrastructure failure (the browser died
 // mid-call, a CDP error) as a RESULT the model can relay — with the hint
 // that a retry may relaunch the browser (the manager relaunches a dead
-// instance on the next call).
+// instance on the next call). A PAGE-LEVEL network error (DNS, TLS — the
+// browser is fine, the URL or the network is not) gets the honest hint
+// instead: retrying the same call fails the same way (the observed
+// car-research failure: a DNS error on a guessed dealer domain came back
+// with the relaunch hint — a "retry" was a wasted call).
 func unavailable(command string, err error) string {
-	return fmt.Sprintf("%s failed: %v. (If the browser window was closed, the next call relaunches it — try the command again.)", command, err)
+	msg := fmt.Sprintf("%s failed: %v.", command, err)
+	if strings.Contains(err.Error(), "net::ERR_") {
+		return msg + " (a page/network error — the URL or the network is the problem, not the browser; retrying the same call will fail the same way)"
+	}
+	return msg + " (If the browser window was closed, the next call relaunches it — try the command again.)"
 }

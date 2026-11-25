@@ -541,16 +541,238 @@ func (i *Instance) ResolveRef(ctx context.Context, session string, ref elementRe
 	}
 }
 
+// elementByTextJS resolves a TEXT target — the click-only rescue in
+// ElementTarget for a key that is not valid CSS and matches no
+// interactive name (the "click the thing that says X" task; the observed
+// car-research case — the page rendered the "See Inventory" control as a
+// plain div, so it is in no element table and no interactive name set;
+// the click lands, and the interactivity note tells the model whether
+// anything will happen). It searches ALL visible elements — not just the
+// interactive set — but only after the strict name path missed.
+// Innermost wins: an element whose text is matched only because a
+// MATCHED CHILD carries it is not itself the target (nesting is the
+// ambiguity a naive text match produces on real pages). Stages mirror
+// the #N re-match: exact normalized text, then case-insensitive, then
+// case-insensitive CONTAINS (a partial text copied from the page
+// resolves the same way the model expects). More than one candidate at
+// any stage is "multiple" — never guessed.
+// %s x2 = text, tag (JSON string literals; tag "" = any element).
+var elementByTextJS = `(() => {
+  const text = %s, tag = %s;
+  const norm = s => String(s || "").replace(/\s+/g, " ").trim();
+  const nm = norm(text);
+  if (!nm) return JSON.stringify({ why: "missing" });
+  function visible(el) {
+    const s = getComputedStyle(el);
+    return s.display !== "none" && s.visibility !== "hidden";
+  }
+  function pathOf(el) {
+    const parts = [];
+    let n = el;
+    while (n && n.nodeType === 1 && n.tagName.toLowerCase() !== "body" && parts.length < 8) {
+      if (n.id) { parts.unshift("#" + CSS.escape(n.id)); break; }
+      let part = n.tagName.toLowerCase();
+      const parent = n.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter(c => c.tagName === n.tagName);
+        if (sibs.length > 1) part += ":nth-of-type(" + (sibs.indexOf(n) + 1) + ")";
+      }
+      parts.unshift(part);
+      n = n.parentElement;
+    }
+    return "body > " + parts.join(" > ");
+  }
+  const cands = [];
+  for (const el of document.querySelectorAll("body *")) {
+    if (tag !== "" && el.tagName.toLowerCase() !== tag) continue;
+    if (!visible(el)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    cands.push({ el: el, text: norm(el.textContent) });
+  }
+  const lower = cands.map(c => c.text.toLowerCase());
+  const nmLower = nm.toLowerCase();
+  const stages = [
+    i => cands[i].text === nm,
+    i => lower[i] === nmLower,
+    i => lower[i].includes(nmLower)
+  ];
+  for (const stage of stages) {
+    const hits = [];
+    for (let i = 0; i < cands.length; i++) {
+      if (stage(i)) hits.push(cands[i].el);
+    }
+    if (!hits.length) continue;
+    const inner = hits.filter(h => !hits.some(o => o !== h && h.contains(o)));
+    const list = inner.length ? inner : hits;
+    if (list.length > 1) return JSON.stringify({ why: "multiple" });
+    const el = list[0];
+    el.scrollIntoView({ block: "center" });
+    const r = el.getBoundingClientRect();
+    return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2, selector: pathOf(el) });
+  }
+  return JSON.stringify({ why: "missing" });
+})()`
+
+// elementInteractivityJS reports whether the element at a selector is
+// the kind that an input action applies to (the probe behind the
+// click/type notes — the model clicked a "See Inventory" control the
+// page rendered as a div and read the unchanged page twice before trying
+// the form submit; the note tells it, IN THE RESULT, that the element
+// won't react). %s = the selector (JSON string literal).
+var elementInteractivityJS = `(() => {
+	const el = document.querySelector(%s);
+	if (!el) return JSON.stringify({ why: "missing" });
+	const tag = el.tagName.toLowerCase();
+	const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[onclick],label[for],[role="button"],[role="link"]';
+	const interactive = !!(el.matches(INTERACTIVE) || getComputedStyle(el).cursor === "pointer");
+	const textLike = (tag === "input" && !["button","checkbox","radio","submit","reset","file","hidden","range","color","image"].includes(el.type)) || tag === "textarea" || el.isContentEditable;
+	return JSON.stringify({ tag: tag, interactive: interactive, textLike: textLike });
+})()`
+
+// ElementInteractivity probes a resolved element (see
+// elementInteractivityJS): tag + whether a click applies (interactive)
+// or a type applies (textLike).
+func (i *Instance) ElementInteractivity(ctx context.Context, session, selector string) (tag string, interactive, textLike bool, err error) {
+	sel, _ := json.Marshal(selector)
+	body, err := i.evaluateString(ctx, session, fmt.Sprintf(elementInteractivityJS, sel))
+	if err != nil {
+		return "", false, false, err
+	}
+	var res struct {
+		Tag         string `json:"tag"`
+		Interactive bool   `json:"interactive"`
+		TextLike    bool   `json:"textLike"`
+		Why         string `json:"why"`
+	}
+	if err := json.Unmarshal([]byte(body), &res); err != nil || res.Why == "missing" {
+		return "", false, false, fmt.Errorf("element not found: %s", selector)
+	}
+	return res.Tag, res.Interactive, res.TextLike, nil
+}
+
+// elementByText resolves a text target via elementByTextJS (the
+// click-only text rescue, see its comment). The error wordings
+// mirror the #N name fallback — same contract, same ambiguity refusal.
+func (i *Instance) elementByText(ctx context.Context, session, tag, text string) (x, y float64, selector string, err error) {
+	textJSON, _ := json.Marshal(text)
+	tagJSON, _ := json.Marshal(tag)
+	body, err := i.evaluateString(ctx, session, fmt.Sprintf(elementByTextJS, textJSON, tagJSON))
+	if err != nil {
+		return 0, 0, "", err
+	}
+	var res struct {
+		X        float64 `json:"x"`
+		Y        float64 `json:"y"`
+		Selector string  `json:"selector"`
+		Why      string  `json:"why"`
+	}
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return 0, 0, "", fmt.Errorf("element geometry: %w", err)
+	}
+	switch res.Why {
+	case "":
+		return res.X, res.Y, res.Selector, nil
+	case "multiple":
+		return 0, 0, "", fmt.Errorf("multiple elements say %q — read again and use a fresh #N, or a more specific selector", text)
+	default:
+		return 0, 0, "", fmt.Errorf("no visible element says %q (the text may be partial or gone — read to see the page's current text, or use a #N from the last read)", text)
+	}
+}
+
+// playwrightRedirect names the Playwright selector forms the model
+// writes by habit and redirects them to this tool's own vocabulary
+// (#N, a CSS selector, or the element's visible text). The tool does
+// NOT accept them (decided 2026-11-24): a working Playwright form would
+// teach the model to write more of them — the boundary is that this
+// tool is a legibility + robustness layer, not a second locator
+// language. One clear line instead of the raw querySelector
+// SyntaxError the raw form produced (the observed car-research
+// failure). (msg, true) when the key is a Playwright form.
+func playwrightRedirect(key string) (string, bool) {
+	const general = `that looks like Playwright selector syntax — this tool doesn't take it. Pass a plain CSS selector, or the element's visible text alone (e.g. "See Inventory")`
+	switch {
+	case strings.HasPrefix(key, "id="):
+		if id := strings.TrimSpace(key[len("id="):]); isSimpleID(id) {
+			return "id= is not a selector form here — use #" + id + " instead", true
+		}
+		return general, true
+	case strings.HasPrefix(key, "css="):
+		return "drop the \"css=\" prefix — selectors here are plain CSS (pass the selector as-is)", true
+	case strings.Contains(key, ":has-text("),
+		strings.HasPrefix(key, "text="),
+		strings.HasPrefix(key, "xpath="),
+		strings.HasPrefix(key, "//"),
+		strings.HasPrefix(key, "aria/"),
+		strings.HasPrefix(key, "role="):
+		return general, true
+	}
+	return "", false
+}
+
+func isSimpleID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// selectorShapedKey reports whether the key is written as a SELECTOR:
+// it starts with selector punctuation (a class, an id, an attribute, a
+// pseudo-class, a universal, a combinator). Copied page text essentially
+// never starts that way, so a key that does not is TEXT — even a
+// multi-word key like "No Such Text Here", which happens to parse as
+// valid CSS (a chain of unknown element types) and comes back
+// "not found" rather than a syntax error. A selector-shaped key that
+// matches nothing is a stale/changed page — its error stands (a text
+// search for ".foo" would only add noise).
+func selectorShapedKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	switch key[0] {
+	case '.', '#', '[', ':', '*', '>', '+', '~':
+		return true
+	}
+	return false
+}
+
 // ElementTarget resolves a click/type/select/fill target the way the
-// model gives it: a #N id from the CALLING conversation's last read
-// (re-matched when the page re-rendered — ResolveRef), a CSS selector
-// (used exactly as given — a "#..." key that is not "#N" is an id
-// selector), or — last resort — a NAME (a label, a button's text, an
-// input's placeholder: not a selector at all) re-matched by name alone
-// across the page's interactive elements. Ambiguity at any stage is an
-// error, never a guess.
-func (i *Instance) ElementTarget(ctx context.Context, session, convID, key string) (x, y float64, selector string, err error) {
-	if strings.HasPrefix(key, "#") {
+// model gives it:
+//
+//   - a #N id from the CALLING conversation's last read (re-matched when
+//     the page re-rendered — ResolveRef);
+//   - a CSS selector (used exactly as given — a "#..." key that is not
+//     "#N" is an id selector);
+//   - last resort, a NAME (a label, a button's text, an input's
+//     placeholder: not a selector at all) re-matched by name alone
+//     across the page's visible INTERACTIVE elements — the fill
+//     contract, and what the model already writes successfully for fill.
+//
+// When the key is not valid CSS (it is the element's TEXT, not a
+// selector) and textRescue is set (click only), the text is matched
+// against ALL visible elements, innermost wins (elementByText) — the
+// "click the thing that says X" task, covering controls the element
+// table does not expose because the page renders them as plain divs
+// (the observed car-research case). type/select/fill stay strict — a
+// name among interactive elements only: typing into a heading would be
+// a silent no-op the model can't recover from.
+//
+// Playwright selector syntax (button:has-text("X"), text=X, css=, id=,
+// xpath=, aria/, role=) is NOT accepted — a working Playwright form
+// would teach the model to write more of them (recreating Playwright's
+// surface); playwrightRedirect answers with one line pointing at this
+// tool's own vocabulary instead of the raw querySelector SyntaxError
+// the raw form produced.
+//
+// Ambiguity at any stage is an error, never a guess.
+func (i *Instance) ElementTarget(ctx context.Context, session, convID, key string, textRescue bool) (x, y float64, selector string, err error) {
+	if key != "" {
 		var n int
 		if _, e := fmt.Sscanf(key, "#%d", &n); e == nil && n > 0 {
 			ref, ok := i.ElementByN(convID, n)
@@ -559,30 +781,51 @@ func (i *Instance) ElementTarget(ctx context.Context, session, convID, key strin
 			}
 			return i.ResolveRef(ctx, session, ref)
 		}
+		if msg, pw := playwrightRedirect(key); pw {
+			return 0, 0, "", errors.New(msg)
+		}
 	}
 	cx, cy, e := i.ElementCenter(ctx, session, key)
 	if e == nil {
 		return cx, cy, key, nil
 	}
 	// The key is not a working selector — try it as a NAME (the fill
-	// contract: a label/placeholder/text).
-	name, _ := json.Marshal(key)
-	tag, _ := json.Marshal("*")
-	body, e2 := i.evaluateString(ctx, session, fmt.Sprintf(elementCenterRefJS, `"missing-selector"`, name, tag))
-	if e2 == nil {
-		var res struct {
-			X        float64 `json:"x"`
-			Y        float64 `json:"y"`
-			Selector string  `json:"selector"`
-			Why      string  `json:"why"`
-		}
-		if json.Unmarshal([]byte(body), &res) == nil {
-			switch res.Why {
-			case "":
-				return res.X, res.Y, res.Selector, nil
-			case "multiple":
-				return 0, 0, "", fmt.Errorf("multiple elements match %q — read again and use a fresh #N, or a more specific selector", key)
+	// contract: a label, a button's text, a placeholder). This runs on
+	// EVERY failure: a bare word ("Save") is a valid CSS type selector
+	// that matches nothing — the name is what the model meant.
+	if key != "" {
+		name, _ := json.Marshal(key)
+		tag, _ := json.Marshal("*")
+		body, e2 := i.evaluateString(ctx, session, fmt.Sprintf(elementCenterRefJS, `"missing-selector"`, name, tag))
+		if e2 == nil {
+			var res struct {
+				X        float64 `json:"x"`
+				Y        float64 `json:"y"`
+				Selector string  `json:"selector"`
+				Why      string  `json:"why"`
 			}
+			if json.Unmarshal([]byte(body), &res) == nil {
+				switch res.Why {
+				case "":
+					return res.X, res.Y, res.Selector, nil
+				case "multiple":
+					return 0, 0, "", fmt.Errorf("multiple elements match %q — read again and use a fresh #N, or a more specific selector", key)
+				}
+			}
+		}
+		// The text rescue (click only): no interactive element bears the
+		// name — it may be the visible text of a NON-interactive control.
+		// Gated on the key NOT being selector-shaped (see
+		// selectorShapedKey): a real selector that matches nothing is a
+		// stale/changed page, its error stands. The rescue's error
+		// wordings (not found vs multiple) are the useful ones for a
+		// text-shaped key.
+		if textRescue && !selectorShapedKey(key) {
+			rx, ry, rsel, terr := i.elementByText(ctx, session, "", key)
+			if terr == nil {
+				return rx, ry, rsel, nil
+			}
+			return 0, 0, "", terr
 		}
 	}
 	return 0, 0, "", e
