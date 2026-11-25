@@ -1251,33 +1251,31 @@ type ConversationMessage struct {
 	Reasoning string         `json:"reasoning,omitempty"`
 	ToolCalls []ToolCallInfo `json:"tool_calls,omitempty"`
 	CreatedAt string         `json:"created_at"`
+	// Seq: the row's conversation sequence (0-based, monotonic). The client's
+	// lazy loading uses the oldest loaded seq as the scroll-up cursor (the
+	// ?before= value for the next page of older messages).
+	Seq int `json:"seq"`
+	// CompactedFrom / CompactedTo: on a summary row (a context-compaction
+	// event), the prompt size in tokens before / after the compaction (0 = a
+	// pre-existing summary row, no tokens recorded). The UI renders a
+	// summary row as the persistent "Context compacted from X to Y tokens"
+	// marker — never as a message bubble (its content is the model-facing
+	// summary, so it is not sent to the client here).
+	CompactedFrom int `json:"compacted_from,omitempty"`
+	CompactedTo   int `json:"compacted_to,omitempty"`
 }
 
-// ConversationMessages returns the displayable messages of the user's
-// conversation in seq order. store.ErrNotFound when the conversation is not
-// in the user's store.
-func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessage, error) {
-	us, err := a.userStore(handle)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := us.GetConversation(convID); err != nil {
-		return nil, err
-	}
-	msgs, err := us.ListMessages(convID)
-	if err != nil {
-		return nil, err
-	}
-	// Attach the assistant rows' tool calls (P7 sidecar rows, one query)
-	// so the UI can render one indicator row per call in the flow. An
-	// empty assistant row WITH calls is the tool-call turn (its text
-	// lands on the turn's final reply row) — it is INCLUDED now, so the
-	// calls have a place in the flow; the UI renders only the indicator
-	// rows (no bubble). An empty row WITHOUT calls is a genuine empty
-	// reply (a reasoning-only completion, or the dropped streamed tool
-	// call before 7174606): it stays in the history so the user's
-	// question never looks unanswered, and the UI renders it as
-	// "(empty reply)".
+// displayMessages converts raw store messages into displayable
+// ConversationMessages: it attaches the assistant rows' tool calls (P7
+// sidecar rows, one query) and surfaces summary rows as compaction markers.
+// Shared by the full-history and paged-history paths. An empty assistant row
+// WITH calls is the tool-call turn (its text lands on the turn's final reply
+// row) — it is INCLUDED so the calls have a place in the flow (the UI renders
+// only the indicator rows, no bubble). An empty row WITHOUT calls is a
+// genuine empty reply (a reasoning-only completion, or the dropped streamed
+// tool call before 7174606): it stays in the history so the user's question
+// never looks unanswered, and the UI renders it as "(empty reply)".
+func displayMessages(us *store.UserStore, msgs []store.Message) []ConversationMessage {
 	var assistantIDs []int64
 	for _, m := range msgs {
 		if m.Role == roleAssistant {
@@ -1296,12 +1294,64 @@ func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessa
 	}
 	out := make([]ConversationMessage, 0, len(msgs))
 	for _, m := range msgs {
-		if m.Role != roleUser && m.Role != roleAssistant {
-			continue
+		switch m.Role {
+		case roleUser, roleAssistant:
+			out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, ToolCalls: callsByMsg[m.ID], CreatedAt: m.CreatedAt, Seq: m.Seq})
+		case roleSummary:
+			// A context-compaction event: the UI renders it as a persistent
+			// "Context compacted from X to Y tokens" marker in the flow. Its
+			// content is the model-facing summary (kept out of the client
+			// payload); only the from/to token sizes ride along.
+			out = append(out, ConversationMessage{Role: m.Role, CreatedAt: m.CreatedAt, Seq: m.Seq, CompactedFrom: m.CompactedFrom, CompactedTo: m.CompactedTo})
 		}
-		out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, ToolCalls: callsByMsg[m.ID], CreatedAt: m.CreatedAt})
 	}
-	return out, nil
+	return out
+}
+
+// ConversationMessages returns the displayable messages of the user's
+// conversation in seq order. store.ErrNotFound when the conversation is not
+// in the user's store.
+func (a *Agent) ConversationMessages(handle, convID string) ([]ConversationMessage, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := us.GetConversation(convID); err != nil {
+		return nil, err
+	}
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		return nil, err
+	}
+	return displayMessages(us, msgs), nil
+}
+
+// ConversationMessagesPaged returns one page of the displayable history (the
+// lazy-loading path): the most recent limit messages in seq order, optionally
+// restricted to seq < beforeSeq (the scroll-up cursor). hasMore reports
+// whether older messages exist — since seq starts at 0, a full page whose
+// oldest message is seq 0 is the head of the conversation (no more).
+// store.ErrNotFound when the conversation is missing.
+func (a *Agent) ConversationMessagesPaged(handle, convID string, limit, beforeSeq int) ([]ConversationMessage, bool, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := us.GetConversation(convID); err != nil {
+		return nil, false, err
+	}
+	msgs, err := us.ListMessagesPaged(convID, limit, beforeSeq)
+	if err != nil {
+		return nil, false, err
+	}
+	out := displayMessages(us, msgs)
+	// A full page means older messages may still exist; a short page (fewer
+	// than limit displayable rows) means the head of the conversation. (The
+	// store counts only displayable rows, so the page size is in visible
+	// messages — the seq-0 head check would misfire once check-in rows occupy
+	// the low seqs.)
+	hasMore := len(msgs) == limit
+	return out, hasMore, nil
 }
 
 // npCfg returns the no-progress detector's configuration for a turn. The
@@ -1477,7 +1527,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		if trigger > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 			// Pre-compact: the prompt is over budget before the call. Fold the
 			// older turns (incl. this message) into a summary so the call fits.
-			if cerr := a.compactIfNeeded(ctx, us, conv, p, trigger, prof, false); cerr != nil {
+			if cerr := a.compactIfNeeded(ctx, us, conv, p, trigger, prof, false, emit); cerr != nil {
 				return conv.ID, "", cerr
 			}
 			// The prompt just shrank (or there was nothing to fold) — the
@@ -1523,7 +1573,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 				// too, the error surfaces.
 				compactRetried = true
 				lastUsage = 0
-				if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof, true); cerr != nil {
+				if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof, true, emit); cerr != nil {
 					return conv.ID, "", err
 				}
 				continue
@@ -1680,7 +1730,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if res.Usage != nil && res.Usage.TotalTokens > actualTokens {
 		actualTokens = res.Usage.TotalTokens
 	}
-	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof, false); cerr != nil {
+	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof, false, emit); cerr != nil {
 		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil

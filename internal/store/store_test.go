@@ -562,6 +562,94 @@ func TestDeleteConversation(t *testing.T) {
 	}
 }
 
+// TestListMessagesPaged — the lazy-load pagination (issue 3): returns the
+// most recent limit DISPLAYABLE messages (user/assistant/summary) in
+// seq-ascending order, optionally restricted to seq < beforeSeq (the
+// scroll-up cursor). The page size counts displayable rows only — check-in /
+// system rows (model-facing, dropped by the display path) never count, even
+// when they occupy the low seqs. A full walk reconstructs every displayable
+// message in order with no gaps or overlaps.
+func TestListMessagesPaged(t *testing.T) {
+	s := openTestStore(t)
+	c, err := s.CreateConversation("paged", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 check-in rows first (seq 0..9) — non-displayable, and they occupy the
+	// low seqs (the case that would break a naive seq-0 "head" check).
+	for i := 0; i < 10; i++ {
+		if _, err := s.AppendMessage(c.ID, "checkin", "check-in", "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 30 displayable messages (seq 10..39), alternating user/assistant, plus a
+	// summary (compaction) row carrying token counts (seq 40).
+	for i := 0; i < 30; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := s.AppendMessage(c.ID, role, fmt.Sprintf("message %d", i), "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum, err := s.AppendMessage(c.ID, "summary", "context summary", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMessageCompaction(sum.ID, 1000, 400); err != nil {
+		t.Fatal(err)
+	}
+	// Total: 41 raw rows, 31 displayable (seq 10..40).
+
+	const limit = 25
+	// Page 1: the 25 most recent displayable rows (seq 16..40). The check-in
+	// rows (seq 0..9) do not count, so the oldest here is seq 16, NOT seq 0.
+	p1, err := s.ListMessagesPaged(c.ID, limit, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1) != 25 {
+		t.Fatalf("page1 = %d, want 25 (displayable, not raw rows)", len(p1))
+	}
+	for i := range p1 {
+		if p1[i].Role == "checkin" || p1[i].Role == "system" {
+			t.Fatalf("page1[%d] = %q role, want only displayable roles", i, p1[i].Role)
+		}
+		if want := 16 + i; p1[i].Seq != want {
+			t.Fatalf("page1[%d].Seq = %d, want %d", i, p1[i].Seq, want)
+		}
+	}
+	// The summary is the newest displayable (seq 40) with its token counts.
+	if p1[24].Role != "summary" || p1[24].CompactedFrom != 1000 || p1[24].CompactedTo != 400 {
+		t.Fatalf("page1[24] = %+v, want summary 1000->400", p1[24])
+	}
+
+	// Page 2: displayable rows strictly before seq 16 -> seq 10..15 (6 rows,
+	// a short page => the head is reached).
+	p2, err := s.ListMessagesPaged(c.ID, limit, p1[0].Seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p2) != 6 {
+		t.Fatalf("page2 = %d, want 6", len(p2))
+	}
+	if p2[0].Seq != 10 || p2[len(p2)-1].Seq != 15 {
+		t.Fatalf("page2 span = %d..%d, want 10..15", p2[0].Seq, p2[len(p2)-1].Seq)
+	}
+
+	// Full walk: 31 displayable messages, seq strictly increasing, no gaps.
+	collected := append(append([]Message{}, p2...), p1...)
+	if len(collected) != 31 {
+		t.Fatalf("walk = %d, want 31", len(collected))
+	}
+	for i := 1; i < len(collected); i++ {
+		if collected[i].Seq <= collected[i-1].Seq {
+			t.Fatalf("walk not strictly increasing at %d: %d -> %d", i, collected[i-1].Seq, collected[i].Seq)
+		}
+	}
+}
+
 func TestServerStoreUserCredSession(t *testing.T) {
 	ss, err := OpenServer(t.TempDir())
 	if err != nil {

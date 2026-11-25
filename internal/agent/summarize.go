@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log"
 	"strings"
 
 	"github.com/utopiafallen/bevin/internal/profile"
@@ -78,7 +79,14 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 // context (the model call returned a context-overflow error) and the older
 // turns must be folded no matter what the estimate or usage say. The
 // "nothing older to fold" check still applies.
-func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile, force bool) error {
+//
+// emit, when non-nil, is the turn's SSE writer: it receives a live
+// "Compacting context..." chunk (CompactionPhase "start") before the
+// summarizer runs, then a "done" chunk (CompactionPhase "done", carrying the
+// from/to token counts) once the summary is stored — so the UI shows an
+// animated indicator that settles into a persistent marker. nil for
+// non-streaming turns (there is no viewer for the indicator).
+func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile, force bool, emit func(provider.Chunk) error) error {
 	hist, err := us.ListMessages(conv.ID)
 	if err != nil {
 		return err
@@ -87,15 +95,14 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	if err != nil {
 		return err
 	}
-	if !force {
-		tokens := actualTokens
-		if tokens <= 0 {
-			// No API usage — fall back to the buildRequest char/4 estimate.
-			_, tokens = buildRequest(conv, hist, prof, tcMap)
-		}
-		if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
-			return nil
-		}
+	tokens := actualTokens
+	if tokens <= 0 {
+		// No API usage — fall back to the buildRequest char/4 estimate.
+		_, tokens = buildRequest(conv, hist, prof, tcMap)
+	}
+	if !force && tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
+		// Under budget (and not a forced overflow backstop) — nothing to do.
+		return nil
 	}
 	prevSummary, messages := latestSummaryAndMessages(hist)
 	if len(messages) <= prof.KeepLastMessages {
@@ -113,6 +120,14 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	// The tool-call rows of the FOLDED assistant messages ride along with
 	// their messages (pair-safe: the builder derives both sides from the
 	// same row set).
+	// The UI sees the compaction as a live event: an animated "Compacting…"
+	// row while the summarizer runs, then a persistent "Context compacted
+	// from X to Y tokens" marker once it is stored. (emit is nil for
+	// non-streaming turns — there is no viewer for the indicator.)
+	from := tokens
+	if emit != nil {
+		_ = emit(provider.Chunk{CompactionPhase: "start"})
+	}
 	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize, toolCallsSubset(tcMap, toSummarize))
 	if err != nil {
 		return err
@@ -121,8 +136,29 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		return nil
 	}
 	modelID := conv.ActiveModelID
-	_, err = us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
-	return err
+	msg, err := us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
+	if err != nil {
+		return err
+	}
+	// Re-estimate the post-compaction prompt size (frozen system prompt +
+	// the new summary + the verbatim tail) so the marker can show "from X to
+	// Y". Best-effort: a failure falls back to 0 (the marker then shows the
+	// "from" size only).
+	to := 0
+	if newHist, e := us.ListMessages(conv.ID); e == nil {
+		if newTcMap, e := toolCallsForMessages(us, newHist); e == nil {
+			_, to = buildRequest(conv, newHist, prof, newTcMap)
+		}
+	}
+	// Stamp the persistent marker on the summary row (survives a reload —
+	// the chat history shows every compaction event in flow order).
+	if e := us.SetMessageCompaction(msg.ID, from, to); e != nil {
+		log.Printf("compaction marker: %v", e)
+	}
+	if emit != nil {
+		_ = emit(provider.Chunk{CompactionPhase: "done", CompactedFrom: from, CompactedTo: to})
+	}
+	return nil
 }
 
 // modelMaxContext returns the model's max context in tokens (0 if unknown).

@@ -796,7 +796,7 @@ func TestCompactPreservesLastMessages(t *testing.T) {
 		}
 	}
 	// Force a compaction (the prompt is well over the budget).
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default(), false); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default(), false, nil); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	// The request builder now sends the summary + the last KeepLastMessages
@@ -871,7 +871,7 @@ func TestCompactCountsToolLoopIterationsAsMessages(t *testing.T) {
 	// Drive the compaction via the API-reported usage (900 > the 800
 	// budget) — the content is a few chars, so only the reported number
 	// can trigger it.
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 900, profile.Default(), false); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 900, profile.Default(), false, nil); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	msgs, err := us.ListMessages(convID)

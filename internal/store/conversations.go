@@ -218,14 +218,21 @@ type Message struct {
 	Seq                int     `json:"seq"`
 	CreatedAt          string  `json:"created_at"`
 	ModelID            *string `json:"model_id,omitempty"`
+	// CompactedFrom / CompactedTo: the prompt size in tokens before / after
+	// the context compaction this summary row records (0/0 = a pre-existing
+	// summary row, no tokens recorded). Set only on role=summary rows at
+	// compaction time; the UI renders them as the persistent compaction
+	// marker ("Context compacted from X to Y tokens").
+	CompactedFrom int `json:"compacted_from,omitempty"`
+	CompactedTo   int `json:"compacted_to,omitempty"`
 }
 
 // Messages are searched in the per-user vector DB (semantic) + FTS5 (lexical);
 // they carry no local embedding column.
-const msgCols = `id, conversation_id, role, content, reasoning, reasoning_signature, seq, created_at, model_id`
+const msgCols = `id, conversation_id, role, content, reasoning, reasoning_signature, seq, created_at, model_id, compacted_from, compacted_to`
 
 func scanMsg(rs interface{ Scan(...any) error }, m *Message) error {
-	return rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Reasoning, &m.ReasoningSignature, &m.Seq, &m.CreatedAt, &m.ModelID)
+	return rs.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Reasoning, &m.ReasoningSignature, &m.Seq, &m.CreatedAt, &m.ModelID, &m.CompactedFrom, &m.CompactedTo)
 }
 
 // AppendMessage adds a message to a conversation with the next seq (atomic).
@@ -261,6 +268,20 @@ func (s *UserStore) AppendMessage(convID, role, content, reasoning, reasoningSig
 	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Reasoning: reasoning, ReasoningSignature: reasoningSignature, Seq: next, CreatedAt: now, ModelID: modelID}, nil
 }
 
+// SetMessageCompaction stamps the prompt size in tokens before/after the
+// context compaction a summary row records (the UI's "Context compacted from
+// X to Y tokens" marker). Called right after the summary row is appended.
+func (s *UserStore) SetMessageCompaction(id int64, from, to int) error {
+	res, err := s.db.Exec(`UPDATE messages SET compacted_from = ?, compacted_to = ? WHERE id = ?`, from, to, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *UserStore) GetMessage(id int64) (*Message, error) {
 	m := &Message{}
 	err := scanMsg(s.db.QueryRow(`SELECT `+msgCols+` FROM messages WHERE id = ?`, id), m)
@@ -288,6 +309,53 @@ func (s *UserStore) ListMessages(convID string) ([]Message, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// ListMessagesPaged returns one page of a conversation's DISPLAYABLE messages
+// for the chat log's lazy loading: the most recent limit of them in seq order,
+// optionally only those with seq < beforeSeq (the scroll-up cursor — the
+// client prepends each page as it scrolls up). beforeSeq <= 0 means "no
+// cursor" (the newest page).
+//
+// Only the displayable roles (user/assistant/summary) count toward the page
+// size: check-in + system rows are model-facing internal rows the display path
+// drops, so filtering here keeps "limit = N" meaning "N visible messages"
+// instead of N raw rows (which would render as far fewer).
+func (s *UserStore) ListMessagesPaged(convID string, limit, beforeSeq int) ([]Message, error) {
+	if limit <= 0 {
+		return s.ListMessages(convID)
+	}
+	query := `SELECT ` + msgCols + ` FROM messages WHERE conversation_id = ? AND role IN ('user','assistant','summary')`
+	args := []any{convID}
+	if beforeSeq > 0 {
+		query += ` AND seq < ?`
+		args = append(args, beforeSeq)
+	}
+	// Newest-first so the LIMIT takes the most recent `limit`; the result is
+	// reversed back to seq order (oldest first) for the display.
+	query += ` ORDER BY seq DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	desc := make([]Message, 0, limit)
+	for rows.Next() {
+		var m Message
+		if err := scanMsg(rows, &m); err != nil {
+			return nil, err
+		}
+		desc = append(desc, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Message, 0, len(desc))
+	for i := len(desc) - 1; i >= 0; i-- {
+		out = append(out, desc[i])
+	}
+	return out, nil
 }
 
 // SearchMessages returns messages matching an FTS5 query, ranked by bm25.

@@ -230,6 +230,20 @@ input:focus, textarea:focus, select:focus {
 @keyframes thinking-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 @keyframes thinking-blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
 
+/* Context compaction: a full-width marker in the chat flow. The live
+   (in-progress) variant shows an animated "Compacting context…" label while
+   the summarizer runs; the settled variant is the persistent "Context
+   compacted from X to Y tokens" marker (rendered on every reload). The rule
+   on each side makes the compaction event unmistakable in the history. */
+.msg-compaction { display: flex; align-items: center; gap: 0.7rem; margin: 0.9rem 0; }
+.msg-compaction .cp-rule { flex: 1; border-top: 1px solid var(--border); }
+.msg-compaction .cp-label {
+  flex: none; font-size: 0.76rem; font-weight: 700; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* Live (in-progress) variant: a subtle pulse while the summarizer runs. */
+.msg-compaction.compacting .cp-label { animation: thinking-pulse 1.6s ease-in-out infinite; }
+
 /* ---- markdown inside message bubbles (web/static/markdown.js) ---- */
 .msg .md-bubble { white-space: normal; }
 .md-bubble p { margin: 0 0 0.5em; }

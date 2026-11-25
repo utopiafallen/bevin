@@ -77,6 +77,19 @@ ALTER TABLE tasks ADD COLUMN memory_start INTEGER;
 ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 `,
 	},
+	{
+		// v6 (2026-11-24): the context-compaction marker. The summary row
+		// (role=summary) IS the compaction event; these two columns carry the
+		// prompt size in tokens before (compacted_from) and after
+		// (compacted_to) the compaction so the UI can render a persistent
+		// "Context compacted from X to Y tokens" marker in the chat flow.
+		// 0/0 = a pre-existing summary row (no tokens recorded yet).
+		version: 6,
+		up: `
+ALTER TABLE messages ADD COLUMN compacted_from INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN compacted_to INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

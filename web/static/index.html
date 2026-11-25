@@ -464,7 +464,7 @@
       // style), so a Shift+Enter line shows as a line.
       BevinMD.render(text, m.querySelector(".bubble"));
       $("chatLog").appendChild(m);
-      $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
+      if (!noAutoScroll) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
     }
 
     // Creates the assistant message element (head + optional reasoning +
@@ -645,6 +645,44 @@
       for (var i = 0; i < chips.length; i++) {
         chips[i].classList.remove("pending");
         chips[i].querySelector(".tool-dot").className = "tool-dot";
+      }
+    }
+
+    // Context-compaction markers (the compaction indicator). The live variant
+    // ("Compacting context…") is appended when the harness starts a
+    // compaction (the summarizer is running); settleCompactionRow swaps it
+    // for the persistent "Context compacted from X to Y tokens" marker once
+    // the summary is stored. The same marker is rendered from history
+    // (summary rows) on reload, so every compaction event shows in flow.
+    function compactionLabel(from, to) {
+      if (from && to) return "Context compacted from " + Math.round(from).toLocaleString() + " to " + Math.round(to).toLocaleString() + " tokens";
+      if (from) return "Context compacted from " + Math.round(from).toLocaleString() + " tokens";
+      return "Context compacted";
+    }
+    function compactionMarkerRow(settled, from, to) {
+      var row = document.createElement("div");
+      row.className = "msg-compaction" + (settled ? "" : " compacting");
+      row.innerHTML = '<span class="cp-rule"></span><span class="cp-label"></span><span class="cp-rule"></span>';
+      row.querySelector(".cp-label").textContent = settled ? compactionLabel(from, to) : "Compacting context\u2026";
+      $("chatLog").appendChild(row);
+      return row;
+    }
+    function addCompactionRow() {
+      var row = compactionMarkerRow(false);
+      $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
+      return row;
+    }
+    function settleCompactionRow(from, to) {
+      // Settle the most recent live "Compacting…" marker into the persistent
+      // marker. If none is pending (e.g. the event arrived out of order or
+      // after a reload), append a fresh settled marker.
+      var rows = document.querySelectorAll(".msg-compaction.compacting");
+      var row = rows.length ? rows[rows.length - 1] : null;
+      if (row) {
+        row.classList.remove("compacting");
+        row.querySelector(".cp-label").textContent = compactionLabel(from, to);
+      } else {
+        compactionMarkerRow(true, from, to);
       }
     }
 
@@ -1219,6 +1257,23 @@
               if (tBelow) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
             } else if (evt === "tool_done") {
               settleToolRow(p.name, p.success);
+            } else if (evt === "usage") {
+              // Live context usage (one per model call in the tool loop):
+              // the bar tracks the context filling in real time, not just at
+              // turn end. total_tokens is the context the call just used (a
+              // lower bound on the next call's prompt) and the same value the
+              // compaction trigger consumes, so ~80% predicts the compaction.
+              if (p.total_tokens) updateCtx(p.total_tokens, ctxMax);
+            } else if (evt === "compaction") {
+              // Context-compaction indicator: an animated "Compacting
+              // context…" row while the summarizer runs, then a persistent
+              // "Context compacted from X to Y tokens" marker once it is
+              // stored. (The marker is also rendered from history on reload.)
+              if (p.phase === "start") {
+                addCompactionRow();
+              } else if (p.phase === "done") {
+                settleCompactionRow(p.from, p.to);
+              }
             } else if (evt === "done") {
               gotDone = true;
               settleAllToolRows(); // nothing may still be pulsing at stream end
@@ -1246,9 +1301,10 @@
                 if (asst.cut < asst.buf.length) paint(asst);
               }
               finalStats(asst, p);
-              // Refine the context usage from the API's own report (the
-              // prompt size of the call that just ran).
-              if (p.usage && p.usage.prompt_tokens) updateCtx(p.usage.prompt_tokens, ctxMax);
+              // Settle the context usage from the API's own report (the total
+              // the final call used — the same value the live "usage" events
+              // track, so the bar is continuous across the whole turn).
+              if (p.usage && p.usage.total_tokens) updateCtx(p.usage.total_tokens, ctxMax);
             } else if (evt === "error") {
               throw new Error(p.error || "stream error");
             }
@@ -1323,66 +1379,129 @@
       loadHistory();
     }
 
-    // Restore the conversation's persisted history. Every message is saved
-    // to the per-user database by the agent; this re-renders them in order
-    // with their stored timestamps so a page reload doesn't lose the chat.
-    // Assistant messages that carry a persisted reasoning trace get their
-    // collapsed thinking block back too. Skipped when the log already has
+    // ---- Chat-log lazy loading. The history loads in pages: the most
+    // recent HISTORY_PAGE_SIZE messages render immediately (the initial
+    // view), older pages load as the user scrolls up to the top. This
+    // avoids the mobile hitch from rendering a long conversation's markdown
+    // bubbles all at once.
+    var HISTORY_PAGE_SIZE = 25;
+    var historyOldestSeq = null; // seq of the oldest loaded message (the scroll-up cursor)
+    var historyHasMore = false;  // older messages still exist
+    var historyLoading = false;  // a page load is in flight
+    var noAutoScroll = false;    // suppress the per-message scroll-to-bottom (older-page prepend)
+
+    // Renders one persisted message into #chatLog (the shared render path for
+    // the initial page and the older pages).
+    function renderHistoryMessage(m) {
+      if (m.role === "user") {
+        addUserMsg(m.content, m.created_at);
+      } else if (m.role === "assistant") {
+        // The row's tool calls render as indicator rows after the
+        // bubble (or after the thinking-only block); a tool-call
+        // turn's EMPTY row without reasoning carries no bubble at
+        // all (its text landed on the final reply row) — rows only.
+        var hasCalls = m.tool_calls && m.tool_calls.length > 0;
+        if (m.content || m.reasoning || !hasCalls) {
+          var a = startAssistantMsg();
+          // Show the stored time, not "now" (this is history, not a live reply).
+          var dts = new Date(m.created_at);
+          if (!isNaN(dts)) {
+            a.m.querySelector(".when").textContent = fmtWhen(dts);
+            a.m.querySelector(".when").title = dts.toUTCString();
+          }
+          if (m.content) {
+            a.buf = m.content;
+            paint(a);
+          } else if (m.reasoning) {
+            a.bubble.remove(); // thinking-only carrier: no content bubble
+          } else {
+            a.buf = "(empty reply)";
+            paint(a);
+          }
+          if (m.reasoning) {
+            // Restore the persisted thinking block: the full trace inside
+            // the collapsed details; the summary previews its first line.
+            a.details.style.display = "";
+            a.pre.textContent = m.reasoning;
+            var ln = "";
+            m.reasoning.split("\n").forEach(function (l) {
+              if (!ln && l.trim()) ln = l.trim();
+            });
+            if (ln.length > 90) ln = ln.slice(0, 90) + "…";
+            if (ln) a.details.querySelector("summary").textContent = "thinking — " + ln;
+          }
+        }
+        if (hasCalls) {
+          m.tool_calls.forEach(function (tc) { addToolRow(tc.name, true, tc.success); });
+        }
+      } else if (m.role === "summary") {
+        // A context-compaction event: the persistent "Context compacted
+        // from X to Y tokens" marker in the flow (0 = a pre-existing
+        // summary row with no recorded tokens — the generic marker).
+        compactionMarkerRow(true, m.compacted_from, m.compacted_to);
+      }
+    }
+
+    // Restore the conversation's persisted history — the most recent
+    // HISTORY_PAGE_SIZE messages (the initial page). Older pages load on
+    // scroll-up (loadOlderMessages). Skipped when the log already has
     // bubbles (onboarding renders its own welcome — no double render). A
     // failed re-fetch never blocks the chat itself.
     async function loadHistory() {
       if (!convID) return;
       try {
-        var r = await fetch("/api/conversations/" + convID + "/messages");
+        var r = await fetch("/api/conversations/" + convID + "/messages?limit=" + HISTORY_PAGE_SIZE);
         if (!r.ok) return;
         var d = await r.json();
         if ($("chatLog").children.length > 0) return; // chat started meanwhile
-        (d.messages || []).forEach(function (m) {
-          if (m.role === "user") {
-            addUserMsg(m.content, m.created_at);
-          } else if (m.role === "assistant") {
-            // The row's tool calls render as indicator rows after the
-            // bubble (or after the thinking-only block); a tool-call
-            // turn's EMPTY row without reasoning carries no bubble at
-            // all (its text landed on the final reply row) — rows only.
-            var hasCalls = m.tool_calls && m.tool_calls.length > 0;
-            if (m.content || m.reasoning || !hasCalls) {
-              var a = startAssistantMsg();
-              // Show the stored time, not "now" (this is history, not a live reply).
-              var dts = new Date(m.created_at);
-              if (!isNaN(dts)) {
-                a.m.querySelector(".when").textContent = fmtWhen(dts);
-                a.m.querySelector(".when").title = dts.toUTCString();
-              }
-              if (m.content) {
-                a.buf = m.content;
-                paint(a);
-              } else if (m.reasoning) {
-                a.bubble.remove(); // thinking-only carrier: no content bubble
-              } else {
-                a.buf = "(empty reply)";
-                paint(a);
-              }
-              if (m.reasoning) {
-                // Restore the persisted thinking block: the full trace inside
-                // the collapsed details; the summary previews its first line.
-                a.details.style.display = "";
-                a.pre.textContent = m.reasoning;
-                var ln = "";
-                m.reasoning.split("\n").forEach(function (l) {
-                  if (!ln && l.trim()) ln = l.trim();
-                });
-                if (ln.length > 90) ln = ln.slice(0, 90) + "…";
-                if (ln) a.details.querySelector("summary").textContent = "thinking — " + ln;
-              }
-            }
-            if (hasCalls) {
-              m.tool_calls.forEach(function (tc) { addToolRow(tc.name, true, tc.success); });
-            }
-          }
-        });
+        (d.messages || []).forEach(renderHistoryMessage);
+        historyOldestSeq = (d.messages && d.messages.length) ? d.messages[0].seq : null;
+        historyHasMore = !!d.has_more;
         scrollChat();
       } catch (e) { /* history is a convenience — never block the chat */ }
+    }
+
+    // Load the next page of OLDER messages (the user scrolled up to the
+    // top): fetch the page before the oldest loaded seq, prepend it (the
+    // render functions append to the end, so the new batch is moved to the
+    // front), and preserve the user's current view (compensate for the
+    // added height). Guarded so at most one page loads at a time and the
+    // head of the conversation is not fetched twice.
+    async function loadOlderMessages() {
+      if (!convID || historyLoading || !historyHasMore || historyOldestSeq === null) return;
+      historyLoading = true;
+      noAutoScroll = true; // the prepend must not scroll to the bottom
+      try {
+        var r = await fetch("/api/conversations/" + convID + "/messages?limit=" + HISTORY_PAGE_SIZE + "&before=" + historyOldestSeq);
+        if (!r.ok) return;
+        var d = await r.json();
+        var msgs = d.messages || [];
+        if (!msgs.length) { historyHasMore = false; return; }
+        var log = $("chatLog");
+        var scrollEl = $("chatScroll");
+        var oldHeight = scrollEl.scrollHeight;
+        var oldTop = scrollEl.scrollTop;
+        var anchor = log.firstChild; // the first currently-loaded message
+        var beforeCount = log.children.length;
+        msgs.forEach(renderHistoryMessage); // appends the older batch to the end
+        // Move the just-rendered (older) messages to the front (before the
+        // anchor — the first previously-loaded message), in order.
+        var newOnes = [];
+        for (var i = beforeCount; i < log.children.length; i++) {
+          newOnes.push(log.children[i]);
+        }
+        newOnes.forEach(function (el) {
+          if (anchor) log.insertBefore(el, anchor);
+          else log.appendChild(el);
+        });
+        // Preserve the view: shift the scroll down by the height added.
+        scrollEl.scrollTop = scrollEl.scrollHeight - oldHeight + oldTop;
+        historyOldestSeq = msgs[0].seq;
+        historyHasMore = !!d.has_more;
+      } catch (e) { /* best-effort — the chat itself is unaffected */ } finally {
+        noAutoScroll = false;
+        historyLoading = false;
+      }
     }
 
     // First-time onboarding ("Meet Bevin"): a regular user who has not
@@ -1538,6 +1657,10 @@
       $("sendBtn").disabled = false; // a new conversation is not streaming
       try { localStorage.removeItem("bevin-conv"); } catch (e) {}
       $("chatLog").innerHTML = "";
+      // A fresh conversation has no history: reset the lazy-load cursor.
+      historyOldestSeq = null;
+      historyHasMore = false;
+      historyLoading = false;
       pendingModelID = "";
       buildModelSelect(null, "");
       updateCtx(0, 0);
@@ -1549,6 +1672,17 @@
       $("message").focus();
     }
     $("panelNewChatBtn").addEventListener("click", startNewChat);
+
+    // Chat-log lazy loading: when the user scrolls up to the top of the log,
+    // fetch the next page of older messages (prepended, view preserved). The
+    // 100px threshold gives a little headroom before the next page loads; the
+    // guards in loadOlderMessages keep it to one in flight and stop at the head.
+    $("chatScroll").addEventListener("scroll", function () {
+      var el = $("chatScroll");
+      if (el.scrollTop < 100 && historyHasMore && !historyLoading) {
+        loadOlderMessages();
+      }
+    });
 
     // Conversation history: the per-user list (GET /api/conversations),
     // most recently active first, rendered in the chats panel. A row opens
@@ -1867,6 +2001,12 @@
       $("sendBtn").disabled = !!(convID && streamingConvs[convID]);
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
+      // Reset the lazy-load state for the new conversation (the cursor +
+      // has-more carry over from the previous one otherwise — the scroll-up
+      // would fetch the wrong conversation's older page).
+      historyOldestSeq = null;
+      historyHasMore = false;
+      historyLoading = false;
       showPage("chat");
       loadHistory();
       loadModels().then(loadConvMeta);

@@ -637,10 +637,37 @@ func (a *App) deleteConversation(w http.ResponseWriter, r *http.Request) {
 }
 
 // getMessages returns the conversation's displayable history (user +
-// assistant messages, oldest first) so a reloaded page can restore it.
+// assistant messages, oldest first) so a reloaded page can restore it. It
+// supports lazy loading: ?limit=N returns the most recent N messages (the
+// chat log's initial page), and ?before=SEQ narrows to the messages OLDER
+// than that seq (the scroll-up cursor — the client prepends each page and
+// scrolls up to load the rest). Omitting limit returns the full history
+// (backward compatible); has_more reports whether older pages exist.
 func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
-	msgs, err := a.ag.ConversationMessages(u.Handle, r.PathValue("id"))
+	id := r.PathValue("id")
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	before := 0
+	if v := r.URL.Query().Get("before"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			before = n
+		}
+	}
+	var (
+		msgs    []agent.ConversationMessage
+		hasMore bool
+		err     error
+	)
+	if limit > 0 {
+		msgs, hasMore, err = a.ag.ConversationMessagesPaged(u.Handle, id, limit, before)
+	} else {
+		msgs, err = a.ag.ConversationMessages(u.Handle, id)
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
 		return
@@ -649,7 +676,7 @@ func (a *App) getMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "has_more": hasMore})
 }
 
 // searchConversations semantically searches the user's conversation history
@@ -813,6 +840,31 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return nil
 		default:
+		}
+		// Live context usage: each model call's final chunk carries the
+		// API's usage for THAT call (the OAI wire sets include_usage). The
+		// UI updates the context bar on every one — during a long tool loop
+		// the bar tracks the context filling, not just the previous turn's
+		// settled value. (It fires once per loop iteration, at the end of
+		// each call's stream.)
+		if c.Usage != nil {
+			_ = writeEvent("usage", map[string]any{
+				"prompt_tokens":     c.Usage.PromptTokens,
+				"completion_tokens": c.Usage.CompletionTokens,
+				"total_tokens":      c.Usage.TotalTokens,
+			})
+		}
+		// Context compaction: the harness emits a "start" indicator while the
+		// summarizer runs and a "done" (with the before/after token sizes)
+		// once the summary is stored. The UI shows an animated "Compacting
+		// context…" row, then settles it into a persistent "Context
+		// compacted from X to Y tokens" marker in the flow.
+		if c.CompactionPhase != "" {
+			_ = writeEvent("compaction", map[string]any{
+				"phase": c.CompactionPhase,
+				"from":  c.CompactedFrom,
+				"to":    c.CompactedTo,
+			})
 		}
 		if c.ToolName != "" {
 			// Harness-level tool-call indicators (not model deltas): the
