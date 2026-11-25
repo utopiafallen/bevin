@@ -73,7 +73,12 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 // call (used in preference to the char/4 estimate) — the provider's usage
 // stats when the backend returned them. Pass 0 to fall back to the estimate
 // (e.g. before the first call, or a backend that omits usage).
-func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile) error {
+//
+// force skips the budget gate: the prompt is already over the model's
+// context (the model call returned a context-overflow error) and the older
+// turns must be folded no matter what the estimate or usage say. The
+// "nothing older to fold" check still applies.
+func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile, force bool) error {
 	hist, err := us.ListMessages(conv.ID)
 	if err != nil {
 		return err
@@ -82,12 +87,15 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	if err != nil {
 		return err
 	}
-	tokens := actualTokens
-	if tokens <= 0 {
-		_, tokens = buildRequest(conv, hist, prof, tcMap)
-	}
-	if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
-		return nil
+	if !force {
+		tokens := actualTokens
+		if tokens <= 0 {
+			// No API usage — fall back to the buildRequest char/4 estimate.
+			_, tokens = buildRequest(conv, hist, prof, tcMap)
+		}
+		if tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
+			return nil
+		}
 	}
 	prevSummary, messages := latestSummaryAndMessages(hist)
 	if len(messages) <= prof.KeepLastMessages {

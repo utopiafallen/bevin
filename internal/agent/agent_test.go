@@ -34,6 +34,36 @@ func TestIsModelUnavailable(t *testing.T) {
 	}
 }
 
+// TestIsContextOverflow verifies the overflow backstop's error classifier:
+// the real backend overflow wordings (llama.cpp EXCEED_CONTEXT_SIZE, OpenAI,
+// Anthropic) match, while transient failures and the unavailable-model shape
+// do not (an overflow must not auto-disable the model).
+func TestIsContextOverflow(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"llama.cpp input larger than max context", errors.New(`llama: 400 Bad Request: {"error":{"message":"input (256333 tokens) is larger than the max context size (250112 tokens). skipping","type":"invalid_request_error"}}`), true},
+		{"llama.cpp request exceeds available context", errors.New(`llama: 400 Bad Request: {"error":{"message":"request (250113 tokens) exceeds the available context size (250112 tokens), try increasing it"}}`), true},
+		{"llama.cpp context size exceeded (older)", errors.New(`llama: 400 Bad Request: context size exceeded`), true},
+		{"openai maximum context length", errors.New(`openai: 400 Bad Request: This model's maximum context length is 128000 tokens`), true},
+		{"anthropic prompt too long", errors.New(`anthropic: 400 Bad Request: prompt is too long: 200000 tokens > 198000 maximum`), true},
+		{"anthropic too many tokens", errors.New(`anthropic: 400 Bad Request: too many tokens in your request`), true},
+		{"rate limit", errors.New(`openai: 429 Too Many Requests: rate limit exceeded`), false},
+		{"timeout (deadline, not overflow)", errors.New(`context deadline exceeded`), false},
+		{"model unavailable", errors.New(`openai: 404 Not Found: {"error":{"message":"The model 'gpt-9' does not exist"}}`), false},
+		{"connection refused", errors.New(`openai: Post http://x: dial tcp: connection refused`), false},
+		{"generic context mention", errors.New(`the context of the task is unclear`), false},
+	}
+	for _, c := range cases {
+		if got := isContextOverflow(c.err); got != c.want {
+			t.Errorf("%s: isContextOverflow = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func newTestAgent(t *testing.T) (*Agent, *config.ServerConfig, string) {
 	t.Helper()
 	dir := t.TempDir()

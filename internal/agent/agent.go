@@ -560,6 +560,44 @@ func isModelUnavailable(err error) bool {
 		(strings.Contains(lower, "404") && strings.Contains(lower, "model"))
 }
 
+// isContextOverflow reports whether a provider error means the prompt exceeded
+// the model's context (as opposed to a transient failure or an unavailable
+// model). It inspects the provider's error string — "<provider>: <status>:
+// <body>" — for the phrases each backend actually emits:
+//
+//   - llama.cpp: "input (N tokens) is larger than the max context size (M
+//     tokens)" / "request (N tokens) exceeds the available context size (M
+//     tokens)" (ERROR_TYPE_EXCEED_CONTEXT_SIZE), and "context size exceeded"
+//     on older builds.
+//   - OpenAI-compatible: "maximum context length".
+//   - Anthropic: "prompt is too long" / "too many tokens".
+//
+// A false positive is harmless (at most one extra forced compaction + one
+// retry), so the match is deliberately broad.
+func isContextOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	phrases := []string{
+		"larger than the max context size",   // llama.cpp
+		"exceeds the available context size", // llama.cpp
+		"context size exceeded",              // llama.cpp (older)
+		"maximum context length",             // OpenAI-compatible
+		"prompt is too long",                 // Anthropic
+		"too many tokens",                    // Anthropic / generic
+		"context length exceeded",
+		"context overflow",
+		"n_ctx", // llama.cpp (any message naming the limit)
+	}
+	for _, p := range phrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Close closes all open per-user stores and kills every launched per-user
 // browser (the server-shutdown cleanup trigger — a browser child must not
 // outlive the server).
@@ -1386,6 +1424,17 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// note (see wireTools).
 	wireTools := a.wireTools(us, conv)
 	var res *provider.Result
+	// lastUsage: the API-reported TotalTokens of the most recent model call
+	// in this turn (0 until the backend reports usage). It is a lower bound
+	// on the next call's prompt (the conversation history only grows within
+	// a turn) and — unlike the char/4 estimate — a true measurement of the
+	// context the model actually consumed. It feeds the in-loop compaction
+	// trigger (below) so a long tool loop compacts on REAL prompt size, in
+	// time, instead of on an estimate that undercounts dense content.
+	lastUsage := 0
+	// compactRetried: the overflow backstop (below) force-compacts + retries
+	// a context-overflow call AT MOST ONCE per turn — no retry loops.
+	compactRetried := false
 	// The no-progress / stuck-detection state (the design log's TOOL LOOP
 	// NO-PROGRESS section): REPLACES the hard maxToolIterations cap. The turn
 	// stops when the accumulated no-progress CONFIDENCE crosses a threshold
@@ -1410,14 +1459,31 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		}
 		req, tokens := buildRequest(conv, hist, prof, tcMap)
 		req.Tools = tools
-		if tokens > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
+		// Pre-compact trigger: the LARGER of the char/4 estimate and the
+		// previous model call's real API-reported usage (lastUsage). The
+		// estimate undercounts dense content — web pages, JSON tool
+		// transcripts and replayed reasoning traces tokenize closer to
+		// ~3 chars/token than the 4-char rule, so on a long tool loop it can
+		// sit well below the real prompt size while the real context runs
+		// out; lastUsage is the only true measurement, and it is a lower
+		// bound on this call's prompt (history only grows within a turn), so
+		// max() never under-triggers. When the backend reports no usage,
+		// lastUsage is 0 and the estimate alone decides (the pre-usage
+		// fallback).
+		trigger := tokens
+		if lastUsage > trigger {
+			trigger = lastUsage
+		}
+		if trigger > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 			// Pre-compact: the prompt is over budget before the call. Fold the
 			// older turns (incl. this message) into a summary so the call fits.
-			// No API usage yet for this call — fall back to the char/4
-			// estimate.
-			if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof); cerr != nil {
+			if cerr := a.compactIfNeeded(ctx, us, conv, p, trigger, prof, false); cerr != nil {
 				return conv.ID, "", cerr
 			}
+			// The prompt just shrank (or there was nothing to fold) — the
+			// previous call's usage is no longer a bound on it; the next
+			// iteration's fresh estimate + usage take over.
+			lastUsage = 0
 			hist, err = us.ListMessages(convID)
 			if err != nil {
 				return conv.ID, "", err
@@ -1444,12 +1510,37 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 				// stop routing to it. A later successful attempt re-enables it.
 				a.SetModelAutoDisabled(conv.ActiveModelID, true)
 			}
+			if isContextOverflow(err) && !compactRetried {
+				// Overflow backstop: the real prompt exceeded the model's
+				// context. The trigger above should have compacted first (it
+				// runs on the previous call's real usage), but a single large
+				// tool result can push the prompt past the context in one
+				// step, ahead of both the estimate and the recorded usage.
+				// Force-compact the older turns and retry the call once by
+				// re-entering the loop — it re-reads the now-shorter history,
+				// rebuilds the request, and calls the model again. One retry
+				// per turn: if the compaction fails or the retry overflows
+				// too, the error surfaces.
+				compactRetried = true
+				lastUsage = 0
+				if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof, true); cerr != nil {
+					return conv.ID, "", err
+				}
+				continue
+			}
 			return conv.ID, "", err
 		}
 		// A successful call proves the model is available again — re-enable it
 		// if it had been auto-disabled.
 		if a.isAutoDisabled(conv.ActiveModelID) {
 			a.SetModelAutoDisabled(conv.ActiveModelID, false)
+		}
+		// Record the real usage for the next iteration's trigger (see
+		// lastUsage above). Backends that omit usage leave it at its current
+		// (stale-but-lower-bound) value — still safe, since the estimate is
+		// always maxed in as well.
+		if res.Usage != nil {
+			lastUsage = res.Usage.TotalTokens
 		}
 		if len(res.ToolCalls) == 0 {
 			break // the final answer
@@ -1571,16 +1662,25 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	}
 	a.indexMessage(ctx, handle, assistantMsg, conv.Title)
 	// Post-compact: if the prompt (now including the reply) exceeds the
-	// budget, compact the older turns so the next call fits. Prefer the
+	// budget, compact the older turns so the next call fits. Use the LARGER
+	// of the char/4 estimate (of the now-persisted reply) and the real
 	// API-reported usage (res.Usage — from the final SSE chunk when
-	// streaming) — the next call's prompt is ~this call's total (prompt + the
-	// reply just produced); fall back to the char/4 estimate when the backend
-	// omits usage.
-	actualTokens := 0
-	if res.Usage != nil {
+	// streaming; the next call's prompt is ~this call's total). The max keeps
+	// the trigger from under-firing on either an undercounting estimate or a
+	// backend that omits usage — same rule as the in-loop trigger.
+	compHist, herr := us.ListMessages(convID)
+	postTokens := 0
+	if herr == nil {
+		compTC, terr := toolCallsForMessages(us, compHist)
+		if terr == nil {
+			_, postTokens = buildRequest(conv, compHist, prof, compTC)
+		}
+	}
+	actualTokens := postTokens
+	if res.Usage != nil && res.Usage.TotalTokens > actualTokens {
 		actualTokens = res.Usage.TotalTokens
 	}
-	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof); cerr != nil {
+	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof, false); cerr != nil {
 		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil

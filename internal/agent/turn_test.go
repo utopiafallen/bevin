@@ -29,6 +29,16 @@ type fakeProvider struct {
 	// toolCalls, when set, ride on the FIRST Chat/Stream call (a tool-call
 	// turn); later calls return the normal reply cycle. Test-only.
 	toolCalls []provider.ToolCall
+	// summarizeReply, when non-empty, is returned for summarization
+	// (compaction) meta-calls — detected by the summarization system prompt
+	// (isSummarizeRequest) — WITHOUT consuming the reply cycle, so chat calls
+	// see deterministic replies. Test-only.
+	summarizeReply string
+	// firstCallErr, when non-nil, is returned (and consumed) on the FIRST
+	// Chat/Stream call — exercises the mid-loop error path (e.g. the
+	// context-overflow backstop). Test-only.
+	firstCallErr error
+	firstDone    bool
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
@@ -39,8 +49,14 @@ func (f *fakeProvider) Chat(_ context.Context, model string, req provider.ChatRe
 	f.calls = append(f.calls, req)
 	f.models = append(f.models, model)
 	first := len(f.calls) == 1
+	if first && f.firstCallErr != nil {
+		f.firstDone = true
+		return nil, f.firstCallErr
+	}
 	reply := "ok"
-	if len(f.replies) > 0 {
+	if isSummarizeRequest(req) && f.summarizeReply != "" {
+		reply = f.summarizeReply
+	} else if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
 		f.replyIdx++
 	}
@@ -59,8 +75,15 @@ func (f *fakeProvider) Stream(_ context.Context, model string, req provider.Chat
 	f.calls = append(f.calls, req)
 	f.models = append(f.models, model)
 	first := len(f.calls) == 1
+	if first && f.firstCallErr != nil {
+		f.firstDone = true
+		f.mu.Unlock()
+		return nil, f.firstCallErr
+	}
 	reply := "ok"
-	if len(f.replies) > 0 {
+	if isSummarizeRequest(req) && f.summarizeReply != "" {
+		reply = f.summarizeReply
+	} else if len(f.replies) > 0 {
 		reply = f.replies[f.replyIdx%len(f.replies)]
 		f.replyIdx++
 	}
@@ -119,6 +142,14 @@ func (f *fakeProvider) allCalls() []provider.ChatRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]provider.ChatRequest{}, f.calls...)
+}
+
+// isSummarizeRequest reports whether a Chat request is a compaction
+// (summarization) meta-call — the summarizer uses its own system prompt
+// (the "context summary" phrasing), which is the same discriminator the
+// conversation-id and effort tests use.
+func isSummarizeRequest(req provider.ChatRequest) bool {
+	return len(req.System) > 0 && strings.Contains(req.System[0].Text, "context summary")
 }
 
 // TestTurnUsesProviderModelName — the conversation stores the INTERNAL model
@@ -765,7 +796,7 @@ func TestCompactPreservesLastMessages(t *testing.T) {
 		}
 	}
 	// Force a compaction (the prompt is well over the budget).
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default()); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default(), false); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	// The request builder now sends the summary + the last KeepLastMessages
@@ -840,7 +871,7 @@ func TestCompactCountsToolLoopIterationsAsMessages(t *testing.T) {
 	// Drive the compaction via the API-reported usage (900 > the 800
 	// budget) — the content is a few chars, so only the reported number
 	// can trigger it.
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 900, profile.Default()); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 900, profile.Default(), false); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	msgs, err := us.ListMessages(convID)
@@ -1057,4 +1088,173 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// TestTurnCompactsMidLoopOnReportedUsage is the regression for the
+// context-overflow-during-a-tool-loop bug: the in-loop pre-compact trigger
+// must use the previous model call's REAL API-reported usage (lastUsage), not
+// just the char/4 estimate. The fake reports TotalTokens=900 (over the 800
+// budget) while the actual messages are tiny (the estimate is far under
+// budget), and the turn issues a tool call — so the only thing that can drive
+// the compaction is the reported usage from the tool-call call, and it must
+// fire MID-loop (before the final answer is requested), not just post-compact.
+func TestTurnCompactsMidLoopOnReportedUsage(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	if cfg.Models[0].MaxContext != 1000 {
+		t.Fatalf("test precondition: m1 MaxContext = %d, want 1000", cfg.Models[0].MaxContext)
+	}
+	// Seed > KeepLastMessages turns so the mid-loop compaction has something to
+	// fold (compactIfNeeded is a no-op with only the last KeepLastMessages).
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	model := conv.ActiveModelID
+	for i := 0; i < 6; i++ {
+		if _, err := us.AppendMessage(convID, roleUser, "seeded question", "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := us.AppendMessage(convID, roleAssistant, "seeded answer", "", "", &model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The tool-call call reports 900 total tokens (over the 800 budget) while
+	// the messages are a few chars (the estimate is negligible) — so the
+	// compaction fires ONLY because of the reported usage. summarizeReply keeps
+	// the summarization meta-call from consuming the chat reply cycle.
+	fp := &fakeProvider{
+		usage:          &provider.Usage{PromptTokens: 500, CompletionTokens: 400, TotalTokens: 900},
+		toolCalls:      []provider.ToolCall{{Name: "t", Arguments: `{}`}},
+		summarizeReply: "mid-loop summary",
+		replies:        []string{"narration", "final"},
+	}
+	a.providers["m1"] = fp
+	if err := a.tools.Register(Tool{Name: "t", Execute: func(ctx context.Context, handle string, args json.RawMessage) (string, error) {
+		return "t result", nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "go")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if reply != "final" {
+		t.Fatalf("reply = %q, want %q", reply, "final")
+	}
+	// A summary was produced.
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var summaries int
+	for _, m := range msgs {
+		if m.Role == roleSummary {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summaries = %d, want exactly 1 (the mid-loop compaction)", summaries)
+	}
+	// The discriminator: the FINAL chat call (the one that produced the reply)
+	// already carried the summary — a second system part. If only the
+	// post-compact had fired, the summary would have been created AFTER this
+	// call and it would have carried a single system part.
+	calls := fp.allCalls()
+	var lastChat *provider.ChatRequest
+	for i := range calls {
+		if !isSummarizeRequest(calls[i]) {
+			lastChat = &calls[i]
+		}
+	}
+	if lastChat == nil {
+		t.Fatal("no chat calls recorded")
+	}
+	if len(lastChat.System) < 2 {
+		t.Fatalf("final chat call System = %d parts, want >= 2 (frozen + summary present BEFORE the final answer — the compaction fired mid-loop)", len(lastChat.System))
+	}
+}
+
+// TestTurnRecoverFromContextOverflow verifies the overflow backstop: when a
+// model call fails with a context-overflow error (a single large tool result
+// can push the real prompt past the model's context in one step, ahead of both
+// the estimate and the recorded usage), the harness force-compacts the older
+// turns and retries the call once, instead of surfacing the error and killing
+// the turn. The turn must complete, a summary must exist, and the model must
+// NOT be auto-disabled (an overflow is not an unavailable model).
+func TestTurnRecoverFromContextOverflow(t *testing.T) {
+	a, cfg, _ := newTestAgent(t)
+	defer a.Close()
+	if cfg.Models[0].MaxContext != 1000 {
+		t.Fatalf("test precondition: m1 MaxContext = %d, want 1000", cfg.Models[0].MaxContext)
+	}
+	convID, err := a.EnsureConversation(context.Background(), "u1", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	us, err := a.userStore("u1")
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	model := conv.ActiveModelID
+	// Seed > KeepLastMessages turns so the forced compaction has something to fold.
+	for i := 0; i < 6; i++ {
+		if _, err := us.AppendMessage(convID, roleUser, "seeded question", "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := us.AppendMessage(convID, roleAssistant, "seeded answer", "", "", &model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The FIRST call overflows (the real llama.cpp EXCEED_CONTEXT_SIZE wording);
+	// the forced compaction's summarization returns summarizeReply; the retry
+	// (a fresh chat call) returns "recovered".
+	fp := &fakeProvider{
+		firstCallErr:   errors.New(`llama: 400: {"error":{"message":"input (256333 tokens) is larger than the max context size (250112 tokens). skipping","type":"invalid_request_error"}}`),
+		summarizeReply: "overflow-summary",
+		replies:        []string{"recovered"},
+	}
+	a.providers["m1"] = fp
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "go")
+	if err != nil {
+		t.Fatalf("Turn: %v (the overflow backstop should have recovered, not surfaced the error)", err)
+	}
+	if reply != "recovered" {
+		t.Fatalf("reply = %q, want %q (the retried call's answer)", reply, "recovered")
+	}
+	// A summary was produced by the forced compaction.
+	msgs, err := us.ListMessages(convID)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var summaries int
+	for _, m := range msgs {
+		if m.Role == roleSummary {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("summaries = %d, want exactly 1 (the forced compaction)", summaries)
+	}
+	// The overflow is NOT an unavailable model: m1 must not be auto-disabled.
+	if a.isAutoDisabled(conv.ActiveModelID) {
+		t.Fatal("the model was auto-disabled — a context overflow is not an unavailable model")
+	}
+	// The retry happened: 3 provider calls (the failed call, the forced
+	// compaction's summarization, the successful retry).
+	if got := fp.callCount(); got != 3 {
+		t.Fatalf("provider calls = %d, want 3 (failed call + forced-compaction summary + retry)", got)
+	}
 }
