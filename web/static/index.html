@@ -1961,6 +1961,11 @@
     // ships later, the section renders its empty state).
     async function loadProfilePage() {
       try {
+        // An honest wait: the facts render only after the fetch resolves.
+        // Without a placeholder, a slow network (common on mobile) shows a
+        // blank section for the whole round-trip — it reads as a frozen
+        // page rather than a loading one.
+        $("profileFacts").innerHTML = '<p class="muted" style="font-size:.85rem; margin:0;">Loading…</p>';
         var r = await fetch("/api/profile");
         if (!r.ok) return;
         var d = await r.json();
