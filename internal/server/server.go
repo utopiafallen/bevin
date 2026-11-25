@@ -854,17 +854,27 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 				"total_tokens":      c.Usage.TotalTokens,
 			})
 		}
-		// Context compaction: the harness emits a "start" indicator while the
-		// summarizer runs and a "done" (with the before/after token sizes)
-		// once the summary is stored. The UI shows an animated "Compacting
-		// context…" row, then settles it into a persistent "Context
-		// compacted from X to Y tokens" marker in the flow.
+		// Context compaction: the harness emits a "start" indicator while
+		// the summarizer runs, "reasoning" deltas as the summarizer thinks
+		// (the UI streams them into the compaction row's thinking block,
+		// same behavior as a regular message), and a "done" (with the
+		// before/after token sizes + the compacted context) once the summary
+		// is stored. The UI shows an animated "Compacting context…" row,
+		// then settles it into a persistent "Context compacted from X to Y
+		// tokens" marker with the compacted context in a collapsed block.
 		if c.CompactionPhase != "" {
 			_ = writeEvent("compaction", map[string]any{
-				"phase": c.CompactionPhase,
-				"from":  c.CompactedFrom,
-				"to":    c.CompactedTo,
+				"phase":     c.CompactionPhase,
+				"from":      c.CompactedFrom,
+				"to":        c.CompactedTo,
+				"reasoning": c.ReasoningDelta,   // non-empty only for phase "reasoning"
+				"summary":   c.CompactedSummary, // non-empty only for phase "done"
 			})
+			// A "reasoning" chunk carries a ReasoningDelta — without this
+			// return it would fall through to the message handler and be
+			// appended to the turn's reply (the compaction's thinking is not
+			// the reply).
+			return nil
 		}
 		if c.ToolName != "" {
 			// Harness-level tool-call indicators (not model deltas): the

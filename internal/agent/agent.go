@@ -1259,8 +1259,8 @@ type ConversationMessage struct {
 	// event), the prompt size in tokens before / after the compaction (0 = a
 	// pre-existing summary row, no tokens recorded). The UI renders a
 	// summary row as the persistent "Context compacted from X to Y tokens"
-	// marker — never as a message bubble (its content is the model-facing
-	// summary, so it is not sent to the client here).
+	// marker — never as a message bubble. The row's Content is the compacted
+	// context (the model-facing summary), shown in a default-collapsed block.
 	CompactedFrom int `json:"compacted_from,omitempty"`
 	CompactedTo   int `json:"compacted_to,omitempty"`
 }
@@ -1299,10 +1299,10 @@ func displayMessages(us *store.UserStore, msgs []store.Message) []ConversationMe
 			out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, Reasoning: m.Reasoning, ToolCalls: callsByMsg[m.ID], CreatedAt: m.CreatedAt, Seq: m.Seq})
 		case roleSummary:
 			// A context-compaction event: the UI renders it as a persistent
-			// "Context compacted from X to Y tokens" marker in the flow. Its
-			// content is the model-facing summary (kept out of the client
-			// payload); only the from/to token sizes ride along.
-			out = append(out, ConversationMessage{Role: m.Role, CreatedAt: m.CreatedAt, Seq: m.Seq, CompactedFrom: m.CompactedFrom, CompactedTo: m.CompactedTo})
+			// "Context compacted from X to Y tokens" marker in the flow,
+			// with the compacted context (the summary) in a default-collapsed
+			// block. The from/to token sizes + the summary text ride along.
+			out = append(out, ConversationMessage{Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt, Seq: m.Seq, CompactedFrom: m.CompactedFrom, CompactedTo: m.CompactedTo})
 		}
 	}
 	return out

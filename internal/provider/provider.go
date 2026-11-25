@@ -153,14 +153,20 @@ type Chunk struct {
 
 	// Harness-level context-compaction indicator (the backends never set
 	// these; the agent's compaction emits them so the UI can show a live
-	// "Compacting context…" row while the summarizer runs and settle it
-	// into a persistent "Context compacted from X to Y tokens" marker).
-	// CompactionPhase "start" = compaction began; "done" = it finished
-	// (CompactedFrom/To carry the prompt size in tokens before/after).
+	// "Compacting context…" row while the summarizer runs, stream the
+	// summarizer's reasoning into the row's thinking block (same behavior
+	// as a regular message), and settle the row into a persistent "Context
+	// compacted from X to Y tokens" marker with the compacted context
+	// (CompactedSummary) in a default-collapsed block).
+	// CompactionPhase "start" = compaction began; "reasoning" = the
+	// summarizer emitted a reasoning delta (carried in ReasoningDelta);
+	// "done" = it finished (CompactedFrom/To carry the prompt size in
+	// tokens before/after, CompactedSummary the new summary).
 	// "" = the chunk is not a compaction indicator.
-	CompactionPhase string
-	CompactedFrom   int
-	CompactedTo     int
+	CompactionPhase  string
+	CompactedFrom    int
+	CompactedTo      int
+	CompactedSummary string
 }
 
 // ModelInfo describes one model a backend serves, incl. its modalities.

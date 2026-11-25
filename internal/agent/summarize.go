@@ -33,7 +33,7 @@ const summarizationSystemPrompt = `You are producing a context summary of a conv
 // conversation's prompt — a KV cache proxy keyed on the conversation id
 // would either load a mismatched cache or save this short-lived prompt's
 // KV over the conversation's reusable one.
-func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message, tcMap map[int64][]store.ToolCall) (string, error) {
+func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, prevSummary, effort string, prof profile.Profile, turns []store.Message, tcMap map[int64][]store.ToolCall, emit func(provider.Chunk) error) (string, error) {
 	msgs := make([]provider.Message, 0, len(turns)+len(tcMap)+1)
 	if prevSummary != "" {
 		msgs = append(msgs, provider.Message{Role: provider.RoleUser, Text: "Previous summary (fold this in):\n" + prevSummary})
@@ -44,10 +44,22 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 	// to fold the turn in accurately, and an unpaired tool_calls message is
 	// wire-illegal on the same grounds as in the chat request.
 	msgs = append(msgs, wireTurnMessages(turns, tcMap, prof.ReasoningInTranscript)...)
-	res, err := p.Chat(ctx, modelID, provider.ChatRequest{
+	// Stream (not Chat): the summarizer may think before it writes the
+	// summary, and its reasoning is forwarded to the viewer (emit) as the
+	// compaction row's thinking block — the same behavior as a regular
+	// message's thinking. The aggregated Result.Text is the summary. emit is
+	// nil for non-streaming turns (there is no viewer for the indicator).
+	res, err := p.Stream(ctx, modelID, provider.ChatRequest{
 		System:          []provider.ContentPart{{Text: summarizationSystemPrompt}},
 		Messages:        msgs,
 		ReasoningEffort: effort,
+	}, func(c provider.Chunk) error {
+		if emit != nil && c.ReasoningDelta != "" {
+			// A failed write (the viewer left) must never abort the
+			// compaction — it completes and is persisted regardless.
+			_ = emit(provider.Chunk{CompactionPhase: "reasoning", ReasoningDelta: c.ReasoningDelta})
+		}
+		return nil
 	})
 	if err != nil {
 		return "", err
@@ -128,7 +140,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	if emit != nil {
 		_ = emit(provider.Chunk{CompactionPhase: "start"})
 	}
-	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize, toolCallsSubset(tcMap, toSummarize))
+	summary, err := a.summarize(ctx, p, a.modelAPIName(conv.ActiveModelID), prevSummary, prof.ReasoningEffortFor(conv.ReasoningEffort), prof, toSummarize, toolCallsSubset(tcMap, toSummarize), emit)
 	if err != nil {
 		return err
 	}
@@ -156,7 +168,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		log.Printf("compaction marker: %v", e)
 	}
 	if emit != nil {
-		_ = emit(provider.Chunk{CompactionPhase: "done", CompactedFrom: from, CompactedTo: to})
+		_ = emit(provider.Chunk{CompactionPhase: "done", CompactedFrom: from, CompactedTo: to, CompactedSummary: summary})
 	}
 	return nil
 }

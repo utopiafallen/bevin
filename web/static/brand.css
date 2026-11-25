@@ -234,8 +234,12 @@ input:focus, textarea:focus, select:focus {
    (in-progress) variant shows an animated "Compacting context…" label while
    the summarizer runs; the settled variant is the persistent "Context
    compacted from X to Y tokens" marker (rendered on every reload). The rule
-   on each side makes the compaction event unmistakable in the history. */
-.msg-compaction { display: flex; align-items: center; gap: 0.7rem; margin: 0.9rem 0; }
+   on each side makes the compaction event unmistakable in the history.
+   Below the marker line: the summarizer's thinking block (same behavior as
+   a regular message's thinking — only shown when it thinks) and the
+   compacted context (the summary) in a default-collapsed block. */
+.msg-compaction { display: flex; flex-direction: column; gap: 0.45rem; margin: 0.9rem 0; }
+.msg-compaction .cp-line { display: flex; align-items: center; gap: 0.7rem; }
 .msg-compaction .cp-rule { flex: 1; border-top: 1px solid var(--border); }
 .msg-compaction .cp-label {
   flex: none; font-size: 0.76rem; font-weight: 700; color: var(--text-muted);
@@ -243,6 +247,11 @@ input:focus, textarea:focus, select:focus {
 }
 /* Live (in-progress) variant: a subtle pulse while the summarizer runs. */
 .msg-compaction.compacting .cp-label { animation: thinking-pulse 1.6s ease-in-out infinite; }
+/* The compaction's thinking + compacted-context blocks: the same collapsed
+   details styling as a regular message's thinking block. */
+.msg-compaction details { margin: 0; font-size: 0.8rem; color: var(--text-muted); max-width: 100%; }
+.msg-compaction details summary { cursor: pointer; font-size: 0.72rem; font-weight: 700; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-compaction details pre { white-space: pre-wrap; font-family: inherit; margin: 0.3rem 0 0; }
 
 /* ---- markdown inside message bubbles (web/static/markdown.js) ---- */
 .msg .md-bubble { white-space: normal; }

@@ -648,31 +648,73 @@
       }
     }
 
-    // Context-compaction markers (the compaction indicator). The live variant
-    // ("Compacting context…") is appended when the harness starts a
-    // compaction (the summarizer is running); settleCompactionRow swaps it
-    // for the persistent "Context compacted from X to Y tokens" marker once
-    // the summary is stored. The same marker is rendered from history
-    // (summary rows) on reload, so every compaction event shows in flow.
+    // Context-compaction markers (the compaction indicator). The live
+    // variant ("Compacting context…") is appended when the harness starts a
+    // compaction (the summarizer is running); while the summarizer thinks,
+    // its reasoning streams into the row's thinking block (the same
+    // behavior as a regular message's thinking). settleCompactionRow swaps
+    // the label for the persistent "Context compacted from X to Y tokens"
+    // marker and reveals the compacted context (the summary) in a
+    // default-collapsed block. The same marker (with its collapsed context)
+    // is rendered from history (summary rows) on reload, so every
+    // compaction event shows in flow.
     function compactionLabel(from, to) {
       if (from && to) return "Context compacted from " + Math.round(from).toLocaleString() + " to " + Math.round(to).toLocaleString() + " tokens";
       if (from) return "Context compacted from " + Math.round(from).toLocaleString() + " tokens";
       return "Context compacted";
     }
-    function compactionMarkerRow(settled, from, to) {
+    // The compacted-context block: a default-collapsed details holding the
+    // summary that replaced the folded turns. null when there is no text.
+    function compactionContextBlock(text) {
+      if (!text) return null;
+      var d = document.createElement("details");
+      d.className = "cp-context";
+      d.innerHTML = "<summary>Compacted context</summary><pre></pre>";
+      d.querySelector("pre").textContent = text;
+      return d;
+    }
+    function compactionMarkerRow(settled, from, to, contextText) {
       var row = document.createElement("div");
       row.className = "msg-compaction" + (settled ? "" : " compacting");
-      row.innerHTML = '<span class="cp-rule"></span><span class="cp-label"></span><span class="cp-rule"></span>';
+      row.innerHTML =
+        '<div class="cp-line"><span class="cp-rule"></span><span class="cp-label"></span><span class="cp-rule"></span></div>' +
+        '<details class="reasoning" style="display:none;"><summary>thinking</summary><pre></pre></details>';
       row.querySelector(".cp-label").textContent = settled ? compactionLabel(from, to) : "Compacting context\u2026";
+      var ctx = compactionContextBlock(contextText);
+      if (ctx) row.appendChild(ctx);
       $("chatLog").appendChild(row);
       return row;
     }
     function addCompactionRow() {
-      var row = compactionMarkerRow(false);
+      var row = compactionMarkerRow(false, 0, 0);
       $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
       return row;
     }
-    function settleCompactionRow(from, to) {
+    // The summarizer is thinking: stream its reasoning into the live
+    // compaction row's thinking block (the same expand-while-thinking +
+    // current-line-preview behavior as a regular message's thinking).
+    function appendCompactionReasoning(delta) {
+      var rows = document.querySelectorAll(".msg-compaction.compacting");
+      if (!rows.length) return; // no live compaction (out of order / after reload)
+      var details = rows[rows.length - 1].querySelector("details.reasoning");
+      if (!details) return;
+      var atBottom = pinScroll($("chatScroll"));
+      var reasoning = details.querySelector("pre").textContent + delta;
+      if (details.style.display === "none") {
+        details.style.display = "";
+        details.open = true; // expanded while the summarizer thinks
+      }
+      var lines = reasoning.split("\n");
+      var ln = "";
+      for (var li = lines.length - 1; li >= 0; li--) {
+        if (lines[li].trim()) { ln = lines[li].trim(); break; }
+      }
+      if (ln.length > 90) ln = ln.slice(0, 90) + "…";
+      if (ln) details.querySelector("summary").textContent = "thinking — " + ln;
+      details.querySelector("pre").textContent = reasoning;
+      if (atBottom) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
+    }
+    function settleCompactionRow(from, to, contextText) {
       // Settle the most recent live "Compacting…" marker into the persistent
       // marker. If none is pending (e.g. the event arrived out of order or
       // after a reload), append a fresh settled marker.
@@ -681,8 +723,14 @@
       if (row) {
         row.classList.remove("compacting");
         row.querySelector(".cp-label").textContent = compactionLabel(from, to);
+        var details = row.querySelector("details.reasoning");
+        if (details && details.open) details.open = false; // the thinking is done
+        if (!row.querySelector("details.cp-context")) {
+          var ctx = compactionContextBlock(contextText);
+          if (ctx) row.appendChild(ctx);
+        }
       } else {
-        compactionMarkerRow(true, from, to);
+        compactionMarkerRow(true, from, to, contextText);
       }
     }
 
@@ -1266,13 +1314,17 @@
               if (p.total_tokens) updateCtx(p.total_tokens, ctxMax);
             } else if (evt === "compaction") {
               // Context-compaction indicator: an animated "Compacting
-              // context…" row while the summarizer runs, then a persistent
-              // "Context compacted from X to Y tokens" marker once it is
-              // stored. (The marker is also rendered from history on reload.)
+              // context…" row while the summarizer runs (its reasoning
+              // streams into the row's thinking block), then a persistent
+              // "Context compacted from X to Y tokens" marker with the
+              // compacted context in a collapsed block. (The marker is also
+              // rendered from history on reload.)
               if (p.phase === "start") {
                 addCompactionRow();
+              } else if (p.phase === "reasoning") {
+                if (p.reasoning) appendCompactionReasoning(p.reasoning);
               } else if (p.phase === "done") {
-                settleCompactionRow(p.from, p.to);
+                settleCompactionRow(p.from, p.to, p.summary);
               }
             } else if (evt === "done") {
               gotDone = true;
@@ -1437,8 +1489,9 @@
       } else if (m.role === "summary") {
         // A context-compaction event: the persistent "Context compacted
         // from X to Y tokens" marker in the flow (0 = a pre-existing
-        // summary row with no recorded tokens — the generic marker).
-        compactionMarkerRow(true, m.compacted_from, m.compacted_to);
+        // summary row with no recorded tokens — the generic marker), with
+        // the compacted context (the summary) in a collapsed block.
+        compactionMarkerRow(true, m.compacted_from, m.compacted_to, m.content);
       }
     }
 
