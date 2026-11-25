@@ -511,6 +511,23 @@ body.page-chat .column { max-width: none; }
     font-size: 0.58rem; font-weight: 700; color: var(--text);
     background: var(--surface); border-radius: 3px; padding: 0 1.5px; line-height: 1.1;
   }
+  /* Model chip (the main chat's model display, above the input) on mobile:
+     the picker fix above only covered the card rows — the chip's name + R/K/S
+     bars still wrapped to a new row. Keep them on ONE row: the name
+     ellipsizes to make room and the metrics compact (smaller labels + bars)
+     so the speed bar no longer wraps. */
+  .model-chip {
+    max-width: 100%;
+    flex-wrap: nowrap;
+    gap: 0.3rem 0.45rem;
+  }
+  .model-chip .m-name {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .model-chip .metric { gap: 0.2rem; }
+  .model-chip .mk { font-size: 0.6rem; }
+  .model-chip .mbar { width: 1.4rem; height: 0.5rem; }
 }
 
 /* ---- the workspaces page ---- */
