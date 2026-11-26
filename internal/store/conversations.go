@@ -177,9 +177,11 @@ func (s *UserStore) SetConversationReasoningEffort(id, effort string) error {
 	return nil
 }
 
-// SetFrozenSystemPrompt stores the system prompt frozen at conversation start.
-// It is the content of the system message the request builder sends; it is not
-// mutated in place (a profile/input change appends a new system message later).
+// SetFrozenSystemPrompt stores the conversation's frozen system prompt:
+// the base core + the user-profile section. The core never changes; the
+// profile section is re-baked at every compaction event (design log
+// 2026-11-25 "Profile in the system prompt"). It is the content of the
+// system message the request builder sends.
 func (s *UserStore) SetFrozenSystemPrompt(id, prompt string) error {
 	res, err := s.db.Exec(`UPDATE conversations SET frozen_system_prompt = ? WHERE id = ?`, prompt, id)
 	if err != nil {

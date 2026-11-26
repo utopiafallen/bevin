@@ -20,6 +20,12 @@ import (
 const (
 	profileMaxKey   = 40  // a profile key is a label (preferences, work, ...)
 	profileMaxValue = 200 // a profile entry is a distilled note, not a fact dump
+	// profileMaxKeys bounds the profile's TOTAL size. The profile is
+	// injected into every system prompt (design log 2026-11-25), so
+	// "a handful of small notes" is a hard invariant, not just curation
+	// discipline: worst case 40 keys × (40 + 2 + 200) chars ≈ 10k chars
+	// ≈ 2.5k tokens.
+	profileMaxKeys = 40
 )
 
 func registerSetProfileTool(r *ToolRegistry, a *Agent) error {
@@ -81,6 +87,16 @@ func (a *Agent) execSetProfile(ctx context.Context, handle string, args json.Raw
 	}
 	if len(value) > profileMaxValue {
 		return fmt.Sprintf("the value is too long (max %d chars) — one short, durable sentence.", profileMaxValue), nil
+	}
+	// The profile is injected into every system prompt, so its size is
+	// load-bearing: an UPSERT of an existing key is always fine, but a NEW
+	// key is refused at the cap.
+	kv, err := us.GetProfile()
+	if err != nil {
+		return "could not update the profile (internal error) — try again once.", nil
+	}
+	if _, exists := kv[key]; !exists && len(kv) >= profileMaxKeys {
+		return fmt.Sprintf("the profile is full (max %d entries) — update an existing entry instead.", profileMaxKeys), nil
 	}
 	if err := us.SetProfile(key, value, "curation"); err != nil {
 		return "could not update the profile (internal error) — try again once.", nil

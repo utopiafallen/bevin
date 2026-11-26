@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/utopiafallen/bevin/internal/profile"
+	"github.com/utopiafallen/bevin/internal/prompt"
 	"github.com/utopiafallen/bevin/internal/provider"
 	"github.com/utopiafallen/bevin/internal/store"
 )
@@ -77,6 +78,15 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 // request builder sends. It is a no-op when the prompt is under budget or
 // there is no older message to fold (only the last KeepLastMessages
 // remain).
+//
+// Every compaction event ALSO re-bakes the profile section of the
+// conversation's frozen system prompt with the user's current profile KVs
+// (design log 2026-11-25 "Profile in the system prompt"): the compaction
+// already breaks the prompt prefix, so the refresh is cache-neutral against
+// a content-matched KV proxy, and it lands at the moment the prompt is at
+// its smallest. The core base text is never rewritten — only the trailing
+// section — and the in-memory conv row is synced so the rebuilt request of
+// the same turn carries the fresh prompt.
 //
 // prof is the conversation's active model's model profile — the budget
 // fraction, the verbatim tail, and the reasoning replay in the summarization
@@ -151,6 +161,21 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 	msg, err := us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
 	if err != nil {
 		return err
+	}
+	// Re-bake the profile section of the frozen system prompt (see the
+	// func doc): current profile KVs, core bytes untouched. The store is
+	// written first, then the in-memory row mirrors it — the turn's rebuilt
+	// request (and the marker's "to" estimate below) must carry the fresh
+	// prompt, not the stale one this conv was created with.
+	ptxt, err := us.ProfileText()
+	if err != nil {
+		return err
+	}
+	if fresh := prompt.SystemPrompt(ptxt); fresh != conv.FrozenSystemPrompt {
+		if err := us.SetFrozenSystemPrompt(conv.ID, fresh); err != nil {
+			return err
+		}
+		conv.FrozenSystemPrompt = fresh
 	}
 	// Re-estimate the post-compaction prompt size (frozen system prompt +
 	// the new summary + the verbatim tail) so the marker can show "from X to

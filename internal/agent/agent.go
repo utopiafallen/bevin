@@ -692,10 +692,15 @@ func (a *Agent) newUserConversation(us *store.UserStore, handle, title, modelID,
 	if err != nil {
 		return nil, err
 	}
-	// Freeze the system prompt at conversation start. It is the content of
-	// the system message the request builder sends; a profile/input change
-	// later appends a new system message rather than mutating this.
-	if err := us.SetFrozenSystemPrompt(c.ID, prompt.Base); err != nil {
+	// Freeze the system prompt at conversation start: the base core + the
+	// user's CURRENT profile section (design log 2026-11-25 "Profile in the
+	// system prompt"). The profile is re-baked at every compaction event;
+	// the core bytes never change for the life of the conversation.
+	ptxt, err := us.ProfileText()
+	if err != nil {
+		return nil, err
+	}
+	if err := us.SetFrozenSystemPrompt(c.ID, prompt.SystemPrompt(ptxt)); err != nil {
 		return nil, err
 	}
 	if effort != "" {
@@ -783,7 +788,14 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	if err != nil {
 		return "", err
 	}
-	if err := us.SetFrozenSystemPrompt(c.ID, prompt.Base); err != nil {
+	// Same freeze as every conversation: base core + the user's current
+	// profile section (re-baked at each compaction — see the prompt
+	// package's SystemPrompt).
+	ptxt, err := us.ProfileText()
+	if err != nil {
+		return "", err
+	}
+	if err := us.SetFrozenSystemPrompt(c.ID, prompt.SystemPrompt(ptxt)); err != nil {
 		return "", err
 	}
 	if welcome != "" {
