@@ -31,8 +31,11 @@ func cacheFile(convID string) string {
 // slot count, the conversation->slot assignment (stable within a run, so a
 // conversation keeps its cache across its turns), the per-slot "last
 // conversation" (decides when a slot must save its old conversation's cache
-// and restore the new one's), and the per-conversation tokens-since-last-save
-// (the 8k resave cadence).
+// and restore the new one's), the per-conversation tokens-since-last-save
+// (the 8k resave cadence), and the per-conversation saved flag (a
+// conversation's first completed turn in this run always saves its cache to
+// disk — a new conversation gets an on-disk entry even when its first turn
+// is well under the resave cadence).
 //
 // All of this is best-effort: a save/restore failure is logged and the request
 // continues normally (the user's explicit requirement).
@@ -40,9 +43,10 @@ type slotCache struct {
 	mu        sync.Mutex
 	numSlots  int
 	slotsSeen bool
-	convSlot  map[string]int // conversation id -> assigned slot
-	slotLast  map[int]string // slot -> last conversation id it served
-	tokensNew map[string]int // conversation id -> completion tokens since last save
+	convSlot  map[string]int  // conversation id -> assigned slot
+	slotLast  map[int]string  // slot -> last conversation id it served
+	tokensNew map[string]int  // conversation id -> completion tokens since last save
+	savedOnce map[string]bool // conversation id -> its cache saved to disk at least once this run
 }
 
 var (
@@ -62,6 +66,7 @@ func slotCacheFor(baseURL string) *slotCache {
 			convSlot:  map[string]int{},
 			slotLast:  map[int]string{},
 			tokensNew: map[string]int{},
+			savedOnce: map[string]bool{},
 		}
 		slotCaches[baseURL] = sc
 	}
@@ -167,16 +172,22 @@ func (l *Llama) assignSlotLocked(sc *slotCache, convID string, numSlots int) int
 
 // noteTurnCompletion folds a turn's completion tokens into the conversation's
 // tokens-since-last-save and re-saves its cache when the 8k cadence is hit
-// (best-effort). slot is the slot the turn ran on (-1 = no pin, no-op).
+// (best-effort). It ALSO saves the cache after the conversation's FIRST
+// completed turn in this run, whatever the token count: a new conversation
+// must get an on-disk cache entry after its first completed agent turn (the
+// resave cadence alone would leave small first turns — and any single-
+// conversation server, where the slot is never evicted — without an on-disk
+// entry at all). slot is the slot the turn ran on (-1 = no pin, no-op).
 func (l *Llama) noteTurnCompletion(ctx context.Context, convID string, slot int, completionTokens int) {
-	if convID == "" || slot < 0 || completionTokens <= 0 {
+	if convID == "" || slot < 0 {
 		return
 	}
 	sc := slotCacheFor(l.BaseURL)
 	sc.mu.Lock()
 	sc.tokensNew[convID] += completionTokens
-	shouldSave := sc.tokensNew[convID] >= resaveTokens
+	shouldSave := !sc.savedOnce[convID] || sc.tokensNew[convID] >= resaveTokens
 	if shouldSave {
+		sc.savedOnce[convID] = true
 		sc.tokensNew[convID] = 0
 	}
 	sc.mu.Unlock()
@@ -226,6 +237,10 @@ func DeleteLlamaConversationCache(ctx context.Context, baseURL, convID, apiKey s
 	if pinned {
 		delete(sc.convSlot, convID)
 		delete(sc.tokensNew, convID)
+		// Clear the saved flag too: a conversation id that returns after a
+		// delete is a fresh conversation (its on-disk file was just removed),
+		// and its first completed turn must save a new on-disk entry.
+		delete(sc.savedOnce, convID)
 		// Reset the slot's "last conversation" so the next conversation to
 		// run on this slot restores ITS OWN cache (not the deleted one's).
 		if sc.slotLast[slot] == convID {

@@ -403,7 +403,9 @@ func TestLlamaSlotCache(t *testing.T) {
 	}
 
 	// Turn 1: conversation A's FIRST turn — restores A's cache (no save: the
-	// slot has no prior conversation).
+	// slot has no prior conversation), then SAVES A's cache: a new
+	// conversation's first completed turn always gets an on-disk entry,
+	// whatever its token count (100 here — far below the 8k resave cadence).
 	if err := chat("convA"); err != nil {
 		t.Fatalf("turn A1: %v", err)
 	}
@@ -411,11 +413,15 @@ func TestLlamaSlotCache(t *testing.T) {
 	if !hasCall(cs, "restore", cacheFile("convA")) {
 		t.Fatalf("A1 must restore cache_conv_convA.bin, calls = %v", cs)
 	}
-	if len(cs) != 1 {
-		t.Fatalf("A1 must make exactly one slot call (the restore — no prior conversation to save), calls = %v", cs)
+	if !hasCall(cs, "save", cacheFile("convA")) {
+		t.Fatalf("A1 (a new conversation's first completed turn) must save cache_conv_convA.bin, calls = %v", cs)
+	}
+	if len(cs) != 2 || cs[0].action != "restore" || cs[1].action != "save" {
+		t.Fatalf("A1 must make exactly two slot calls (the restore, then the first-turn save), calls = %v", cs)
 	}
 
-	// Turn 2: conversation B (a switch) — saves A's cache + restores B's.
+	// Turn 2: conversation B (a switch) — saves A's cache + restores B's,
+	// then saves B's own cache (its first completed turn).
 	if err := chat("convB"); err != nil {
 		t.Fatalf("turn B1: %v", err)
 	}
@@ -426,17 +432,27 @@ func TestLlamaSlotCache(t *testing.T) {
 	if !hasCall(cs, "restore", cacheFile("convB")) {
 		t.Fatalf("B1 must restore cache_conv_convB.bin, calls = %v", cs)
 	}
+	if !hasCall(cs, "save", cacheFile("convB")) {
+		t.Fatalf("B1 (a new conversation's first completed turn) must save cache_conv_convB.bin, calls = %v", cs)
+	}
 
-	// Turn 3: back to conversation A — saves B's cache + restores A's.
+	// Turn 3: back to conversation A — saves B's cache + restores A's. No
+	// save of A's own cache: A already has an on-disk entry (saved on its
+	// first turn) and its 8k cadence hasn't been hit.
+	before := len(snapshot())
 	if err := chat("convA"); err != nil {
 		t.Fatalf("turn A2: %v", err)
 	}
 	cs = snapshot()
-	if !hasCall(cs, "save", cacheFile("convB")) {
-		t.Fatalf("A2 must save cache_conv_convB.bin, calls = %v", cs)
+	newCalls := cs[before:]
+	if !hasCall(newCalls, "save", cacheFile("convB")) {
+		t.Fatalf("A2 must save cache_conv_convB.bin, new calls = %v", newCalls)
 	}
-	if !hasCall(cs, "restore", cacheFile("convA")) {
-		t.Fatalf("A2 must re-restore cache_conv_convA.bin, calls = %v", cs)
+	if !hasCall(newCalls, "restore", cacheFile("convA")) {
+		t.Fatalf("A2 must re-restore cache_conv_convA.bin, new calls = %v", newCalls)
+	}
+	if hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("A2 must NOT re-save A's cache (not a new conversation, cadence not hit), new calls = %v", newCalls)
 	}
 
 	// 8k resave: a turn with >= 8000 completion tokens re-saves the cache
@@ -444,12 +460,12 @@ func TestLlamaSlotCache(t *testing.T) {
 	mu.Lock()
 	completionTokens = 8000
 	mu.Unlock()
-	before := len(snapshot())
+	before = len(snapshot())
 	if err := chat("convA"); err != nil {
 		t.Fatalf("turn A3 (8k): %v", err)
 	}
 	cs = snapshot()
-	newCalls := cs[before:]
+	newCalls = cs[before:]
 	if !hasCall(newCalls, "save", cacheFile("convA")) {
 		t.Fatalf("A3 (8k tokens) must re-save cache_conv_convA.bin, new calls = %v", newCalls)
 	}
@@ -536,7 +552,9 @@ func TestLlamaConversationCacheDelete(t *testing.T) {
 		return n
 	}
 
-	// Pin convA to the slot (its first turn restores its cache).
+	// Pin convA to the slot: its first turn restores its cache and then
+	// saves it (a new conversation's first completed turn always gets an
+	// on-disk entry).
 	if err := chat("convA"); err != nil {
 		t.Fatalf("turn A: %v", err)
 	}
@@ -555,9 +573,12 @@ func TestLlamaConversationCacheDelete(t *testing.T) {
 		t.Fatalf("the delete must target the conversation's cache file, got %q", got[len(got)-1].filename)
 	}
 
-	// convA again: it is a FRESH pin (tracking cleared) — it restores its own
-	// cache with NO delete (the delete already ran) and NO save (the slot's
-	// last-conversation was reset by the delete).
+	// convA again: it is a FRESH pin (tracking cleared) — it restores its
+	// own cache (the slot's last-conversation was reset by the delete, so
+	// nothing else is saved first), with NO re-delete (the delete already
+	// ran) — and as a fresh conversation, its first completed turn saves a
+	// NEW on-disk entry (the delete removed the old file + cleared the
+	// saved flag).
 	if err := chat("convA"); err != nil {
 		t.Fatalf("turn A (post-delete): %v", err)
 	}
@@ -567,6 +588,9 @@ func TestLlamaConversationCacheDelete(t *testing.T) {
 	}
 	if count(got, "delete") != 1 {
 		t.Fatalf("post-delete convA must NOT re-delete (no new delete), calls = %+v", got)
+	}
+	if got[len(got)-1].action != "save" || got[len(got)-1].filename != "cache_conv_convA.bin" {
+		t.Fatalf("post-delete convA's first completed turn must save a fresh on-disk entry, calls = %+v", got)
 	}
 
 	// Deleting a conversation that was never pinned to this server: a no-op
