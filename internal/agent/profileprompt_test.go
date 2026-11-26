@@ -109,7 +109,7 @@ func TestCompactionRebakesProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConversation: %v", err)
 	}
-	if err := a.compactIfNeeded(context.Background(), us, conv, fp, 0, profile.Default(), false, nil); err != nil {
+	if err := a.compactIfNeeded(context.Background(), us, "u1", conv, fp, 0, profile.Default(), false, nil); err != nil {
 		t.Fatalf("compactIfNeeded: %v", err)
 	}
 	msgs, err := us.ListMessages(convID)

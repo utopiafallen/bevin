@@ -86,6 +86,9 @@ type App struct {
 	diskMon *diskMonitor
 	// diskCancel stops the disk monitor's periodic walk.
 	diskCancel context.CancelFunc
+	// events is the per-user nudge hub behind GET /api/me/events
+	// (multi-device sync); built in routes().
+	events *eventHub
 	// loginLimiter rate-limits /login (per IP + per handle); lazily built
 	// on first use (apps built by hand in tests get the same defaults).
 	loginLimitOnce sync.Once
@@ -110,6 +113,14 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	a := &App{cfg: cfg, prov: prov, ag: ag, ttl: time.Duration(cfg.Auth.SessionTTLSeconds) * time.Second, dataDir: dataDir, edit: edit, srv: srv, mail: mail}
 	a.buildSandbox(cfg)
 	a.routes()
+	// Multi-device sync: every conversation row the agent persists nudges
+	// the user's open tabs (the hub's per-user fan-out) so a second tab —
+	// desktop + phone — re-pulls the conversation and stays current. The
+	// hook must stay non-blocking (broadcast never blocks) and survives
+	// Reload (applyConfig reloads this same Agent, not a new one).
+	a.ag.NotifyMessage = func(handle, convID string, seq int) {
+		a.events.broadcast(handle, event{Type: "message", ConversationID: convID, Seq: seq})
+	}
 	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
 	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
 	// are down after a bevin restart or machine reboot) and respawns any that
@@ -166,11 +177,17 @@ func (a *App) Close() {
 }
 
 func (a *App) routes() {
+	a.events = newEventHub()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.logout)
 	mux.HandleFunc("GET /api/me", a.requireAuth(a.me))
+	// The per-user nudge channel (multi-device sync): one long-lived SSE
+	// per signed-in tab. A second tab of the same user (desktop + phone)
+	// learns a conversation changed and re-pulls it — the channel carries
+	// events only, never message content.
+	mux.HandleFunc("GET /api/me/events", a.requireAuth(a.userEvents))
 	mux.HandleFunc("GET /api/models", a.requireAuth(a.models))
 	// The chat API is the user interaction surface: the admin is not a
 	// regular user, so it rejects admin sessions (GET / sends them to the
@@ -517,6 +534,8 @@ func (a *App) createConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Nudge the user's other open tabs: the conversation list changed.
+	a.events.broadcast(u.Handle, event{Type: "conversation", ConversationID: id, Action: "created"})
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
@@ -617,6 +636,8 @@ func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// Nudge the user's other open tabs: the conversation list changed.
+	a.events.broadcast(u.Handle, event{Type: "conversation", ConversationID: r.PathValue("id"), Action: "updated"})
 	writeJSON(w, http.StatusOK, map[string]any{"conversation": summary})
 }
 
@@ -633,6 +654,8 @@ func (a *App) deleteConversation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Nudge the user's other open tabs: the conversation list changed.
+	a.events.broadcast(u.Handle, event{Type: "conversation", ConversationID: r.PathValue("id"), Action: "deleted"})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -829,6 +852,18 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	// stops writing to a gone client (and swallows write errors) so the
 	// turn never aborts because its viewer left.
 	turnCtx := context.WithoutCancel(r.Context())
+	// Multi-device sync: snapshot the newest persisted row BEFORE the turn
+	// so the done event can carry the seqs of the rows THIS turn persisted
+	// (the client tags its optimistically rendered rows with them — the
+	// store is the source of truth, the tags stop a sync pull rendering
+	// them twice). A snapshot failure degrades to an empty tag list (the
+	// pull then reconciles the usual way).
+	preSeq := 0
+	if us, err := a.ag.UserStoreFor(u.Handle); err == nil {
+		if n, err := us.MaxDisplaySeq(id); err == nil {
+			preSeq = n
+		}
+	}
 	convID, reply, err := a.ag.TurnStream(turnCtx, u.Handle, id, req.Message, func(c provider.Chunk) error {
 		if c.Usage != nil {
 			lastUsage = c.Usage
@@ -912,12 +947,25 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 			"total_tokens":      lastUsage.TotalTokens,
 		}
 	}
+	// Multi-device sync: the displayable rows this turn persisted (user
+	// first, then the assistant rows in display order) — the client tags
+	// its optimistically rendered rows with these seqs.
+	var seqs []int
+	if us, err := a.ag.UserStoreFor(u.Handle); err == nil {
+		if s, err := us.DisplaySeqsAfter(convID, preSeq); err == nil {
+			seqs = s
+		}
+	}
+	if seqs == nil {
+		seqs = []int{}
+	}
 	_ = writeEvent("done", map[string]any{
 		"conversation_id": convID,
 		"reply":           reply,
 		"usage":           usage,
 		"elapsed_ms":      elapsed.Milliseconds(),
 		"ttft_ms":         ttft.Milliseconds(),
+		"seqs":            seqs,
 	})
 }
 

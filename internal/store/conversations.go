@@ -360,6 +360,41 @@ func (s *UserStore) ListMessagesPaged(convID string, limit, beforeSeq int) ([]Me
 	return out, nil
 }
 
+// MaxDisplaySeq returns the highest seq among the conversation's displayable
+// rows (user/assistant/summary) — 0 when it has none. The multi-device
+// stream handler snapshots it BEFORE a turn so the done event can carry the
+// rows the turn persisted.
+func (s *UserStore) MaxDisplaySeq(convID string) (int, error) {
+	var seq int
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ? AND role IN ('user','assistant','summary')`, convID).Scan(&seq)
+	return seq, err
+}
+
+// DisplaySeqsAfter returns the seqs of the conversation's displayable rows
+// (user/assistant/summary) newer than afterSeq, in seq order — the
+// multi-device done-event payload: the client tags the rows it rendered
+// optimistically (which have no seq until persisted) so a sync pull
+// recognizes them instead of rendering them twice.
+func (s *UserStore) DisplaySeqsAfter(convID string, afterSeq int) ([]int, error) {
+	rows, err := s.db.Query(`SELECT seq FROM messages WHERE conversation_id = ? AND role IN ('user','assistant','summary') AND seq > ? ORDER BY seq ASC`, convID, afterSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var seqs []int
+	for rows.Next() {
+		var seq int
+		if err := rows.Scan(&seq); err != nil {
+			return nil, err
+		}
+		seqs = append(seqs, seq)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return seqs, nil
+}
+
 // SearchMessages returns messages matching an FTS5 query, ranked by bm25.
 // query must be valid FTS5 syntax (the caller sanitizes user text first).
 func (s *UserStore) SearchMessages(query string, limit int) ([]Message, error) {

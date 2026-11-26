@@ -108,7 +108,7 @@ func (a *Agent) summarize(ctx context.Context, p provider.Provider, modelID, pre
 // from/to token counts) once the summary is stored — so the UI shows an
 // animated indicator that settles into a persistent marker. nil for
 // non-streaming turns (there is no viewer for the indicator).
-func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile, force bool, emit func(provider.Chunk) error) error {
+func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, handle string, conv *store.Conversation, p provider.Provider, actualTokens int, prof profile.Profile, force bool, emit func(provider.Chunk) error) error {
 	hist, err := us.ListMessages(conv.ID)
 	if err != nil {
 		return err
@@ -158,7 +158,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, conv *
 		return nil
 	}
 	modelID := conv.ActiveModelID
-	msg, err := us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
+	msg, err := a.appendMessage(handle, us, conv.ID, roleSummary, summary, "", "", &modelID)
 	if err != nil {
 		return err
 	}

@@ -317,7 +317,7 @@ func (ts *taskSystem) run(handle, taskID string) {
 		// area (the conversation's last message) says why. An infra
 		// failure beats any report the model managed to make (it is
 		// objective).
-		_, _ = us.AppendMessage(convID, roleAssistant, "Task failed: "+terr.Error(), "", "", nil)
+		_, _ = ts.a.appendMessage(handle, us, convID, roleAssistant, "Task failed: "+terr.Error(), "", "", nil)
 		_ = us.TransitionTask(taskID, "in-progress", "blocked")
 	default:
 		// The terminal state: the model's report when it made one, the
@@ -343,7 +343,7 @@ func (ts *taskSystem) run(handle, taskID string) {
 				if state == "blocked" {
 					framing = "Task \"" + task.Title + "\" is blocked:"
 				}
-				_, _ = us.AppendMessage(*origin, roleAssistant, framing+"\n\n"+summary, "", "", nil)
+				_, _ = ts.a.appendMessage(handle, us, *origin, roleAssistant, framing+"\n\n"+summary, "", "", nil)
 			}
 		}
 	}

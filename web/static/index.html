@@ -378,6 +378,7 @@
       if (name === "search") { loadScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
       if (name === "workspace") loadWorkspaces();
       if (name === "profile") loadProfilePage();
+      if (name === "chat" && syncPending) doSync(); // a nudge arrived while off the page
     }
     $("searchBtn").addEventListener("click", function () {
       if (!me) return;
@@ -1329,6 +1330,11 @@
             } else if (evt === "done") {
               gotDone = true;
               settleAllToolRows(); // nothing may still be pulsing at stream end
+              // Multi-device sync: tag this turn's optimistically rendered
+              // rows with their persisted seqs (a later sync pull
+              // recognizes them — no duplicate render), and advance the
+              // rendered-seq watermark past the turn's rows.
+              if (p.seqs) syncTagOwnTurn(p.seqs);
               // The "done" reply is the authoritative final text — the
               // server sanitizes it (an echoed transcript timestamp marker
               // is stripped). If it differs from what streamed, re-render
@@ -1394,10 +1400,16 @@
         if (streamConvID) { delete streamingConvs[streamConvID]; delete streamAborts[streamConvID]; }
         $("sendBtn").disabled = !!(convID && streamingConvs[convID]);
         if (convID === streamConvID) input.focus();
+        // Multi-device sync: the tail is free again — a final re-pull
+        // catches rows persisted while the stream was in flight (a sibling
+        // tab's turn interleaved in the same conversation; the usual case
+        // appends nothing — every row is already tagged on screen).
+        scheduleSync();
       }
     }
 
     function showLogin() {
+      closeEventChannel(); // signed out — no channel, no pending sync
       $("loginCard").style.display = "";
       $("onboardCard").style.display = "none";
       $("chatCard").style.display = "none";
@@ -1423,6 +1435,7 @@
       $("profileBtn").classList.remove("active");
       $("userName").textContent = "@" + userName();
       setRailAuth(true);
+      openEventChannel(); // multi-device sync: this tab's nudge channel (idempotent)
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       // The select shows the conversation's OWN model (the server default
       // only before it exists) — the model list must land first.
@@ -1442,9 +1455,14 @@
     var historyLoading = false;  // a page load is in flight
     var noAutoScroll = false;    // suppress the per-message scroll-to-bottom (older-page prepend)
 
-    // Renders one persisted message into #chatLog (the shared render path for
-    // the initial page and the older pages).
+    // Renders one persisted message into #chatLog (the shared render path
+    // for the initial page, the older pages, and the multi-device sync
+    // pull). The rendered rows are tagged with the row's persisted seq
+    // (data-seq): the sync pull's append-only rule — never render a seq
+    // that is already on screen.
     function renderHistoryMessage(m) {
+      var log = $("chatLog");
+      var before = log.children.length;
       if (m.role === "user") {
         addUserMsg(m.content, m.created_at);
       } else if (m.role === "assistant") {
@@ -1493,6 +1511,13 @@
         // the compacted context (the summary) in a collapsed block.
         compactionMarkerRow(true, m.compacted_from, m.compacted_to, m.content);
       }
+      // Tag every element this row added (a message may add several — the
+      // bubble + tool rows) with the persisted seq.
+      if (typeof m.seq === "number") {
+        for (var t = before; t < log.children.length; t++) {
+          log.children[t].setAttribute("data-seq", String(m.seq));
+        }
+      }
     }
 
     // Restore the conversation's persisted history — the most recent
@@ -1509,6 +1534,7 @@
         if ($("chatLog").children.length > 0) return; // chat started meanwhile
         (d.messages || []).forEach(renderHistoryMessage);
         historyOldestSeq = (d.messages && d.messages.length) ? d.messages[0].seq : null;
+        historyNewestSeq = (d.messages && d.messages.length) ? d.messages[d.messages.length - 1].seq : null;
         historyHasMore = !!d.has_more;
         scrollChat();
       } catch (e) { /* history is a convenience — never block the chat */ }
@@ -1555,6 +1581,167 @@
         noAutoScroll = false;
         historyLoading = false;
       }
+    }
+
+    // ---- Multi-device sync: one persistent nudge channel per tab (SSE).
+    // The channel carries events only — "this conversation changed,
+    // re-pull" — never message content: the persisted conversation is the
+    // source of truth and we reconcile from it. The pull is APPEND-ONLY:
+    // a row renders only when its persisted seq is not already on screen
+    // (rows are tagged data-seq as they render), so a re-pull can never
+    // duplicate, and a nudge whose seq we already rendered is a no-op.
+    // A dropped channel costs nothing: EventSource auto-reconnects, and we
+    // re-pull on (re)connect, on the tab becoming visible again, and after
+    // a local stream ends.
+    var evSource = null;           // the tab's EventSource (null = not open)
+    var evListTimer = 0;           // the conversation-list refresh debounce
+    var syncTimer = 0;             // the open-conversation sync debounce
+    var syncPending = false;       // a sync is owed but deferred (off the chat page, or reading older history)
+    var historyNewestSeq = null;   // the newest rendered seq (a nudge at/under it is already on screen)
+
+    // Opens the tab's nudge channel (once per sign-in; idempotent).
+    function openEventChannel() {
+      if (!me || evSource) return;
+      var es = new EventSource("/api/me/events");
+      evSource = es;
+      es.addEventListener("message", function (e) {
+        var d; try { d = JSON.parse(e.data); } catch (err) { return; }
+        if (d.conversation_id !== convID) { scheduleListSync(); return; }
+        if (historyNewestSeq !== null && d.seq <= historyNewestSeq) return; // already rendered
+        scheduleSync();
+      });
+      es.addEventListener("conversation", function (e) { scheduleListSync(); });
+      // A (re)connect is a catch-up point: the channel may have been down
+      // while the tab slept (a phone in the pocket) — re-pull.
+      es.onopen = function () { scheduleListSync(); scheduleSync(); };
+      // onerror: EventSource reconnects on its own; but a DEAD session
+      // 401s every retry forever — stop when signed out.
+      es.onerror = function () { if (!me) closeEventChannel(); };
+    }
+
+    // Closes the channel (sign-out / a dead session). No pending sync
+    // survives a signed-out state.
+    function closeEventChannel() {
+      if (evSource) { try { evSource.close(); } catch (e) {} evSource = null; }
+      syncPending = false;
+      if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+      if (evListTimer) { clearTimeout(evListTimer); evListTimer = 0; }
+    }
+
+    // The conversation list changed (created / renamed / deleted, or a
+    // message landed in a conversation that isn't the open one): refresh
+    // the panel's list (debounced — a busy turn fires several nudges).
+    function scheduleListSync() {
+      if (evListTimer) return;
+      evListTimer = setTimeout(function () { evListTimer = 0; refreshHistory(); }, 500);
+    }
+
+    // The open conversation got a new persisted row (another tab of this
+    // user — desktop + phone — or this tab's own stream settling): re-pull
+    // and append what's new. Debounced: one turn persists several rows
+    // (the user row, each assistant iteration, the reply) — one pull per
+    // burst, not per row.
+    function scheduleSync() {
+      if (!convID || page !== "chat" || streamingConvs[convID]) {
+        // Off the chat page, or a local stream owns the tail (it syncs
+        // when it ends) — apply the sync on the way back.
+        syncPending = true;
+        if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+        return;
+      }
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = setTimeout(doSync, 300);
+    }
+
+    // The sync pull: fetch the recent history page and APPEND the rows not
+    // already on screen (recognized by their data-seq tag — history rows
+    // tag at render; a turn's optimistically rendered rows are tagged by
+    // the done event's seqs). Append-only, so the user's scroll position
+    // and the loaded older pages are preserved; a nudge while reading
+    // older history is deferred until they return to the bottom.
+    async function doSync() {
+      if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
+      if (!convID || page !== "chat" || streamingConvs[convID]) { syncPending = true; return; }
+      var el = $("chatScroll");
+      var wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      if (!wasAtBottom) { syncPending = true; return; } // don't yank them to the bottom
+      syncPending = false;
+      try {
+        var r = await fetch("/api/conversations/" + convID + "/messages?limit=" + HISTORY_PAGE_SIZE);
+        if (!r.ok) return;
+        var d = await r.json();
+        // The view may have moved while the pull was in flight (a
+        // conversation switch, a stream that started) — re-check before
+        // touching it.
+        if (!convID || page !== "chat" || streamingConvs[convID]) return;
+        var msgs = d.messages || [];
+        var log = $("chatLog");
+        var wasEmpty = !log.querySelector("[data-seq]"); // no persisted rows on screen yet
+        var appended = 0;
+        msgs.forEach(function (m) {
+          if (log.querySelector('[data-seq="' + m.seq + '"]')) return; // already on screen
+          if (m.role === "user") {
+            // The optimistic copy of this row may still be on screen (an
+            // errored turn: the user row is persisted, but the done event
+            // that would tag it never came): adopt it instead of
+            // duplicating (persisted user rows are verbatim).
+            var lastUser = null;
+            for (var i = log.children.length - 1; i >= 0; i--) {
+              if (log.children[i].className === "msg msg-user") { lastUser = log.children[i]; break; }
+            }
+            if (lastUser && !lastUser.getAttribute("data-seq")) {
+              var bubble = lastUser.querySelector(".bubble");
+              if (bubble && bubble.textContent === m.content) {
+                lastUser.setAttribute("data-seq", String(m.seq));
+                return;
+              }
+            }
+          }
+          renderHistoryMessage(m);
+          appended++;
+        });
+        if (appended) {
+          if (wasEmpty) {
+            // The log had no persisted rows at all: this pull IS the
+            // initial page — set the lazy-load cursor with it.
+            historyOldestSeq = msgs[0].seq;
+            historyHasMore = !!d.has_more;
+          }
+          var last = msgs[msgs.length - 1];
+          if (last.seq > (historyNewestSeq || 0)) historyNewestSeq = last.seq;
+          scrollChat(); // wasAtBottom — keep pinned (re-measured after the append)
+        }
+      } catch (e) { /* a sync is a convenience — never break the view */ }
+    }
+
+    // Tags this turn's optimistically rendered rows with their persisted
+    // seqs (the done event's seqs — the user row first, then the
+    // assistant / compaction rows in the order they rendered), so a later
+    // sync pull recognizes them instead of rendering them twice. When the
+    // row count doesn't line up (a sibling tab's turn interleaved rows in
+    // the same conversation) the mapping can't be trusted: leave the rows
+    // untagged — the post-turn sync pull appends whatever is genuinely
+    // missing, and the optimistic rows stay as-is.
+    function syncTagOwnTurn(seqs) {
+      if (!seqs || !seqs.length) return;
+      var log = $("chatLog");
+      var kids = log.children;
+      var userRow = null;
+      for (var i = kids.length - 1; i >= 0; i--) {
+        if (kids[i].className === "msg msg-user") { userRow = kids[i]; break; }
+      }
+      if (!userRow) return;
+      var cands = [userRow];
+      for (var j = Array.prototype.indexOf.call(kids, userRow) + 1; j < kids.length; j++) {
+        var c = kids[j];
+        if (c.querySelector(".error-text")) continue; // an error note is not a turn row
+        if (c.className === "msg msg-assistant" || c.className === "msg msg-compaction") cands.push(c);
+      }
+      if (cands.length !== seqs.length) return; // can't map — the sync pull reconciles
+      cands.forEach(function (el, k) { el.setAttribute("data-seq", String(seqs[k])); });
+      var mx = historyNewestSeq || 0;
+      seqs.forEach(function (s) { if (s > mx) mx = s; });
+      historyNewestSeq = mx;
     }
 
     // First-time onboarding ("Meet Bevin"): a regular user who has not
@@ -1630,14 +1817,7 @@
         // model the server will actually take, not the pre-onboarding one.
         if (me) me.default_model_id = payload.model_id || "";
         $("chatLog").innerHTML = "";
-        showChat();
-        // Render the seeded welcome message as the first bubble (no
-        // message re-fetch endpoint yet — the server sends it back).
-        if (j.welcome) {
-          var asst = startAssistantMsg();
-          asst.buf = j.welcome;
-          paint(asst);
-        }
+        showChat(); // loadHistory renders the seeded welcome (tagged) from the store
         scrollChat();
         setTimeout(function () { $("message").focus(); }, 350);
       }).catch(function (err) {
@@ -1712,6 +1892,7 @@
       $("chatLog").innerHTML = "";
       // A fresh conversation has no history: reset the lazy-load cursor.
       historyOldestSeq = null;
+      historyNewestSeq = null;
       historyHasMore = false;
       historyLoading = false;
       pendingModelID = "";
@@ -1735,6 +1916,17 @@
       if (el.scrollTop < 100 && historyHasMore && !historyLoading) {
         loadOlderMessages();
       }
+      // The user returned to the bottom: apply a sync that was deferred
+      // while they were reading older history.
+      if (syncPending && el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+        doSync();
+      }
+    });
+
+    // The tab became visible again (the phone woke from the pocket, the
+    // desktop switched back): the channel may have slept — catch up now.
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible" && me) scheduleSync();
     });
 
     // Conversation history: the per-user list (GET /api/conversations),
@@ -2063,6 +2255,7 @@
       // has-more carry over from the previous one otherwise — the scroll-up
       // would fetch the wrong conversation's older page).
       historyOldestSeq = null;
+      historyNewestSeq = null;
       historyHasMore = false;
       historyLoading = false;
       showPage("chat");

@@ -71,6 +71,16 @@ type Agent struct {
 	// per-model slot pools (see tasks.go).
 	tasks *taskSystem
 
+	// NotifyMessage, if set, is called after EVERY message persisted into
+	// a user's conversation (any role — user, assistant, checkin, summary).
+	// The server wires it to the per-user event hub: the nudge that tells
+	// the user's other open tabs (desktop + phone) the conversation
+	// changed, so they re-pull (multi-device sync). It runs synchronously
+	// in the persisting goroutine — keep it non-blocking and cheap (the
+	// client reconciles from the store, so a dropped nudge only delays the
+	// other tab by one nudge; it can never lose or duplicate content).
+	NotifyMessage func(handle, convID string, seq int)
+
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
 
@@ -763,7 +773,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	}
 	if conv, err := us.FindConversationByTitle(onboardingTitle); err == nil {
 		if has, err := us.HasMessages(conv.ID); err == nil && !has {
-			if m, err := us.AppendMessage(conv.ID, "assistant", welcome, "", "", nil); err != nil {
+			if m, err := a.appendMessage(handle, us, conv.ID, "assistant", welcome, "", "", nil); err != nil {
 				return "", err
 			} else {
 				a.indexMessage(ctx, handle, m, onboardingTitle)
@@ -799,7 +809,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 		return "", err
 	}
 	if welcome != "" {
-		if m, err := us.AppendMessage(c.ID, "assistant", welcome, "", "", nil); err != nil {
+		if m, err := a.appendMessage(handle, us, c.ID, "assistant", welcome, "", "", nil); err != nil {
 			return "", err
 		} else {
 			a.indexMessage(ctx, handle, m, onboardingTitle)
@@ -1417,6 +1427,23 @@ func stoppedNotice(np *noProgress) string {
 	return b.String()
 }
 
+// appendMessage persists one conversation row and fires the multi-device
+// nudge for it. ALL conversation message persistence goes through here —
+// a nudge is owed for ANY persisted row (the client pulls the conversation
+// from the store and reconciles, rendering whatever roles it renders). A
+// raw us.AppendMessage call would persist a row the user's other open tabs
+// (desktop + phone) never hear about.
+func (a *Agent) appendMessage(handle string, us *store.UserStore, convID, role, content, reasoning, reasoningSignature string, modelID *string) (*store.Message, error) {
+	m, err := us.AppendMessage(convID, role, content, reasoning, reasoningSignature, modelID)
+	if err != nil {
+		return nil, err
+	}
+	if a.NotifyMessage != nil {
+		a.NotifyMessage(handle, convID, m.Seq)
+	}
+	return m, nil
+}
+
 // runTurn is the shared logic for Turn (non-streaming, emit=nil) and
 // TurnStream (streaming, emit!=nil). It persists the user message, builds the
 // request (frozen system prompt + latest context summary + raw turns since
@@ -1448,7 +1475,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
 	// Persist the user message first, so history is always durable/consistent.
-	userMsg, err := us.AppendMessage(convID, roleUser, userText, "", "", nil)
+	userMsg, err := a.appendMessage(handle, us, convID, roleUser, userText, "", "", nil)
 	if err != nil {
 		return conv.ID, "", err
 	}
@@ -1539,7 +1566,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		if trigger > summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 			// Pre-compact: the prompt is over budget before the call. Fold the
 			// older turns (incl. this message) into a summary so the call fits.
-			if cerr := a.compactIfNeeded(ctx, us, conv, p, trigger, prof, false, emit); cerr != nil {
+			if cerr := a.compactIfNeeded(ctx, us, handle, conv, p, trigger, prof, false, emit); cerr != nil {
 				return conv.ID, "", cerr
 			}
 			// The prompt just shrank (or there was nothing to fold) — the
@@ -1585,7 +1612,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 				// too, the error surfaces.
 				compactRetried = true
 				lastUsage = 0
-				if cerr := a.compactIfNeeded(ctx, us, conv, p, 0, prof, true, emit); cerr != nil {
+				if cerr := a.compactIfNeeded(ctx, us, handle, conv, p, 0, prof, true, emit); cerr != nil {
 					return conv.ID, "", err
 				}
 				continue
@@ -1616,7 +1643,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 			// — the model sees why they never ran, and the pair can never
 			// orphan).
 			res.Text = stripLeadingTranscriptTimestamp(res.Text) + stoppedNotice(np)
-			assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+			assistantMsg, err := a.appendMessage(handle, us, convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
 			if err != nil {
 				return conv.ID, "", err
 			}
@@ -1648,7 +1675,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		// RESULT back to the model (the self-healing signal), never a turn
 		// failure.
 		res.Text = stripLeadingTranscriptTimestamp(res.Text)
-		assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+		assistantMsg, err := a.appendMessage(handle, us, convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
 		if err != nil {
 			return conv.ID, "", err
 		}
@@ -1695,7 +1722,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		// and the rate-limit allows — UNLESS the turn is already stopping (then
 		// the next call is text-only and a check-in is moot).
 		if stop, checkin := np.settle(iter); checkin && !stop {
-			if _, err := us.AppendMessage(convID, roleCheckin, checkinText, "", "", nil); err != nil {
+			if _, err := a.appendMessage(handle, us, convID, roleCheckin, checkinText, "", "", nil); err != nil {
 				return conv.ID, "", err
 			}
 		}
@@ -1718,7 +1745,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	// before the reply is persisted (and before it is sent to the client on
 	// the streaming "done" event / returned from Turn).
 	res.Text = stripLeadingTranscriptTimestamp(res.Text)
-	assistantMsg, err := us.AppendMessage(convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
+	assistantMsg, err := a.appendMessage(handle, us, convID, roleAssistant, res.Text, res.Reasoning, res.ReasoningSignature, &modelID)
 	if err != nil {
 		return conv.ID, "", err
 	}
@@ -1742,7 +1769,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 	if res.Usage != nil && res.Usage.TotalTokens > actualTokens {
 		actualTokens = res.Usage.TotalTokens
 	}
-	if cerr := a.compactIfNeeded(ctx, us, conv, p, actualTokens, prof, false, emit); cerr != nil {
+	if cerr := a.compactIfNeeded(ctx, us, handle, conv, p, actualTokens, prof, false, emit); cerr != nil {
 		log.Printf("compact after turn: %v", cerr)
 	}
 	return conv.ID, res.Text, nil
