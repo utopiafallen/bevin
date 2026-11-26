@@ -577,3 +577,28 @@ body.page-chat .column { max-width: none; }
   font-size: 1rem; line-height: 1; cursor: pointer; padding: 0.1rem 0.3rem; border-radius: 4px;
 }
 .ws-file-del:hover { background: var(--border); color: var(--danger); }
+
+/* ---- PWA install prompt (mobile onboarding card) ----
+ * A one-shot recommend-install card: fixed top-center on mobile only
+ * (the JS gates it to the <=839px breakpoint + signed-in + not
+ * standalone + not dismissed; the media query below is the belt).
+ * z 70 = above the rail's floating buttons (z 66). */
+.pwa-prompt {
+  position: fixed; top: 1rem; left: 50%; transform: translateX(-50%);
+  width: min(92%, 23rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: .8rem;
+  box-shadow: 0 6px 22px rgba(51, 41, 28, .14);
+  padding: .65rem .8rem .75rem;
+  z-index: 70;
+}
+.pwa-prompt-head { display: flex; align-items: center; gap: .45rem; }
+.pwa-prompt-head b { flex: 1; font-size: .95rem; }
+.pwa-x {
+  border: none; background: none; color: var(--text-muted);
+  font-size: 1.3rem; line-height: 1; cursor: pointer; padding: 0 .2rem;
+  border-radius: 4px;
+}
+.pwa-x:hover { background: var(--border); color: var(--text); }
+@media (min-width: 840px) { .pwa-prompt { display: none !important; } }

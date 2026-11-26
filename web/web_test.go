@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -25,6 +26,14 @@ func TestBrandAssetsEmbedded(t *testing.T) {
 		"fonts/nunito-variable.woff2",
 		"admin.html",
 		"disk.html",
+		// PWA (stage 1): the installable app shell — manifest, service
+		// worker, and the icon set (any + maskable + iOS touch icon).
+		"manifest.webmanifest",
+		"sw.js",
+		"icon-192.png",
+		"icon-512.png",
+		"icon-maskable-512.png",
+		"apple-touch-icon.png",
 	}
 	for _, p := range want {
 		f, err := FS.Open("static/" + p)
@@ -89,6 +98,50 @@ func TestModelProfileUISurface(t *testing.T) {
 		if !bytes.Contains(page, []byte(want)) {
 			t.Errorf("admin.html missing: %s", want)
 		}
+	}
+}
+
+// TestPwaShellWiring pins the PWA stage-1 wiring in the user page: the
+// manifest link + iOS meta tags, the secure-context service-worker
+// registration, and the install-prompt hook in the signed-in funnel
+// (the prompt must never show a signed-out visitor).
+func TestPwaShellWiring(t *testing.T) {
+	read := func(name string) []byte {
+		t.Helper()
+		f, err := FS.Open("static/" + name)
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		defer f.Close()
+		var b bytes.Buffer
+		if _, err := io.Copy(&b, f); err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return b.Bytes()
+	}
+	page := read("index.html")
+	for _, want := range []string{
+		`<link rel="manifest" href="/manifest.webmanifest">`,
+		`<meta name="apple-mobile-web-app-capable" content="yes">`,
+		`<link rel="apple-touch-icon" href="/apple-touch-icon.png">`,
+		`navigator.serviceWorker.register("/sw.js")`,
+		`refreshPwaPrompt();`,
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Errorf("index.html missing the PWA wiring: %s", want)
+		}
+	}
+	// The SW must keep all API traffic (chat + SSE) out of the cache.
+	if !bytes.Contains(read("sw.js"), []byte(`url.pathname.startsWith("/api/")`)) {
+		t.Error("sw.js missing the /api/ exclusion")
+	}
+	// The manifest must parse and be standalone-installable.
+	var man map[string]any
+	if err := json.Unmarshal(read("manifest.webmanifest"), &man); err != nil {
+		t.Fatalf("manifest.webmanifest is not valid JSON: %v", err)
+	}
+	if man["display"] != "standalone" || man["start_url"] == nil || man["scope"] == nil || man["icons"] == nil {
+		t.Errorf("manifest.webmanifest missing installability fields: %v", man)
 	}
 }
 

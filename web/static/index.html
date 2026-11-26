@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>bevin</title>
+  <!-- PWA (stage 1): installability + offline shell. Web push is paused
+       until the SSE event API lands (see the design log). -->
+  <meta name="theme-color" content="#F2C23C">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1D1912">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="bevin">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/brand.css">
   <link rel="stylesheet" href="/app.css">
@@ -19,6 +28,16 @@
         document.documentElement.setAttribute("data-theme", t);
       } catch (e) { document.documentElement.setAttribute("data-theme", "light"); }
     })();
+  </script>
+  <script>
+    // PWA (stage 1): register the service worker in secure contexts only
+    // (https / localhost — isSecureContext). A plain-HTTP deploy simply
+    // isn't installable; the app works fine without the SW. The SW
+    // intercepts static assets only — /api/* and the SSE stream are
+    // never touched (see sw.js).
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register("/sw.js").catch(function () {});
+    }
   </script>
 </head>
 <body>
@@ -99,6 +118,23 @@
     </aside>
 
     <div class="scrim" id="scrim"></div>
+
+    <!-- PWA install prompt (mobile onboarding): a one-shot card
+         recommending the home-screen install. Shown to a signed-in user
+         on mobile until dismissed (remembered) or the app runs
+         standalone. Chrome/Android fire beforeinstallprompt once the app
+         is installable — the Install button then drives that native
+         prompt; on iOS/Safari the button just acknowledges the
+         Add-to-Home-Screen steps. -->
+    <div id="pwaPrompt" class="pwa-prompt" style="display:none;" role="dialog" aria-label="Install bevin">
+      <div class="pwa-prompt-head">
+        <img src="/logo-mark.svg" alt="" width="24" height="24">
+        <b>Use bevin like an app</b>
+        <button id="pwaDismiss" class="pwa-x" type="button" aria-label="Dismiss">×</button>
+      </div>
+      <p class="muted" id="pwaCopy" style="margin:.2rem 0 .45rem; font-size:.88rem;"></p>
+      <button id="pwaInstall" class="btn btn-primary" type="button" style="font-size:.85rem;"></button>
+    </div>
 
     <main class="main">
       <div class="stage">
@@ -1408,6 +1444,97 @@
       }
     }
 
+    // ---- PWA install prompt (mobile onboarding). A one-shot card
+    // recommending the home-screen install: shown on mobile to a signed-in
+    // user until dismissed (remembered in localStorage) or the app runs
+    // standalone. Chrome/Android fire beforeinstallprompt once the app is
+    // installable (manifest + SW + secure context) — the Install button
+    // then drives that native prompt; iOS/Safari have no native path, so
+    // the button just acknowledges the Add-to-Home-Screen steps.
+    var pwaInstallEvt = null; // the deferred beforeinstallprompt event
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault(); // suppress Chrome's mini-infobar; drive our own card
+      pwaInstallEvt = e;
+      refreshPwaPrompt(); // if the card is showing, upgrade it to native
+    });
+
+    function pwaStandalone() {
+      try {
+        if (navigator.standalone) return true; // iOS
+        if (matchMedia("(display-mode: standalone)").matches) return true;
+      } catch (e) { /* display-mode unsupported */ }
+      return false;
+    }
+
+    function pwaMobile() {
+      return matchMedia("(max-width: 839px)").matches; // the app's mobile breakpoint
+    }
+
+    function pwaIOS() {
+      var ua = navigator.userAgent || "";
+      return /ipad|iphone|ipod/i.test(ua) ||
+        (ua.indexOf("Macintosh") >= 0 && "ontouchstart" in window); // iPadOS 13+
+    }
+
+    function pwaState() { // null | "dismissed"
+      try { return localStorage.getItem("bevin-pwa-prompt"); } catch (e) { return null; }
+    }
+
+    function pwaSetState(v) {
+      try {
+        if (v === null) localStorage.removeItem("bevin-pwa-prompt");
+        else localStorage.setItem("bevin-pwa-prompt", v);
+      } catch (e) { /* private browsing */ }
+    }
+
+    // (Re)evaluate the install card. Called from showChat (the signed-in
+    // funnel) and when beforeinstallprompt arrives.
+    function refreshPwaPrompt() {
+      var card = $("pwaPrompt");
+      if (!card) return;
+      if (!pwaMobile() || pwaStandalone() || pwaState() === "dismissed") {
+        card.style.display = "none";
+        return;
+      }
+      var copy = $("pwaCopy"), btn = $("pwaInstall");
+      if (pwaInstallEvt) {
+        copy.textContent = "Get the home-screen icon: bevin opens instantly and runs full-screen.";
+        btn.textContent = "Install bevin";
+      } else if (pwaIOS()) {
+        copy.textContent = "Tap the Share button in Safari's toolbar, then 'Add to Home Screen'.";
+        btn.textContent = "Got it";
+      } else {
+        copy.textContent = "Get the home-screen icon: bevin opens instantly and runs full-screen.";
+        btn.textContent = "Got it";
+      }
+      card.style.display = "";
+    }
+
+    function pwaHidePrompt() {
+      pwaSetState("dismissed");
+      var card = $("pwaPrompt");
+      if (card) card.style.display = "none";
+    }
+
+    $("pwaDismiss").addEventListener("click", pwaHidePrompt);
+    $("pwaInstall").addEventListener("click", function () {
+      if (pwaInstallEvt) {
+        var evt = pwaInstallEvt;
+        pwaInstallEvt = null;
+        evt.prompt(); // the native install dialog
+        var choice = evt.userChoice;
+        if (choice && choice.then) {
+          choice.then(function (c) {
+            if (c && c.outcome === "dismissed") pwaHidePrompt();
+            // accepted: next launch is standalone, so the card never
+            // shows again (pwaStandalone gates it).
+          });
+        }
+      } else {
+        pwaHidePrompt(); // no native path (iOS / not yet eligible)
+      }
+    });
+
     function showLogin() {
       closeEventChannel(); // signed out — no channel, no pending sync
       $("loginCard").style.display = "";
@@ -1436,6 +1563,7 @@
       $("userName").textContent = "@" + userName();
       setRailAuth(true);
       openEventChannel(); // multi-device sync: this tab's nudge channel (idempotent)
+      refreshPwaPrompt(); // the one-shot install card (mobile, until dismissed)
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       // The select shows the conversation's OWN model (the server default
       // only before it exists) — the model list must land first.
