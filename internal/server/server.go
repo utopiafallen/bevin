@@ -827,14 +827,7 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	writeEvent := func(event string, payload any) error {
-		b, _ := json.Marshal(payload)
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
+	writeEvent := sseEventWriter(w, flusher)
 
 	// The emit callback is called synchronously (same goroutine as TurnStream),
 	// so capturing the final chunk's usage here is race-free.

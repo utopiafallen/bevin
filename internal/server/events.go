@@ -89,6 +89,21 @@ func (h *eventHub) broadcast(handle string, e event) {
 	}
 }
 
+// sseEventWriter returns the event writer for one SSE stream: it formats
+// a single event ("event: <name>\ndata: <json>") and flushes it — the
+// shared wire format of every SSE endpoint here (the turn stream and the
+// per-user nudge channel).
+func sseEventWriter(w http.ResponseWriter, fl http.Flusher) func(string, any) error {
+	return func(name string, payload any) error {
+		b, _ := json.Marshal(payload)
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, b); err != nil {
+			return err
+		}
+		fl.Flush()
+		return nil
+	}
+}
+
 // userEvents is the per-user nudge channel (multi-device sync): one
 // long-lived SSE per signed-in tab. A second tab of the same user — desktop
 // + phone — learns a conversation changed and re-pulls it; the persisted
@@ -108,17 +123,10 @@ func (a *App) userEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Acel-Buffering", "no")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	writeEvent := func(event string, payload any) error {
-		b, _ := json.Marshal(payload)
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
+	writeEvent := sseEventWriter(w, flusher)
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {

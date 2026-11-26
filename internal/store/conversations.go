@@ -267,6 +267,12 @@ func (s *UserStore) AppendMessage(convID, role, content, reasoning, reasoningSig
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("append: commit: %w", err)
 	}
+	if s.AfterAppend != nil {
+		// AFTER the commit: the row is durable, so the observer's view of
+		// it is always consistent. A failed append never fires the hook —
+		// and a hook that blocks or panics can't roll the row back.
+		s.AfterAppend(convID, next)
+	}
 	return &Message{ID: id, ConversationID: convID, Role: role, Content: content, Reasoning: reasoning, ReasoningSignature: reasoningSignature, Seq: next, CreatedAt: now, ModelID: modelID}, nil
 }
 

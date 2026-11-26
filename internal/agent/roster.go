@@ -259,7 +259,7 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 		b.WriteString(nudgeLine + "\n")
 	}
 	text := strings.TrimRight(b.String(), "\n")
-	if _, err := a.appendMessage(handle, us, convID, roleCheckin, text, "", "", nil); err != nil {
+	if _, err := us.AppendMessage(convID, roleCheckin, text, "", "", nil); err != nil {
 		return err
 	}
 	// The snapshot tracks what was ANNOUNCED about the siblings (the

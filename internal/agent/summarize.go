@@ -158,7 +158,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, handle
 		return nil
 	}
 	modelID := conv.ActiveModelID
-	msg, err := a.appendMessage(handle, us, conv.ID, roleSummary, summary, "", "", &modelID)
+	msg, err := us.AppendMessage(conv.ID, roleSummary, summary, "", "", &modelID)
 	if err != nil {
 		return err
 	}

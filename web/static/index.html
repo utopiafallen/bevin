@@ -1599,6 +1599,30 @@
     var syncPending = false;       // a sync is owed but deferred (off the chat page, or reading older history)
     var historyNewestSeq = null;   // the newest rendered seq (a nudge at/under it is already on screen)
 
+    // True when the open-conversation sync pull may touch the view: a
+    // conversation is open, we're on the chat page, and no local stream
+    // owns the tail (a stream syncs when it ends).
+    function syncReady() {
+      return !!(convID && page === "chat" && !streamingConvs[convID]);
+    }
+    // Is the chat window at the bottom (within th px)? — the "is the user
+    // following" measure for the sync pull (80 px: a little slack past the
+    // streaming follow's 60 px, so a nudge never yanks a near-bottom view).
+    function chatAtBottom(th) {
+      var el = $("chatScroll");
+      return el.scrollHeight - el.scrollTop - el.clientHeight < th;
+    }
+    // The last user bubble in the log (the newest user row — history rows
+    // carry their seq tag, so an untagged one is this turn's optimistic
+    // row, the self-heal's adoption candidate).
+    function lastUserRow() {
+      var log = $("chatLog");
+      for (var i = log.children.length - 1; i >= 0; i--) {
+        if (log.children[i].className === "msg msg-user") return log.children[i];
+      }
+      return null;
+    }
+
     // Opens the tab's nudge channel (once per sign-in; idempotent).
     function openEventChannel() {
       if (!me || evSource) return;
@@ -1642,7 +1666,7 @@
     // (the user row, each assistant iteration, the reply) — one pull per
     // burst, not per row.
     function scheduleSync() {
-      if (!convID || page !== "chat" || streamingConvs[convID]) {
+      if (!syncReady()) {
         // Off the chat page, or a local stream owns the tail (it syncs
         // when it ends) — apply the sync on the way back.
         syncPending = true;
@@ -1661,9 +1685,8 @@
     // older history is deferred until they return to the bottom.
     async function doSync() {
       if (syncTimer) { clearTimeout(syncTimer); syncTimer = 0; }
-      if (!convID || page !== "chat" || streamingConvs[convID]) { syncPending = true; return; }
-      var el = $("chatScroll");
-      var wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      if (!syncReady()) { syncPending = true; return; }
+      var wasAtBottom = chatAtBottom(80);
       if (!wasAtBottom) { syncPending = true; return; } // don't yank them to the bottom
       syncPending = false;
       try {
@@ -1673,7 +1696,7 @@
         // The view may have moved while the pull was in flight (a
         // conversation switch, a stream that started) — re-check before
         // touching it.
-        if (!convID || page !== "chat" || streamingConvs[convID]) return;
+        if (!syncReady()) return;
         var msgs = d.messages || [];
         var log = $("chatLog");
         var wasEmpty = !log.querySelector("[data-seq]"); // no persisted rows on screen yet
@@ -1685,10 +1708,7 @@
             // errored turn: the user row is persisted, but the done event
             // that would tag it never came): adopt it instead of
             // duplicating (persisted user rows are verbatim).
-            var lastUser = null;
-            for (var i = log.children.length - 1; i >= 0; i--) {
-              if (log.children[i].className === "msg msg-user") { lastUser = log.children[i]; break; }
-            }
+            var lastUser = lastUserRow();
             if (lastUser && !lastUser.getAttribute("data-seq")) {
               var bubble = lastUser.querySelector(".bubble");
               if (bubble && bubble.textContent === m.content) {
@@ -1726,10 +1746,7 @@
       if (!seqs || !seqs.length) return;
       var log = $("chatLog");
       var kids = log.children;
-      var userRow = null;
-      for (var i = kids.length - 1; i >= 0; i--) {
-        if (kids[i].className === "msg msg-user") { userRow = kids[i]; break; }
-      }
+      var userRow = lastUserRow();
       if (!userRow) return;
       var cands = [userRow];
       for (var j = Array.prototype.indexOf.call(kids, userRow) + 1; j < kids.length; j++) {
@@ -1918,7 +1935,7 @@
       }
       // The user returned to the bottom: apply a sync that was deferred
       // while they were reading older history.
-      if (syncPending && el.scrollHeight - el.scrollTop - el.clientHeight < 80) {
+      if (syncPending && chatAtBottom(80)) {
         doSync();
       }
     });

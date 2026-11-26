@@ -29,6 +29,18 @@ import (
 type UserStore struct {
 	db  *sql.DB
 	dir string
+
+	// AfterAppend, if non-nil, is called after every successfully committed
+	// AppendMessage, with the conversation id and the persisted row's seq.
+	// It is a lifecycle hook for layers above the store (the agent sets it
+	// to fire the multi-device sync nudge — the store stays agnostic to
+	// what the callback does). It runs synchronously in the caller's
+	// goroutine with no store lock held, and it must be safe for concurrent
+	// calls (parallel turns append to the same store): it must not block —
+	// a stalled observer must never hold up a turn — and its outcome does
+	// not affect the append (the row is already committed; a hook failure
+	// is the observer's problem, never an append failure).
+	AfterAppend func(convID string, seq int)
 }
 
 // OpenUser opens (creating if needed) a user's bevin.db under dir.
