@@ -19,12 +19,28 @@ import (
 //
 // fakeContainerBackend is an in-memory sandbox.Backend (no real container):
 // the file tools are tested against it exactly as they run against the
-// platform backends.
+// platform backends. The exec/ensure recording serves the exec tool's tests
+// (auto-ensure ordering, the timeout diagnostic, the failure results).
 type fakeContainerBackend struct {
 	mu         sync.Mutex
 	fs         map[string][]byte
 	dataDir    string
 	notRunning bool
+
+	ensureCalls int
+	ensureErr   error
+	execCalls   []fakeExecCall
+	execResult  sandbox.Result
+	execErr     error
+}
+
+// fakeExecCall is one recorded ExecIn (the exec tool's tests assert the
+// auto-ensure ordering and the timeout/cwd plumbing).
+type fakeExecCall struct {
+	Handle  string
+	Command string
+	Cwd     string
+	Timeout time.Duration
 }
 
 func newFakeContainerBackend() *fakeContainerBackend {
@@ -34,14 +50,26 @@ func newFakeContainerBackend() *fakeContainerBackend {
 func (f *fakeContainerBackend) Runtime(context.Context) sandbox.Runtime {
 	return sandbox.Runtime{OK: true, Detail: "fake"}
 }
-func (f *fakeContainerBackend) Ensure(context.Context, string) (sandbox.Info, error) {
-	return sandbox.Info{Handle: "u1", State: sandbox.StateRunning}, nil
+func (f *fakeContainerBackend) Ensure(_ context.Context, handle string) (sandbox.Info, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureCalls++
+	if f.ensureErr != nil {
+		return sandbox.Info{}, f.ensureErr
+	}
+	return sandbox.Info{Handle: handle, State: sandbox.StateRunning}, nil
 }
-func (f *fakeContainerBackend) Exec(context.Context, string, string, time.Duration) (sandbox.Result, error) {
-	return sandbox.Result{}, nil
+func (f *fakeContainerBackend) Exec(ctx context.Context, handle, command string, timeout time.Duration) (sandbox.Result, error) {
+	return f.ExecIn(ctx, handle, command, "", timeout)
 }
-func (f *fakeContainerBackend) ExecIn(context.Context, string, string, string, time.Duration) (sandbox.Result, error) {
-	return sandbox.Result{}, nil
+func (f *fakeContainerBackend) ExecIn(_ context.Context, handle, command, cwd string, timeout time.Duration) (sandbox.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execCalls = append(f.execCalls, fakeExecCall{Handle: handle, Command: command, Cwd: cwd, Timeout: timeout})
+	if f.execErr != nil {
+		return sandbox.Result{}, f.execErr
+	}
+	return f.execResult, nil
 }
 func (f *fakeContainerBackend) ReadFile(_ context.Context, _, p string) ([]byte, error) {
 	f.mu.Lock()

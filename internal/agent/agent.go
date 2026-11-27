@@ -180,6 +180,12 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerWorkspaceTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register workspace tools: %w", err)
 	}
+	// exec (the design log's AGENT SANDBOX TOOL section): the blocking
+	// one-shot command in the user's persistent environment (auto-ensured
+	// on first use; a non-zero exit is a result, not an error).
+	if err := registerExecTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register exec: %w", err)
+	}
 	// The memory tools (the memory model's on-demand surface: recall /
 	// remember / forget over the user's P5 memories).
 	if err := registerMemoryTools(a.tools, a); err != nil {

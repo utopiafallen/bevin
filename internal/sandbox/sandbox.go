@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -40,6 +41,14 @@ var ErrDisabled = errors.New("sandbox: not supported on this platform")
 
 // ErrNotRunning is returned by Exec when the user's container is not up.
 var ErrNotRunning = errors.New("sandbox: the user's container is not running")
+
+// IsExecTimeout reports whether err is an Exec/ExecIn timeout (the command
+// was killed for exceeding its deadline — as opposed to an infrastructure
+// failure). Both backends report the timeout with this wording; the agent's
+// exec tool uses this as its single classifier for the timeout diagnostic.
+func IsExecTimeout(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "exec timed out after")
+}
 
 // ErrFileNotFound is returned by ReadFile when the container has no such
 // file (wrapped, with the path).
