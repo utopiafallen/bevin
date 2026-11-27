@@ -118,12 +118,22 @@ func (l *Llama) slotCount(ctx context.Context) int {
 	return n
 }
 
-// prepareSlotCache pins a conversation's turn to a slot and, if the slot's
-// last conversation differs from this one, saves the old conversation's cache
-// and restores this one's (both best-effort). It returns the slot to pin the
-// request to (via id_slot), or -1 when there is no conversation (a meta-call,
-// which carries no ConversationID and has no cache).
-func (l *Llama) prepareSlotCache(ctx context.Context, convID string) int {
+// cacheHitThreshold is the minimum fraction of the outgoing request that must
+// already be present in the slot's KV cache for bevin to reuse the slot's
+// current cache as-is (no restore). Below it the slot's cache is stale or a
+// different conversation, so bevin loads the conversation's own cache first.
+const cacheHitThreshold = 0.5
+
+// prepareSlotCache pins a conversation's turn to a slot and decides whether to
+// load the conversation's KV cache. It asks the server how much of the outgoing
+// request is already cached in the slot (checkRequestCacheHit); when that is
+// above cacheHitThreshold the slot's current cache is reused as-is, otherwise
+// (stale/different conversation, or the check failed — fall back to the safe
+// load) bevin saves the slot's current conversation (if a different one) and
+// loads this conversation's cache. Both are best-effort. It returns the slot to
+// pin the request to (via id_slot), or -1 when there is no conversation (a
+// meta-call, which carries no ConversationID and has no cache).
+func (l *Llama) prepareSlotCache(ctx context.Context, convID string, ocr oaiChatRequest) int {
 	if convID == "" {
 		return -1
 	}
@@ -132,17 +142,63 @@ func (l *Llama) prepareSlotCache(ctx context.Context, convID string) int {
 	sc.mu.Lock()
 	slot := l.assignSlotLocked(sc, convID, numSlots)
 	last := sc.slotLast[slot]
-	needSave := last != "" && last != convID
-	needRestore := last != convID
 	sc.slotLast[slot] = convID
 	sc.mu.Unlock()
-	if needSave {
-		l.saveSlotCache(ctx, slot, cacheFile(last))
-	}
-	if needRestore {
+
+	// How much of the outgoing request is already cached in this slot?
+	ratio, ok := l.checkRequestCacheHit(ctx, slot, ocr)
+	// Reuse the slot's current cache only when it already matches this request
+	// well enough. Otherwise (stale/different conversation, or the check failed
+	// — fall back to the safe load) load the conversation's own cache.
+	if !ok || ratio <= cacheHitThreshold {
+		// Persist the conversation currently in the slot before overwriting it.
+		if last != "" && last != convID {
+			l.saveSlotCache(ctx, slot, cacheFile(last))
+		}
 		l.restoreSlotCache(ctx, slot, cacheFile(convID))
 	}
 	return slot
+}
+
+// checkRequestCacheHit asks the llama server how much of the outgoing request is
+// already present in the slot's current KV cache (POST
+// /slots/{slot}?action=cache-hit). The server renders the request exactly as a
+// chat completion and reports the fraction (n_match/n_total) already cached —
+// the same prefix match llama.cpp uses to pick a slot for a request.
+// Best-effort: it returns (0, false) on any failure (a server without the
+// action, a network error, or a malformed response) so the caller falls back to
+// loading the conversation's cache.
+func (l *Llama) checkRequestCacheHit(ctx context.Context, slot int, ocr oaiChatRequest) (float64, bool) {
+	body, err := json.Marshal(ocr)
+	if err != nil {
+		return 0, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, fmt.Sprintf("%s/slots/%d?action=cache-hit", l.serverRoot(), slot), strings.NewReader(string(body)))
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	l.authorize(req)
+	resp, err := l.HTTP.Do(req)
+	if err != nil {
+		log.Printf("bevin: llama cache-hit check failed (slot %d): %v", slot, err)
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("bevin: llama cache-hit check failed (slot %d): status %d", slot, resp.StatusCode)
+		return 0, false
+	}
+	var out struct {
+		Ratio float64 `json:"ratio"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		log.Printf("bevin: llama cache-hit check failed (slot %d): bad response: %v", slot, err)
+		return 0, false
+	}
+	return out.Ratio, true
 }
 
 // assignSlotLocked returns a conversation's slot, assigning one if needed.

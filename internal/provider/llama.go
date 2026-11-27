@@ -59,7 +59,7 @@ func (l *Llama) Chat(ctx context.Context, model string, req ChatRequest) (*Resul
 	// Pin the conversation to a slot + manage its KV cache (save/restore,
 	// best-effort). Meta-calls carry no ConversationID, so this is a no-op
 	// for them.
-	slot := l.prepareSlotCache(ctx, req.ConversationID)
+	slot := l.prepareSlotCache(ctx, req.ConversationID, ocr)
 	if slot >= 0 {
 		ocr.SlotID = &slot
 	}
@@ -80,7 +80,7 @@ func (l *Llama) Stream(ctx context.Context, model string, req ChatRequest, emit 
 	}
 	// Pin the conversation to a slot + manage its KV cache (best-effort); a
 	// no-op for meta-calls (no ConversationID).
-	slot := l.prepareSlotCache(ctx, req.ConversationID)
+	slot := l.prepareSlotCache(ctx, req.ConversationID, ocr)
 	if slot >= 0 {
 		ocr.SlotID = &slot
 	}
