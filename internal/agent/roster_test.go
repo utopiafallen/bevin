@@ -242,7 +242,7 @@ func TestPurposeNudge(t *testing.T) {
 		t.Fatalf("purpose row = %+v", got)
 	}
 	// Bad args are results, not errors.
-	if out, _ := tl.Execute(tctx, "u1", []byte(`{"purpose":"  "}`)); !strings.Contains(out, "one-line") {
+	if out, _ := tl.Execute(tctx, "u1", []byte(`{"purpose":"  "}`)); !strings.Contains(out, "set_purpose needs") {
 		t.Fatalf("blank purpose result = %q", out)
 	}
 	if out, _ := tl.Execute(tctx, "u1", []byte(`{"purpose":"`+strings.Repeat("x", 201)+`"}`)); !strings.Contains(out, "too long") {

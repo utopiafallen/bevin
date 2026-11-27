@@ -227,7 +227,7 @@ func (a *Agent) announceTurnStart(us *store.UserStore, handle, convID string, se
 	var nudgeLine string
 	if due, turns := a.purposeNudgeDue(convID); due {
 		if self.Purpose == "" {
-			nudgeLine = "PURPOSE CHECK: this conversation has no stated purpose — call set_purpose to state it (one line). It labels this conversation in the user's chat list and on your siblings' roster."
+			nudgeLine = "PURPOSE CHECK: this conversation has no stated purpose — call set_purpose to state it (a short phrase, goal-first). It labels this conversation in the user's chat list and on your siblings' roster."
 		} else {
 			nudgeLine = fmt.Sprintf("PURPOSE CHECK: the stated purpose is %d turns old — if what this conversation is doing has drifted, call set_purpose to refresh it.", turns)
 		}

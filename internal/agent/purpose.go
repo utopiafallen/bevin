@@ -8,11 +8,12 @@ import (
 )
 
 // set_purpose (concurrent-instances, layer 2): the model's self-report of
-// what this conversation is doing — the one-line rolling purpose the roster
-// shows to the user's sibling conversations (a collision with a parallel
-// conversation is a one-glance call). The cadence nudge is the only thing
-// that asks for it; this call is the sole updater (staleness is visible via
-// the nudge's "N turns old" wording and the roster's title fallback).
+// this conversation's GOAL — a short, goal-first phrase (a few words, not
+// a sentence) that doubles as the user's list label (rendered in place of
+// the title) and the roster line shown to sibling conversations (a
+// collision with a parallel conversation is a one-glance call). The
+// cadence nudge is the only thing that asks for it; the call is the sole
+// updater (staleness is visible via the nudge's "N turns old" wording).
 type purposeArgs struct {
 	Purpose string `json:"purpose"`
 	Topic   string `json:"topic"`
@@ -23,13 +24,13 @@ const maxPurposeLen = 200
 func registerPurposeTool(r *ToolRegistry, a *Agent) error {
 	return r.Register(Tool{
 		Name:        "set_purpose",
-		Description: "State what this conversation is doing (one line) — the user's other conversations see it in their roster. Call it when a purpose check asks, or when the conversation's intent shifts.",
+		Description: "Set this conversation's purpose: a short phrase, goal-first (a few words, not a sentence) — it becomes the conversation's label in the user's chat list and its siblings' rosters. Call it when a purpose check asks, or when the goal shifts.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"purpose": map[string]any{
 					"type":        "string",
-					"description": "one line: what this conversation is doing right now",
+					"description": "short phrase, goal-first — e.g. \"research reflux remedies\"",
 				},
 				"topic": map[string]any{
 					"type":        "string",
@@ -53,10 +54,10 @@ func (a *Agent) execSetPurpose(ctx context.Context, handle string, args json.Raw
 	}
 	purpose := strings.TrimSpace(pa.Purpose)
 	if purpose == "" {
-		return "set_purpose needs a one-line \"purpose\".", nil
+		return "set_purpose needs a short \"purpose\" phrase.", nil
 	}
 	if len(purpose) > maxPurposeLen {
-		return fmt.Sprintf("purpose is too long (%d chars, max %d) — one line only.", len(purpose), maxPurposeLen), nil
+		return fmt.Sprintf("purpose is too long (%d chars, max %d) — a short phrase, goal-first.", len(purpose), maxPurposeLen), nil
 	}
 	topic := strings.TrimSpace(pa.Topic)
 	if len(topic) > 100 {
@@ -75,5 +76,5 @@ func (a *Agent) execSetPurpose(ctx context.Context, handle string, args json.Raw
 	if a.NotifyConversation != nil {
 		a.NotifyConversation(handle, convID)
 	}
-	return "purpose updated — your siblings see it in the roster from their next turn.", nil
+	return "purpose updated — it is now the conversation's label.", nil
 }
