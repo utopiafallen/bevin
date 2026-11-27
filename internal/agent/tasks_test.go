@@ -243,7 +243,7 @@ func TestTaskQueuedCancel(t *testing.T) {
 	turnDone := make(chan struct{})
 	go func() {
 		defer close(turnDone)
-		a.Turn(context.Background(), "u1", conv, "a long interactive turn")
+		a.Turn(context.Background(), "u1", conv, "a long interactive turn", nil)
 	}()
 	waitFor(t, func() bool { return gp.callCount() >= 1 }, "the interactive turn to hold m1's only slot")
 

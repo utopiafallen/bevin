@@ -93,7 +93,7 @@ func TestRosterFirstTurnAndDelta(t *testing.T) {
 	ctx := context.Background()
 
 	// Turn 1: the full roster (Beta with its purpose + conv id).
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, ca.ID)
@@ -125,7 +125,7 @@ func TestRosterFirstTurnAndDelta(t *testing.T) {
 	}
 
 	// Turn 2: nothing changed — no new announcement.
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again", nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := countCheckins(t, us, ca.ID); n != 1 {
@@ -136,7 +136,7 @@ func TestRosterFirstTurnAndDelta(t *testing.T) {
 	if err := us.SetConversationSummary(cb.ID, "refactoring the billing module", "billing"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "third"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "third", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)
@@ -148,7 +148,7 @@ func TestRosterFirstTurnAndDelta(t *testing.T) {
 	if err := us.DeleteConversation(cb.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "fourth"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "fourth", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)
@@ -167,7 +167,7 @@ func TestRosterInflightState(t *testing.T) {
 
 	// Beta is mid-turn (a concurrent runTurn in flight).
 	a.enterInflight("u1", cb.ID)
-	if _, _, err := a.Turn(context.Background(), "u1", ca.ID, "hi"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", ca.ID, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, ca.ID)
@@ -180,7 +180,7 @@ func TestRosterInflightState(t *testing.T) {
 	if a.isInflight("u1", ca.ID) {
 		t.Fatal("Alpha must not be in-flight before its turn")
 	}
-	if _, _, err := a.Turn(context.Background(), "u1", ca.ID, "again"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", ca.ID, "again", nil); err != nil {
 		t.Fatal(err)
 	}
 	if a.isInflight("u1", ca.ID) {
@@ -201,7 +201,7 @@ func TestPurposeNudge(t *testing.T) {
 	// else — a NEW announcement with a purpose check is the failure).
 	for i := 1; i <= 6; i++ {
 		before := countCheckins(t, us, ca.ID)
-		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i), nil); err != nil {
 			t.Fatal(err)
 		}
 		if countCheckins(t, us, ca.ID) > before {
@@ -212,7 +212,7 @@ func TestPurposeNudge(t *testing.T) {
 		}
 	}
 	// Turn 7: due — no purpose yet.
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t7"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t7", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, ca.ID)
@@ -253,14 +253,14 @@ func TestPurposeNudge(t *testing.T) {
 	// roster is unchanged); turn 14: due again, worded by staleness.
 	for i := 8; i <= 13; i++ {
 		before := countCheckins(t, us, ca.ID)
-		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i), nil); err != nil {
 			t.Fatal(err)
 		}
 		if after := countCheckins(t, us, ca.ID); after != before {
 			t.Fatalf("turn %d: unexpected announcement: %q", i, lastCheckin(t, us, ca.ID))
 		}
 	}
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t14"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t14", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)
@@ -279,7 +279,7 @@ func TestPurposeNudge(t *testing.T) {
 			betaID = c.ID
 		}
 	}
-	if _, _, err := a.Turn(ctx, "u1", betaID, "beta turn"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", betaID, "beta turn", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, betaID)
@@ -300,7 +300,7 @@ func TestPurposeNudgeNoSiblings(t *testing.T) {
 
 	// Turns 1-6: nothing at all (no siblings, nudge not yet due).
 	for i := 1; i <= 6; i++ {
-		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i), nil); err != nil {
 			t.Fatal(err)
 		}
 		if ci := lastCheckin(t, us, ca.ID); ci != "" {
@@ -308,7 +308,7 @@ func TestPurposeNudgeNoSiblings(t *testing.T) {
 		}
 	}
 	// Turn 7: the nudge, ALONE (no siblings → no roster section).
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t7"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t7", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, ca.ID)
@@ -332,14 +332,14 @@ func TestPurposeNudgeNoSiblings(t *testing.T) {
 	// Turns 8-13: quiet again; turn 14: the staleness nudge, alone.
 	for i := 8; i <= 13; i++ {
 		before := countCheckins(t, us, ca.ID)
-		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i)); err != nil {
+		if _, _, err := a.Turn(ctx, "u1", ca.ID, fmt.Sprintf("t%d", i), nil); err != nil {
 			t.Fatal(err)
 		}
 		if after := countCheckins(t, us, ca.ID); after != before {
 			t.Fatalf("turn %d: unexpected announcement: %q", i, lastCheckin(t, us, ca.ID))
 		}
 	}
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t14"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "t14", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)
@@ -403,7 +403,7 @@ func TestAgentMessageQueueAndDelivery(t *testing.T) {
 	// Beta's next user turn: the message is delivered in the announcement
 	// (the delivery section IS the never-silent guarantee — the roster is
 	// presence-only, no per-line pending notes) + marked delivered.
-	if _, _, err := a.Turn(ctx, "u1", cb.ID, "hi"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", cb.ID, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, cb.ID)
@@ -445,7 +445,7 @@ func TestRosterPresenceOnly(t *testing.T) {
 	// Grace 0: anything with past activity is idle → the roster is empty
 	// → all idle means nothing announced.
 	rosterQuietGrace = 0
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	if ci := lastCheckin(t, us, ca.ID); ci != "" {
@@ -455,7 +455,7 @@ func TestRosterPresenceOnly(t *testing.T) {
 	// Beta is running right now → present regardless of grace (the
 	// in-flight flag beats the quiet window).
 	a.enterInflight("u1", cb.ID)
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci := lastCheckin(t, us, ca.ID)
@@ -466,7 +466,7 @@ func TestRosterPresenceOnly(t *testing.T) {
 
 	// Beta went idle → the departure is announced once as went-idle (NOT
 	// no-longer-exists — the conversation still exists).
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 2"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 2", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)
@@ -475,7 +475,7 @@ func TestRosterPresenceOnly(t *testing.T) {
 	}
 	// ...and not re-announced on the next turn (still absent, nothing new).
 	before := countCheckins(t, us, ca.ID)
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 3"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 3", nil); err != nil {
 		t.Fatal(err)
 	}
 	if after := countCheckins(t, us, ca.ID); after != before {
@@ -487,7 +487,7 @@ func TestRosterPresenceOnly(t *testing.T) {
 	if _, err := us.AppendMessage(cb.ID, roleUser, "ping", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 4"); err != nil {
+	if _, _, err := a.Turn(ctx, "u1", ca.ID, "hi again 4", nil); err != nil {
 		t.Fatal(err)
 	}
 	ci = lastCheckin(t, us, ca.ID)

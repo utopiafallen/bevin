@@ -219,9 +219,20 @@
               <!-- The composer is a textarea (not an input): Enter sends,
                    Shift+Enter inserts a newline; it word-wraps and grows
                    down the page up to a fixed cap, then scrolls. -->
+              <!-- The attachment preview: the images staged for the NEXT
+                   send (vision only — hidden while there are none). The
+                   file input lives OUTSIDE the form below: an Enter in an
+                   in-form file input would submit the message. -->
+              <div id="attachPreview" hidden></div>
               <textarea id="message" rows="1" placeholder="Say something&hellip;" autocomplete="off"></textarea>
-              <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
+              <div class="chat-actions">
+                <button type="button" class="btn" id="attachBtn" title="Attach an image" aria-label="Attach an image" hidden>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                </button>
+                <button class="btn btn-primary" id="sendBtn" type="submit">Send</button>
+              </div>
             </form>
+            <input type="file" id="attachInput" accept="image/*" multiple hidden>
           </section>
 
           <!-- The dedicated search page: searches everything bevin has on
@@ -492,7 +503,7 @@
       if (log) log.scrollTop = log.scrollHeight;
     }
 
-    function addUserMsg(text, iso) {
+    function addUserMsg(text, iso, imgs) {
       var m = document.createElement("div");
       m.className = "msg msg-user";
       m.innerHTML = '<div class="msg-head"><span class="who"></span><span class="when"></span></div><div class="bubble md-bubble"></div>';
@@ -505,6 +516,25 @@
       // assistant's bubbles): a single newline is a line break (chat
       // style), so a Shift+Enter line shows as a line.
       BevinMD.render(text, m.querySelector(".bubble"));
+      // The send's attachments render as a thumb grid under the text
+      // (session-only — see the .msg-attach note in app.css).
+      if (imgs && imgs.length) {
+        var grid = document.createElement("div");
+        grid.className = "msg-attach";
+        imgs.forEach(function (im) {
+          var a = document.createElement("a");
+          a.href = im.dataURL;
+          a.target = "_blank";
+          a.rel = "noopener";
+          var i = document.createElement("img");
+          i.src = im.dataURL;
+          i.alt = im.name || "image";
+          i.title = im.name || "";
+          a.appendChild(i);
+          grid.appendChild(a);
+        });
+        m.querySelector(".bubble").appendChild(grid);
+      }
       $("chatLog").appendChild(m);
       if (!noAutoScroll) $("chatScroll").scrollTop = $("chatScroll").scrollHeight;
     }
@@ -789,6 +819,10 @@
         var j = await r.json();
         models = j.models || [];
         defaultModelID = j.default || "";
+        // vision: a vision aux model is configured (the image_analyze tool
+        // is offered) — the composer's attachment affordances render from
+        // this (no vision = the attach button stays hidden).
+        setVisionAvailable(!!j.vision);
       } catch (e) { /* model list is best-effort */ }
     }
 
@@ -1166,6 +1200,112 @@
       return false;
     }
 
+    // ---- Image attachments (the aux perception loop, stage 1) ----
+    // Available ONLY when the server reports a vision aux model
+    // (/api/models "vision" — the image_analyze tool is then offered to
+    // the model). Staged images ride the NEXT send (they are not part of
+    // the composer text): an image-only message is a valid send. The bytes
+    // live in memory as data URLs (the preview and the request body reuse
+    // the same string); they are never persisted — the image_analyze tool
+    // result (the description) is the persistent record.
+    var visionAvailable = false;
+    var pendingImages = []; // [{name, mime, dataURL}]
+    var imagesReading = 0;  // files still being decoded (the 4-cap counts them)
+
+    function setVisionAvailable(v) {
+      visionAvailable = !!v;
+      var btn = $("attachBtn");
+      if (btn) btn.hidden = !visionAvailable;
+      if (!visionAvailable && pendingImages.length) clearPendingImages();
+    }
+
+    function clearPendingImages() {
+      pendingImages = [];
+      imagesReading = 0;
+      var fi = $("attachInput");
+      if (fi) fi.value = "";
+      renderAttachPreview();
+    }
+
+    function renderAttachPreview() {
+      var p = $("attachPreview");
+      if (!p) return;
+      p.hidden = pendingImages.length === 0;
+      p.innerHTML = "";
+      pendingImages.forEach(function (im, i) {
+        var t = document.createElement("div");
+        t.className = "attach-thumb";
+        var a = document.createElement("a");
+        a.href = im.dataURL;
+        a.target = "_blank";
+        a.rel = "noopener";
+        var img = document.createElement("img");
+        img.src = im.dataURL;
+        img.alt = im.name || "attachment";
+        a.appendChild(img);
+        t.appendChild(a);
+        var name = document.createElement("span");
+        name.className = "attach-name";
+        name.textContent = im.name || "image";
+        t.appendChild(name);
+        var x = document.createElement("button");
+        x.type = "button";
+        x.className = "attach-x";
+        x.title = "Remove";
+        x.setAttribute("aria-label", "Remove attachment");
+        x.textContent = "×";
+        x.addEventListener("click", function () {
+          pendingImages.splice(i, 1);
+          renderAttachPreview();
+        });
+        t.appendChild(x);
+        p.appendChild(t);
+      });
+    }
+
+    // Stage image files (the attach button, a paste, or a drag-and-drop).
+    // The client contract (the server enforces the same): image/* only,
+    // at most 4 per message, at most 8 MiB each. A rejected file is a
+    // transient note; the accepted ones still stage.
+    function addImageFiles(list) {
+      if (!visionAvailable) return;
+      var files = [];
+      Array.prototype.forEach.call(list || [], function (f) { files.push(f); });
+      files.forEach(function (f) {
+        if (!f || !/^image\//.test(f.type || "")) {
+          addErrorMsg("⚠ Only images can be attached" + (f ? " (" + f.name + ")" : "") + ".");
+          return;
+        }
+        if (f.size > 8 * 1024 * 1024) {
+          addErrorMsg("⚠ " + f.name + " is over the 8 MiB image limit.");
+          return;
+        }
+        if (pendingImages.length + imagesReading >= 4) {
+          addErrorMsg("⚠ At most 4 images per message.");
+          return;
+        }
+        imagesReading++;
+        var reader = new FileReader();
+        reader.onload = function () {
+          imagesReading--;
+          pendingImages.push({ name: f.name || "image", mime: f.type || "image/png", dataURL: reader.result });
+          renderAttachPreview();
+        };
+        reader.onerror = function () {
+          imagesReading--;
+          addErrorMsg("⚠ Could not read " + f.name + ".");
+        };
+        reader.readAsDataURL(f);
+      });
+    }
+
+    // The transcript text of an image-only message (must match the
+    // server's stored marker, so the optimistic bubble and the persisted
+    // row — and the model's wire — all agree).
+    function attachedMarker(n) {
+      return n === 1 ? "(1 image attached)" : "(" + n + " images attached)";
+    }
+
     async function sendChat() {
       // Double-send guard: block only if THIS conversation already has an
       // in-flight turn (a different conversation streaming doesn't block a
@@ -1173,18 +1313,30 @@
       if (convID && streamingConvs[convID]) return;
       var input = $("message");
       var text = input.value.trim();
-      if (!text) return;
+      var images = pendingImages; // the staged attachments (vision only)
+      if (!text && !images.length) return;
       // Guard the whole send against a broken page state (a mid-transition
       // DOM where the chat log is gone): bail WITHOUT consuming the text so
       // the user can retry, instead of crashing into a stuck state.
       if (!$("chatLog")) return;
       input.value = "";
       fitMsgInput(); // back to one line (a programmatic clear fires no input event)
+      // A snapshot of the send's images: the composer's staging clears
+      // now (the send either takes them or restores them), and the
+      // request body is built from this copy.
+      var sentImages = images.slice();
+      clearPendingImages();
+      // The optimistic bubble matches what the server persists: an
+      // image-only message carries the marker text (the bytes are never
+      // persisted — the image_analyze tool result is the record).
+      var userText = text || attachedMarker(sentImages.length);
       try {
-        addUserMsg(text, new Date().toISOString());
+        addUserMsg(userText, new Date().toISOString(), sentImages);
       } catch (e) {
         input.value = text;
         fitMsgInput();
+        pendingImages = sentImages; // the render failed: restore the staging
+        renderAttachPreview();
         return;
       }
       $("sendBtn").disabled = true;
@@ -1211,7 +1363,7 @@
         if (!convID) {
           // The title comes from the FIRST line (a multi-line message
           // would otherwise embed newlines in the conversation list).
-          var firstLine = text.split("\n")[0];
+          var firstLine = userText.split("\n")[0];
           var title = firstLine.length > 40 ? firstLine.slice(0, 40) + "…" : firstLine;
           var effortSel = $("effortSelect");
           var cr = await fetch("/api/conversations", {
@@ -1247,10 +1399,23 @@
         streamConvID = convID;
         streamingConvs[convID] = true;
         streamAborts[convID] = ac;
+        // The payload: the text ("" for an image-only send) + the staged
+        // images as raw base64 (the data: prefix is stripped — the server
+        // wants bare base64).
+        var payload = { message: text };
+        if (sentImages.length) {
+          payload.images = sentImages.map(function (im) {
+            return {
+              name: im.name,
+              mime_type: im.mime,
+              data: im.dataURL.slice(im.dataURL.indexOf(",") + 1)
+            };
+          });
+        }
         var resp = await fetch("/api/conversations/" + convID + "/messages/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text }),
+          body: JSON.stringify(payload),
           signal: ac.signal
         });
         if (await diskRedirect(resp)) throw new Error("disk exceeded");
@@ -2063,6 +2228,7 @@
       historyHasMore = false;
       historyLoading = false;
       pendingModelID = "";
+      clearPendingImages(); // staged attachments belong to the conversation they were composed in
       buildModelSelect(null, "");
       updateCtx(0, 0);
       addNote("New conversation started.");
@@ -2534,6 +2700,7 @@
       if (old && old !== id) abortStream(old);
       convID = id;
       pendingModelID = "";
+      clearPendingImages(); // staged attachments belong to the conversation they were composed in
       $("sendBtn").disabled = !!(convID && streamingConvs[convID]);
       try { localStorage.setItem("bevin-conv", id); } catch (e) {}
       $("chatLog").innerHTML = "";
@@ -2578,6 +2745,46 @@
       el.style.height = el.scrollHeight + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) + "px";
     }
     $("message").addEventListener("input", fitMsgInput);
+
+    // ---- Image attachments: the input surfaces (vision only) ----
+    // The attach button opens the file picker. The <input> lives OUTSIDE
+    // the form: an Enter in an in-form file input would submit the message.
+    $("attachBtn").addEventListener("click", function () { $("attachInput").click(); });
+    $("attachInput").addEventListener("change", function () {
+      addImageFiles(this.files);
+      this.value = ""; // the same file can be re-picked after a removal
+    });
+    // Pasted images (a screenshot from the clipboard) stage like a pick.
+    $("message").addEventListener("paste", function (e) {
+      if (!visionAvailable || !e.clipboardData) return;
+      var files = e.clipboardData.files;
+      if (files && files.length) {
+        e.preventDefault();
+        addImageFiles(files);
+      }
+    });
+    // Drag-and-drop onto the composer card (preventing dragover is what
+    // makes the drop fire; the dashed outline shows the drop target).
+    var attachCard = $("chatCard");
+    if (attachCard) {
+      ["dragenter", "dragover"].forEach(function (ev) {
+        attachCard.addEventListener(ev, function (e) {
+          if (!visionAvailable) return;
+          e.preventDefault();
+          attachCard.classList.add("dragging");
+        });
+      });
+      attachCard.addEventListener("dragleave", function (e) {
+        if (attachCard.contains(e.relatedTarget)) return;
+        attachCard.classList.remove("dragging");
+      });
+      attachCard.addEventListener("drop", function (e) {
+        attachCard.classList.remove("dragging");
+        if (!visionAvailable) return;
+        e.preventDefault();
+        addImageFiles(e.dataTransfer && e.dataTransfer.files);
+      });
+    }
 
     // ---- workspaces: the user's folders on the server (the user's
     // persistent working state — execution is the agent's job, not a

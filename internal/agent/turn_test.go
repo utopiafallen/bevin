@@ -206,7 +206,7 @@ func TestTurnUsesProviderModelName(t *testing.T) {
 	// summarization call to happen (fires from the 3rd turn's post-compact
 	// onward).
 	for i := 0; i < 4; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -366,7 +366,7 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 	if conv.ReasoningEffort != "xhigh" {
 		t.Fatalf("stored ReasoningEffort = %q, want %q", conv.ReasoningEffort, "xhigh")
 	}
-	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	if got := fp.lastCall().ReasoningEffort; got != "xhigh" {
@@ -378,7 +378,7 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 	if err := us.SetConversationReasoningEffort(convID, "high"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	if got := fp.lastCall().ReasoningEffort; got != "" {
@@ -391,7 +391,7 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 	if err := us.SetConversationReasoningEffort(convID, "low"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	if got := fp.lastCall().ReasoningEffort; got != "" {
@@ -410,7 +410,7 @@ func TestTurnCarriesReasoningEffort(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 4; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -462,7 +462,7 @@ func TestTurnCarriesConversationID(t *testing.T) {
 	}
 	// Four turns: enough for a summarization call among the provider calls.
 	for i := 0; i < 4; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -515,7 +515,7 @@ func TestTurnSummarizesOnBudget(t *testing.T) {
 	// Each user message is ~100 chars (~25 tokens); the reply is small. The
 	// prompt crosses the 800-token budget after ~30 turns, so run well past it.
 	for i := 0; i < 45; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hello "+strings.Repeat("x", 100)); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hello "+strings.Repeat("x", 100), nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -578,7 +578,7 @@ func TestTurnCompactsOnReportedUsage(t *testing.T) {
 		t.Fatalf("userStore: %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi"); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi", nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -614,7 +614,7 @@ func TestTurnNoUsageFallsBackToEstimate(t *testing.T) {
 	}
 	// No error + a reply across turns (the estimate-driven compaction path).
 	for i := 0; i < 5; i++ {
-		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi "+strings.Repeat("y", 200)); err != nil {
+		if _, _, err := a.Turn(context.Background(), "u1", convID, "hi "+strings.Repeat("y", 200), nil); err != nil {
 			t.Fatalf("Turn %d: %v", i, err)
 		}
 	}
@@ -728,7 +728,7 @@ func TestTurnSendsBackPreviousReasoning(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new user message: the next request must include the prior reasoning.
-	if _, _, err := a.Turn(context.Background(), "u1", convID, "the next question"); err != nil {
+	if _, _, err := a.Turn(context.Background(), "u1", convID, "the next question", nil); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
 	last := fp.lastCall()
@@ -927,7 +927,7 @@ func TestTurnStream(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var chunks []provider.Chunk
-	conv, reply, err := a.TurnStream(context.Background(), "u1", convID, "hi", func(c provider.Chunk) error {
+	conv, reply, err := a.TurnStream(context.Background(), "u1", convID, "hi", nil, func(c provider.Chunk) error {
 		mu.Lock()
 		chunks = append(chunks, c)
 		mu.Unlock()
@@ -1013,7 +1013,7 @@ func TestTurnStreamToolIndicators(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var chunks []provider.Chunk
-	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "go", func(c provider.Chunk) error {
+	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "go", nil, func(c provider.Chunk) error {
 		mu.Lock()
 		chunks = append(chunks, c)
 		mu.Unlock()
@@ -1143,7 +1143,7 @@ func TestTurnCompactsMidLoopOnReportedUsage(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	_, reply, err := a.Turn(context.Background(), "u1", convID, "go")
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "go", nil)
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
@@ -1227,7 +1227,7 @@ func TestTurnRecoverFromContextOverflow(t *testing.T) {
 		replies:        []string{"recovered"},
 	}
 	a.providers["m1"] = fp
-	_, reply, err := a.Turn(context.Background(), "u1", convID, "go")
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "go", nil)
 	if err != nil {
 		t.Fatalf("Turn: %v (the overflow backstop should have recovered, not surfaced the error)", err)
 	}

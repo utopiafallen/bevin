@@ -301,7 +301,7 @@ func (ts *taskSystem) run(handle, taskID string) {
 		}
 		convID = id
 	}
-	_, reply, terr := a.Turn(ctx, handle, convID, taskWorkMessage(task))
+	_, reply, terr := a.Turn(ctx, handle, convID, taskWorkMessage(task), nil)
 	// The model's own outcome report (advance_task) — consumed once here
 	// (even on the error/cancel paths, so a failed run's report never
 	// leaks into a later re-run).

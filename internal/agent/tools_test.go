@@ -205,7 +205,7 @@ func TestTurnToolLoopRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureConversation: %v", err)
 	}
-	_, reply, err := a.Turn(context.Background(), "u1", convID, "use the tool")
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "use the tool", nil)
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestTurnNoProgressStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureConversation: %v", err)
 	}
-	_, reply, err := a.Turn(context.Background(), "u1", convID, "loop")
+	_, reply, err := a.Turn(context.Background(), "u1", convID, "loop", nil)
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestTurnStreamExecutesToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureConversation: %v", err)
 	}
-	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "use the tool", func(provider.Chunk) error { return nil })
+	_, reply, err := a.TurnStream(context.Background(), "u1", convID, "use the tool", nil, func(provider.Chunk) error { return nil })
 	if err != nil {
 		t.Fatalf("TurnStream: %v", err)
 	}

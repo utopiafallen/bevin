@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -507,7 +508,66 @@ func (a *App) models(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"models":  a.ag.DisplayModels(),
 		"default": a.ag.DefaultModelDisplayName(),
+		// vision: the live config has a vision-capable aux model (the chat
+		// UI's image-attachment controls render from it — attachments are
+		// only useful while image_analyze is on the wire).
+		"vision": a.ag.HasVisionAux(),
 	})
+}
+
+// chatImage is one image attachment in a chat message body (base64 inline —
+// the client contract, no upload endpoint: the bytes ride the message).
+type chatImage struct {
+	Name     string `json:"name"`
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"` // base64 (the client strips any data: prefix)
+}
+
+// The chat message body's attachment limits (the client contract): up to
+// maxImagesPerMsg images of up to maxImageBytes each AFTER base64 decoding
+// (4 × 8 MiB ≈ 43 MiB of base64 + JSON), so the request-body cap sits a
+// little above that. Text-only messages are unaffected by the bigger cap.
+const (
+	maxChatBodyBytes = 48 << 20
+	maxImagesPerMsg  = 4
+	maxImageBytes    = 8 << 20
+)
+
+// errImageTooLarge marks an over-limit attachment (a 413 — payload too
+// large — rather than a 400 malformed).
+var errImageTooLarge = errors.New("image over the size limit")
+
+// decodeChatImages validates + decodes the request's image attachments into
+// the agent's in-memory TurnImages (the agent's turn-scoped form — nothing
+// is persisted). It enforces the client contract: images only (image/* mime
+// type), at most maxImagesPerMsg, at most maxImageBytes each after
+// decoding. The error is a 413 (errImageTooLarge) when an attachment is
+// over the per-image size, a 400 otherwise.
+func decodeChatImages(raw []chatImage) ([]agent.TurnImage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if len(raw) > maxImagesPerMsg {
+		return nil, fmt.Errorf("at most %d images per message (got %d)", maxImagesPerMsg, len(raw))
+	}
+	out := make([]agent.TurnImage, 0, len(raw))
+	for i, im := range raw {
+		if !strings.HasPrefix(im.MimeType, "image/") {
+			return nil, fmt.Errorf("attachment %d is not an image (mime type %q)", i+1, im.MimeType)
+		}
+		data, err := base64.StdEncoding.DecodeString(im.Data)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %d is not valid base64: %v", i+1, err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("attachment %d is empty", i+1)
+		}
+		if len(data) > maxImageBytes {
+			return nil, fmt.Errorf("%w: attachment %d is %d bytes, the limit is %d MiB", errImageTooLarge, i+1, len(data), maxImageBytes>>20)
+		}
+		out = append(out, agent.TurnImage{Name: im.Name, MimeType: im.MimeType, Data: data})
+	}
+	return out, nil
 }
 
 // createConversation is the chat's "new conversation" + first message: the
@@ -798,14 +858,24 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	id := r.PathValue("id")
 	var req struct {
-		Message string `json:"message"`
+		Message string      `json:"message"`
+		Images  []chatImage `json:"images"` // image attachments (vision aux only)
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChatBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.Message == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+	if req.Message == "" && len(req.Images) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a message or an image attachment is required"})
+		return
+	}
+	images, err := decodeChatImages(req.Images)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, errImageTooLarge) {
+			code = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, code, map[string]string{"error": err.Error()})
 		return
 	}
 	// The turn runs on a context DETACHED from the request, exactly like
@@ -815,7 +885,7 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// across both chat paths; this one simply owes no push — its caller
 	// holds the reply synchronously.)
 	turnCtx := context.WithoutCancel(r.Context())
-	convID, reply, err := a.ag.Turn(turnCtx, u.Handle, id, req.Message)
+	convID, reply, err := a.ag.Turn(turnCtx, u.Handle, id, req.Message, images)
 	if err != nil {
 		log.Printf("turn: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -841,14 +911,24 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	id := r.PathValue("id")
 	var req struct {
-		Message string `json:"message"`
+		Message string      `json:"message"`
+		Images  []chatImage `json:"images"` // image attachments (vision aux only)
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChatBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.Message == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+	if req.Message == "" && len(req.Images) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a message or an image attachment is required"})
+		return
+	}
+	images, err := decodeChatImages(req.Images)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, errImageTooLarge) {
+			code = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, code, map[string]string{"error": err.Error()})
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -893,7 +973,7 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 			preSeq = n
 		}
 	}
-	convID, reply, err := a.ag.TurnStream(turnCtx, u.Handle, id, req.Message, func(c provider.Chunk) error {
+	convID, reply, err := a.ag.TurnStream(turnCtx, u.Handle, id, req.Message, images, func(c provider.Chunk) error {
 		if c.Usage != nil {
 			lastUsage = c.Usage
 		}

@@ -190,6 +190,14 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerSetProfileTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register the set profile tool: %w", err)
 	}
+	// image_analyze (the aux perception loop, stage 1): the vision aux
+	// model's chat-attachment surface. Registered unconditionally like the
+	// others; OFFERED only while the live config has a vision-capable aux
+	// model (the wireTools filter — an admin save applies from the next
+	// turn, no restart; see imagetools.go).
+	if err := registerImageAnalyzeTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register image_analyze: %w", err)
+	}
 	// The turn-start awareness state (the roster/nudge/queue delivery —
 	// in-memory only: a restart re-announces the full roster, which is
 	// correct for a cold start).
@@ -218,14 +226,17 @@ func (a *Agent) webSearchState() config.WebSearch {
 // call it, and the description note below tells it how to search anyway),
 // advance_task is filtered out of every NON-task conversation (it can only
 // report the outcome of the task the conversation is working — one offered
-// in a chat conversation could only be refused), and the web_browser
-// description carries a per-turn SEARCH note matching the web_search state
-// (prefer web_search when it is on the wire; when it is not, search-engine
-// tabs — user directive: the agent uses web_browser to search). The
-// registry entries are untouched — the wire copies carry the note (Wire()
-// returns fresh copies each turn).
+// in a chat conversation could only be refused), image_analyze is filtered
+// out while the live config has no vision-capable aux model (the same
+// live-config pattern as web_search — see imagetools.go), and the
+// web_browser description carries a per-turn SEARCH note matching the
+// web_search state (prefer web_search when it is on the wire; when it is
+// not, search-engine tabs — user directive: the agent uses web_browser to
+// search). The registry entries are untouched — the wire copies carry the
+// note (Wire() returns fresh copies each turn).
 func (a *Agent) wireTools(us *store.UserStore, conv *store.Conversation) []provider.Tool {
 	wsOn := a.webSearchState().Configured()
+	visionOn := a.HasVisionAux()
 	list := a.tools.Wire()
 	var ownerTaskID *string
 	curationConv := false
@@ -243,6 +254,9 @@ func (a *Agent) wireTools(us *store.UserStore, conv *store.Conversation) []provi
 	filtered := make([]provider.Tool, 0, len(list))
 	for _, t := range list {
 		if !wsOn && t.Name == "web_search" {
+			continue
+		}
+		if !visionOn && t.Name == "image_analyze" {
 			continue
 		}
 		if ownerTaskID == nil && t.Name == "advance_task" {
@@ -1602,11 +1616,16 @@ func stoppedNotice(np *noProgress) string {
 // and falls back to the char/4 estimate. A compaction failure is not fatal
 // (the reply is already persisted) — it is logged + the next turn retries.
 // Returns the reply text + the conversation id.
-func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
+func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, images []TurnImage, emit func(provider.Chunk) error) (string, string, error) {
 	// The conversation id rides the ctx for the memory tools'
 	// per-conversation state (remember's provenance) — harness plumbing,
 	// see memorytools.go.
 	ctx = context.WithValue(ctx, ctxConversationKey, convID)
+	// The turn's attached images ride the ctx for the image_analyze
+	// executor (same harness plumbing; see imagetools.go).
+	if len(images) > 0 {
+		ctx = context.WithValue(ctx, ctxTurnImagesKey, images)
+	}
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", "", err
@@ -1620,7 +1639,14 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
 	}
 	// Persist the user message first, so history is always durable/consistent.
-	userMsg, err := us.AppendMessage(convID, roleUser, userText, "", "", nil)
+	// An image-only message (no text) persists a marker: the transcript
+	// carries the fact of the attachment — the image bytes themselves are
+	// never persisted (the image_analyze tool result is the record).
+	storedText := userText
+	if strings.TrimSpace(storedText) == "" && len(images) > 0 {
+		storedText = attachedImagesMarker(len(images))
+	}
+	userMsg, err := us.AppendMessage(convID, roleUser, storedText, "", "", nil)
 	if err != nil {
 		return conv.ID, "", err
 	}
@@ -2056,16 +2082,19 @@ func (a *Agent) Pools() []PoolStatus {
 
 // Turn runs one chat turn (non-streaming) through the per-model slot pool:
 // it queues on the conversation's active model and holds one slot for the
-// duration of the turn. See runTurn for the full flow.
-func (a *Agent) Turn(ctx context.Context, handle, convID, userText string) (string, string, error) {
-	return a.runScheduled(ctx, handle, convID, userText, nil)
+// duration of the turn. images are the user's attached images for the turn
+// (the image_analyze tool's input; nil = a text-only message). See runTurn
+// for the full flow.
+func (a *Agent) Turn(ctx context.Context, handle, convID, userText string, images []TurnImage) (string, string, error) {
+	return a.runScheduled(ctx, handle, convID, userText, images, nil)
 }
 
 // TurnStream runs one chat turn (streaming) through the per-model slot pool,
 // emitting each delta via emit once the turn holds a slot and the model call
-// starts. See runTurn for the full flow.
-func (a *Agent) TurnStream(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
-	return a.runScheduled(ctx, handle, convID, userText, emit)
+// starts. images are the user's attached images for the turn (nil = a
+// text-only message). See runTurn for the full flow.
+func (a *Agent) TurnStream(ctx context.Context, handle, convID, userText string, images []TurnImage, emit func(provider.Chunk) error) (string, string, error) {
+	return a.runScheduled(ctx, handle, convID, userText, images, emit)
 }
 
 // runScheduled resolves the conversation (so the scheduler knows which model
@@ -2073,7 +2102,7 @@ func (a *Agent) TurnStream(ctx context.Context, handle, convID, userText string,
 // conversation that no longer exists fails before anything is queued; a
 // canceled context drops the job out of the queue (the user message is not
 // persisted — the turn never ran).
-func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText string, emit func(provider.Chunk) error) (string, string, error) {
+func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText string, images []TurnImage, emit func(provider.Chunk) error) (string, string, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", "", err
@@ -2087,7 +2116,7 @@ func (a *Agent) runScheduled(ctx context.Context, handle, convID, userText strin
 		retErr error
 	)
 	jerr := a.sched.Submit(ctx, JobInfo{Handle: handle, ConvID: convID, ModelID: conv.ActiveModelID}, func(jobCtx context.Context) error {
-		_, reply, retErr = a.runTurn(jobCtx, handle, convID, userText, emit)
+		_, reply, retErr = a.runTurn(jobCtx, handle, convID, userText, images, emit)
 		return retErr
 	})
 	if jerr != nil {
