@@ -1028,7 +1028,10 @@
         // — active_model_id is the concrete provider (an internal detail; a
         // display name maps one-to-many to providers).
         buildModelSelect(c.display_name || null, c.reasoning_effort || "");
-        setRoomLabel(c.title);
+        // The rolling purpose is the conversation's label (it replaces the
+        // title in the top bar, as in the list) — the title is the
+        // pre-purpose fallback.
+        setRoomLabel(c.purpose || c.title);
         if (j.context) updateCtx(j.context.tokens || 0, j.context.max_tokens || 0);
       } catch (e) { /* best-effort — the chat itself still works */ }
     }
@@ -1762,7 +1765,13 @@
         if (historyNewestSeq !== null && d.seq <= historyNewestSeq) return; // already rendered
         scheduleSync();
       });
-      es.addEventListener("conversation", function (e) { scheduleListSync(); });
+      es.addEventListener("conversation", function (e) {
+        scheduleListSync();
+        // The OPEN conversation's label changed (set_purpose — the purpose
+        // renders in place of the title): refresh the top-bar label too.
+        var d; try { d = JSON.parse(e.data); } catch (err) { return; }
+        if (convID && d.conversation_id === convID) loadConvMeta();
+      });
       // A (re)connect is a catch-up point: the channel may have been down
       // while the tab slept (a phone in the pocket) — re-pull.
       es.onopen = function () { scheduleListSync(); scheduleSync(); };
@@ -2108,7 +2117,14 @@
           };
           var title = document.createElement("div");
           title.style.cssText = "flex:1; font-size:.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
-          title.textContent = c.title || "(untitled)";
+          // The label is the ROLLING PURPOSE (set_purpose) in place of the
+          // title — "a title that has nothing to do with the current state
+          // of the conversation is not useful"; the title stays the
+          // pre-purpose fallback (the first turns, before the first
+          // purpose check lands).
+          var label = c.purpose || c.title || "(untitled)";
+          title.textContent = label;
+          if (c.purpose) title.title = c.purpose; // full text on hover (the cell truncates)
           var when = document.createElement("div");
           when.style.cssText = "font-size:.72rem; color:var(--muted, #666); white-space:nowrap;";
           var dts = parseUtc(c.last_activity_at) || parseUtc(c.created_at);

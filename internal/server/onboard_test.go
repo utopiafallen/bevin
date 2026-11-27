@@ -322,3 +322,103 @@ func TestOnboardingFailureDoesNotComplete(t *testing.T) {
 		t.Fatalf("status after failed completion = %s (want complete:false)", w.Body.String())
 	}
 }
+
+// TestOnboardingExplicitState — completion lives in the user store's
+// user_state rows, NOT in the conversation's existence: after onboarding,
+// the user deletes the "Meet Bevin" conversation, and the flow stays
+// complete (status complete, re-POST returns a blank conversation_id, and
+// NO new conversation is seeded).
+func TestOnboardingExplicitState(t *testing.T) {
+	a, cfg := configApp(t)
+	if _, err := a.srv.CreateUser("ivy", "", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.srv.CreateSession("tok-ivy", "ivy", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/onboarding", "tok-ivy", map[string]string{"display_name": "Ivy"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("onboarding = %d: %s", w.Code, w.Body.String())
+	}
+
+	// The user deletes the conversation (the list's delete button does
+	// exactly this).
+	us, err := store.OpenUser(filepath.Join(cfg.DataDir, "users", "ivy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer us.Close()
+	conv, err := us.FindConversationByTitle("Meet Bevin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := us.DeleteConversation(conv.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Still complete — the state row is the truth, not the artifact.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/onboarding", "tok-ivy", nil))
+	if !strings.Contains(w.Body.String(), `"complete":true`) {
+		t.Fatalf("status after deleting the conversation = %s (want complete:true)", w.Body.String())
+	}
+
+	// A re-POST (a stray API call) completes against the explicit state:
+	// no re-seed, a blank conversation id, no new conversation anywhere.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/onboarding", "tok-ivy", map[string]string{}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("re-POST after deletion = %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"conversation_id":""`) {
+		t.Fatalf("re-POST should report no conversation: %s", w.Body.String())
+	}
+	if _, err := us.FindConversationByTitle("Meet Bevin"); err == nil {
+		t.Fatal("the deleted conversation was re-seeded")
+	}
+	if convs, _ := us.ListConversations(); len(convs) != 0 {
+		t.Fatalf("conversations after re-POST = %d, want 0 (no re-seed)", len(convs))
+	}
+}
+
+// TestOnboardingLegacyBackfill — a user who completed onboarding on a
+// pre-store build has the flag in agent.toml only. The first status read
+// after the upgrade reports complete (backfilled from the toml flag) and
+// persists the explicit state rows, so the card never reappears and the
+// store is the source of truth from that read on.
+func TestOnboardingLegacyBackfill(t *testing.T) {
+	a, cfg := configApp(t)
+	if _, err := a.srv.CreateUser("jack", "", "user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.srv.CreateSession("tok-jack", "jack", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// The legacy shape: the toml flag is set, no store state rows exist.
+	jackDir := filepath.Join(cfg.DataDir, "users", "jack")
+	if err := os.MkdirAll(jackDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ac := &config.AgentConfig{OnboardingComplete: true, OnboardingAt: "2026-11-01T00:00:00Z", DefaultModelID: "m1"}
+	if err := config.SaveAgent(jackDir, ac); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/onboarding", "tok-jack", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"complete":true`) {
+		t.Fatalf("legacy status = %d %s (want complete:true from the toml backfill)", w.Code, w.Body.String())
+	}
+
+	// The explicit state rows now exist in the store (backfilled).
+	us, err := store.OpenUser(jackDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer us.Close()
+	done, ok, err := us.GetUserState(store.UserStateKeyOnboardingDone)
+	if err != nil || !ok || done != "1" {
+		t.Fatalf("backfilled state = (%q, %v, %v), want (\"1\", true, nil)", done, ok, err)
+	}
+}

@@ -121,6 +121,12 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	a.ag.NotifyMessage = func(handle, convID string, seq int) {
 		a.events.broadcast(handle, event{Type: "message", ConversationID: convID, Seq: seq})
 	}
+	// A conversation-row change the list must reflect (the rolling purpose,
+	// via set_purpose — the purpose renders in place of the title as the
+	// list label): the same "conversation" nudge the CRUD handlers fire.
+	a.ag.NotifyConversation = func(handle, convID string) {
+		a.events.broadcast(handle, event{Type: "conversation", ConversationID: convID})
+	}
 	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
 	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
 	// are down after a bevin restart or machine reboot) and respawns any that

@@ -11,6 +11,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -83,6 +84,16 @@ type Agent struct {
 	// store, so a dropped nudge only delays the other tab by one nudge; it
 	// can never lose or duplicate content).
 	NotifyMessage func(handle, convID string, seq int)
+
+	// NotifyConversation, if set, is called after one of the user's
+	// conversation rows changed in a way the conversation LIST must
+	// reflect (currently: the rolling purpose, via the set_purpose tool —
+	// the purpose renders in place of the title as the list label). The
+	// server wires it to the per-user event hub's "conversation" nudge;
+	// the client already refreshes its list on that event. Same contract
+	// as NotifyMessage: the caller's goroutine, non-blocking,
+	// concurrency-safe.
+	NotifyConversation func(handle, convID string)
 
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
@@ -773,32 +784,103 @@ func (a *Agent) EnsureConversation(ctx context.Context, handle, convID, title st
 
 const onboardingTitle = "Meet Bevin"
 
-// OnboardingConversation creates the first-time "Meet Bevin" conversation for
-// a user: their chosen default model, the standard frozen system prompt, and
-// (when it has no messages yet) ONE seeded assistant welcome message. The
-// onboarding content lives in the message, never the prompt, so the
-// conversation stays a normal conversation forever. Idempotent: an existing
-// conversation is reused and re-seeded only when empty.
-func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, welcome string) (string, error) {
+// OnboardingState reports the user's explicit onboarding state (the
+// user_state rows in their store — the source of truth; the agent.toml flag
+// is legacy, backfilled on first read after an upgrade). complete=false:
+// never onboarded. convID: the seeded conversation's id — "" when the flow
+// is complete but the conversation no longer exists (the user deleted it;
+// it is deliberately NOT re-seeded, the state is the truth).
+func (a *Agent) OnboardingState(handle string) (complete bool, convID string, err error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return false, "", err
+	}
+	done, ok, err := us.GetUserState(store.UserStateKeyOnboardingDone)
+	if err != nil {
+		return false, "", err
+	}
+	if !ok || done != "1" {
+		return false, "", nil
+	}
+	id, _, err := us.GetUserState(store.UserStateKeyOnboardingConv)
+	if err != nil {
+		return true, "", err
+	}
+	return true, id, nil
+}
+
+// MarkOnboarded records onboarding completion in the user's store (both
+// state rows — the conv id first, the done flag last, so a crash between
+// the two leaves the user NOT complete: the next attempt recovers via the
+// title lookup in Onboard). convID may be "" (a legacy backfill with no
+// findable conversation).
+func (a *Agent) MarkOnboarded(handle, convID string) error {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return err
+	}
+	if err := us.SetUserState(store.UserStateKeyOnboardingConv, convID); err != nil {
+		return err
+	}
+	return us.SetUserState(store.UserStateKeyOnboardingDone, "1")
+}
+
+// Onboard completes the user's first-time "Meet Bevin" flow — IDEMPOTENT,
+// keyed on the explicit user_state row, never on the conversation's
+// existence:
+//
+//   - complete → returns the seeded conversation's id ("" when the user
+//     deleted it — no re-seed; the flow is done).
+//   - incomplete → seeds the conversation (chosen default model, standard
+//     frozen system prompt, ONE welcome message) and records completion;
+//     a crashed prior attempt is ADOPTED (title lookup — best-effort
+//     recovery, the state row is the idempotency key) and completed
+//     instead of duplicating.
+//
+// The onboarding content lives in the message, never the prompt, so the
+// conversation stays a normal conversation forever. modelID was validated
+// by the caller (a model reference — a display name or a concrete model
+// ID); it is resolved to a concrete model ID (a display name takes the
+// least-loaded available provider that serves it), falling back to the
+// server default.
+func (a *Agent) Onboard(ctx context.Context, handle, modelID, welcome string) (string, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return "", err
 	}
+	if done, ok, err := us.GetUserState(store.UserStateKeyOnboardingDone); err != nil {
+		return "", err
+	} else if ok && done == "1" {
+		// Complete: the stored conv id is the answer. It may be gone (the
+		// user deleted the conversation — stay complete, don't re-seed).
+		stored, _, err := us.GetUserState(store.UserStateKeyOnboardingConv)
+		if err != nil {
+			return "", err
+		}
+		if stored != "" {
+			if _, err := us.GetConversation(stored); err == nil {
+				return stored, nil
+			}
+		}
+		return "", nil
+	}
+	// Recovery: a prior attempt may have seeded the conversation and died
+	// before recording completion (the title lookup is best-effort
+	// recovery here — NOT the idempotency key).
 	if conv, err := us.FindConversationByTitle(onboardingTitle); err == nil {
-		if has, err := us.HasMessages(conv.ID); err == nil && !has {
-			if m, err := us.AppendMessage(conv.ID, "assistant", welcome, "", "", nil); err != nil {
-				return "", err
-			} else {
+		if has, herr := us.HasMessages(conv.ID); herr == nil && !has && welcome != "" {
+			if m, aerr := us.AppendMessage(conv.ID, "assistant", welcome, "", "", nil); aerr == nil {
 				a.indexMessage(ctx, handle, m, onboardingTitle)
 			}
 		}
+		if err := a.MarkOnboarded(handle, conv.ID); err != nil {
+			return "", err
+		}
 		return conv.ID, nil
 	}
-	// modelID was validated by the caller (a model reference — a display name
-	// or a concrete model ID); resolve it to a concrete model ID (a display
-	// name takes the least-loaded available provider that serves it). Fall
-	// back to the server default (a concrete model ID, resolves to itself) if
-	// it is somehow not available.
+	// Fresh seed: resolve the model, create + freeze + welcome, then record
+	// completion (a crash between the seed and the record is recovered on
+	// the next call by the adoption path above — never a duplicate).
 	if modelID == "" || !a.ModelAvailable(modelID) {
 		modelID = a.DefaultModelID()
 	}
@@ -806,8 +888,7 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 	if !ok || resolved == "" {
 		return "", fmt.Errorf("no available models to start a conversation")
 	}
-	modelID = resolved
-	c, err := us.CreateConversation(onboardingTitle, modelID)
+	c, err := us.CreateConversation(onboardingTitle, resolved)
 	if err != nil {
 		return "", err
 	}
@@ -827,6 +908,28 @@ func (a *Agent) OnboardingConversation(ctx context.Context, handle, modelID, wel
 		} else {
 			a.indexMessage(ctx, handle, m, onboardingTitle)
 		}
+	}
+	if err := a.MarkOnboarded(handle, c.ID); err != nil {
+		return "", err
+	}
+	return c.ID, nil
+}
+
+// OnboardingConversationID returns the id of the user's seeded "Meet Bevin"
+// conversation, best-effort ("" when it doesn't exist — e.g. the user
+// deleted it). Exact-title lookup: a recovery / backfill convenience, NOT
+// an idempotency key (the user_state rows are).
+func (a *Agent) OnboardingConversationID(handle string) (string, error) {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return "", err
+	}
+	c, err := us.FindConversationByTitle(onboardingTitle)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
 	}
 	return c.ID, nil
 }
@@ -1137,13 +1240,20 @@ type ConversationSummary struct {
 	// ("" = the model's own default — the UI's dropdown then shows the
 	// default).
 	ReasoningEffort string `json:"reasoning_effort"`
+	// Purpose: the conversation's rolling self-reported purpose (the
+	// set_purpose tool). The UI renders it IN PLACE OF the title as the
+	// list label ("a title that has nothing to do with the current state
+	// is not useful" — the design decision); the title stays the
+	// pre-purpose fallback (the first ~7 turns, before the first purpose
+	// check lands).
+	Purpose string `json:"purpose"`
 }
 
 // conversationSummary builds a ConversationSummary from a store conversation,
 // resolving the display name (the user-facing model identity) from the
 // concrete active model ID.
 func (a *Agent) conversationSummary(c store.Conversation) ConversationSummary {
-	return ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, DisplayName: a.displayNameFor(c.ActiveModelID), ReasoningEffort: c.ReasoningEffort}
+	return ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, DisplayName: a.displayNameFor(c.ActiveModelID), ReasoningEffort: c.ReasoningEffort, Purpose: c.Purpose}
 }
 
 // Conversations lists the user's conversations, most recently active first

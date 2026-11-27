@@ -26,7 +26,10 @@ type onboardRequest struct {
 }
 
 // onboardingStatus reports whether the user's first-time flow is done (and
-// their current display name, so the card can prefill it).
+// their current display name, so the card can prefill it). Completion is the
+// explicit user_state row in the user's store; the agent.toml flag is legacy
+// (pre-store builds recorded completion there only) and is backfilled into
+// the store on first read after an upgrade.
 func (a *App) onboardingStatus(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -37,8 +40,22 @@ func (a *App) onboardingStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		ac = config.DefaultAgent()
 	}
+	complete, convID, err := a.ag.OnboardingState(u.Handle)
+	if err != nil {
+		complete, convID = false, ""
+	}
+	if !complete && ac.OnboardingComplete {
+		// Legacy backfill (once): adopt the explicit state from the toml
+		// flag — the store is the source of truth from this read on. The
+		// conversation id is best-effort (a title lookup; "" when the user
+		// already deleted the conversation — the state, not the artifact,
+		// is the truth).
+		convID, _ = a.ag.OnboardingConversationID(u.Handle)
+		_ = a.ag.MarkOnboarded(u.Handle, convID)
+		complete = true
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"complete":      ac.OnboardingComplete,
+		"complete":      complete,
 		"display_name":  u.DisplayName,
 		"onboarding_at": ac.OnboardingAt,
 	})
@@ -88,11 +105,12 @@ func (a *App) onboardingComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Seed the conversation FIRST: it is the payload of the flow, and the
-	// completion flag must only be persisted when the payload is in place —
-	// otherwise a failed seeding would strand the user as "onboarded" with
-	// no starting conversation (re-seeding is idempotent, so retrying after a
-	// config-write failure is safe).
+	// Seed (or reuse) the "Meet Bevin" conversation — idempotent via the
+	// explicit user_state row, never via the conversation's existence
+	// (Agent.Onboard): a re-POST returns the same conversation without
+	// duplicating the welcome; a conversation the user deleted stays
+	// deleted (the flow is complete, conversation_id comes back blank —
+	// the client lands in a fresh chat).
 	name := req.DisplayName
 	if name == "" {
 		name = u.DisplayName
@@ -100,11 +118,16 @@ func (a *App) onboardingComplete(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = u.Handle
 	}
-	convID, err := a.ag.OnboardingConversation(r.Context(), u.Handle, req.ModelID, welcomeMessage(name))
+	convID, err := a.ag.Onboard(r.Context(), u.Handle, req.ModelID, welcomeMessage(name))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Per-user agent.toml: the default model (a SETTING — it stays in the
+	// config) + the legacy completion flag (the store's user_state row is
+	// the source of truth; the toml copy keeps the file self-describing).
+	// Onboard is idempotent, so a failure here retries cleanly — the state
+	// write inside Onboard is what makes the retry safe.
 	userDir := filepath.Join(a.dataDir, "users", u.Handle)
 	ac, err := config.LoadAgent(userDir)
 	if err != nil {

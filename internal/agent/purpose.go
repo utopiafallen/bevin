@@ -70,5 +70,10 @@ func (a *Agent) execSetPurpose(ctx context.Context, handle string, args json.Raw
 		return fmt.Sprintf("could not update the purpose: %v", err), nil
 	}
 	a.purposeSet(convID)
+	// The purpose IS the user's list label now (it renders in place of
+	// the title): nudge every open tab so the label updates live.
+	if a.NotifyConversation != nil {
+		a.NotifyConversation(handle, convID)
+	}
 	return "purpose updated — your siblings see it in the roster from their next turn.", nil
 }

@@ -86,9 +86,28 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		// 0/0 = a pre-existing summary row (no tokens recorded yet).
 		version: 6,
 		up: `
-ALTER TABLE messages ADD COLUMN compacted_from INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE messages ADD COLUMN compacted_to INTEGER NOT NULL DEFAULT 0;
-`,
+		ALTER TABLE messages ADD COLUMN compacted_from INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE messages ADD COLUMN compacted_to INTEGER NOT NULL DEFAULT 0;
+		`,
+	},
+	{
+		// v7 (2026-11-26): per-user explicit state — small key/value rows
+		// for facts about the USER (not a conversation) that must not
+		// depend on any conversation's existence. Onboarding completion
+		// lives here: the "Meet Bevin" conversation is a payload the user
+		// may delete, and the agent.toml flag is a separate file that can
+		// drift from this store. The state row is the source of truth, in
+		// the same DB as the payload it describes. Keys in use:
+		//   onboarding_complete   = "1"
+		//   onboarding_conversation = the seeded conversation id
+		//                             ("" = complete, conversation deleted)
+		version: 7,
+		up: `
+		CREATE TABLE IF NOT EXISTS user_state (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+		);
+		`,
 	},
 }
 
