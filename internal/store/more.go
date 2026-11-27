@@ -294,6 +294,22 @@ func (s *UserStore) UpdateWorkspaceNotes(id, notes string) error {
 	return err
 }
 
+// UpdateWorkspaceDescription updates the user-adjustable description. This is
+// the mirrored write surface: the agent's workspace_edit tool and the user's
+// UI edit (PATCH /api/workspaces/{id}) both land here — the same validation
+// upstream, one row. A missing workspace is ErrNotFound (the callers turn it
+// into a not-found answer).
+func (s *UserStore) UpdateWorkspaceDescription(id, description string) error {
+	res, err := s.db.Exec(`UPDATE workspaces SET description = ? WHERE id = ?`, description, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *UserStore) SetWorkspaceSize(id string, size int64) error {
 	_, err := s.db.Exec(`UPDATE workspaces SET size = ? WHERE id = ?`, size, id)
 	return err

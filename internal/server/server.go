@@ -170,6 +170,10 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	// parallel conversations). The resolver tracks the LIVE backend across
 	// config-save rebuilds.
 	a.ag.SetContainerBackend(func() sandbox.Backend { return a.sandboxBackend() })
+	// The agent's workspace_delete re-checks disk usage immediately (same
+	// re-check the server's own delete endpoint runs — a delete frees
+	// space, and the frozen state should reflect it at once).
+	a.ag.SetDiskRecheck(a.recheckDisk)
 	a.diskMon.Prime()
 	diskCtx, diskCancel := context.WithCancel(context.Background())
 	a.diskCancel = diskCancel
@@ -247,6 +251,7 @@ func (a *App) routes() {
 	// chatGate: regular users only (same as everything above).
 	mux.HandleFunc("GET /api/workspaces", a.chatGate(a.listWorkspaces))
 	mux.HandleFunc("POST /api/workspaces", a.chatGate(a.diskGate(a.createWorkspace)))
+	mux.HandleFunc("PATCH /api/workspaces/{id}", a.chatGate(a.patchWorkspace))
 	mux.HandleFunc("DELETE /api/workspaces/{id}", a.chatGate(a.deleteWorkspace))
 	mux.HandleFunc("GET /api/workspaces/{id}/files", a.chatGate(a.workspaceFiles))
 	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.diskGate(a.uploadWorkspaceFile)))

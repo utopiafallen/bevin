@@ -284,6 +284,15 @@
             <div id="wsDetail" hidden>
               <div class="profile-section">
                 <h4 id="wsDetailTitle"></h4>
+                <div id="wsDescRow" style="margin-top:.3rem; display:flex; gap:.5rem; align-items:baseline; flex-wrap:wrap;">
+                  <span id="wsDescText" class="muted" style="font-size:.9rem;"></span>
+                  <button id="wsDescEditBtn" class="btn btn-ghost" type="button" style="padding:.1rem .6rem; font-size:.8rem;">Edit</button>
+                </div>
+                <div id="wsDescEdit" hidden style="gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:.3rem;">
+                  <input id="wsDescInput" placeholder="What is this workspace for? (optional)" autocomplete="off" maxlength="500" style="flex:1; min-width:12rem;">
+                  <button class="btn btn-primary" id="wsDescSaveBtn" type="button">Save</button>
+                  <button class="btn btn-ghost" id="wsDescCancelBtn" type="button">Cancel</button>
+                </div>
                 <div style="display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:.5rem;">
                   <input id="wsFilter" placeholder="Filter files&hellip;" autocomplete="off" style="flex:1; min-width:10rem;">
                   <input id="wsUploadPath" placeholder="Subfolder (e.g. docs)" style="width:11rem;" title="Optional subfolder for the upload">
@@ -2815,7 +2824,7 @@
     // persistent working state — execution is the agent's job, not a
     // user surface). The disk is the source of truth for the file
     // listing; the API tracks metadata for what it sees.
-    var ws = { current: null, files: [] };
+    var ws = { current: null, files: [], desc: "" };
 
     function wsEsc(s) {
       var d = document.createElement("div");
@@ -2846,6 +2855,7 @@
       var list = $("wsList");
       list.innerHTML = "";
       (d.workspaces || []).forEach(function (w) {
+        if (w.id === ws.current) ws.desc = w.description || "";
         var card = document.createElement("div");
         card.className = "ws-card" + (ws.current === w.id ? " active" : "");
         card.innerHTML =
@@ -2855,13 +2865,66 @@
         card.addEventListener("click", function () { openWorkspace(w.id, w.title); });
         list.appendChild(card);
       });
+      renderWsDesc();
     }
+
+    // The description row (the user's half of the edit mirror — the
+    // agent's workspace_edit tool and this control write the same row
+    // with the same validation).
+    function renderWsDesc() {
+      if ($("wsDetail").hidden) return;
+      $("wsDescText").textContent = ws.desc ? ws.desc : "No description yet.";
+      $("wsDescText").style.fontStyle = ws.desc ? "" : "italic";
+    }
+
+    function openWsDescEdit() {
+      $("wsDescRow").hidden = true;
+      var e = $("wsDescEdit");
+      e.hidden = false;
+      e.style.display = "flex";
+      $("wsDescInput").value = ws.desc || "";
+      $("wsDescInput").focus();
+    }
+
+    function closeWsDescEdit() {
+      var e = $("wsDescEdit");
+      e.hidden = true;
+      e.style.display = "";
+      renderWsDesc();
+    }
+
+    async function saveWsDesc() {
+      if (!ws.current) return;
+      var desc = $("wsDescInput").value.trim();
+      try {
+        var r = await fetch("/api/workspaces/" + ws.current, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ description: desc })
+        });
+        if (r.status !== 204) {
+          var d = await r.json().catch(function () { return {}; });
+          if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        }
+        closeWsDescEdit();
+        await loadWorkspaces();
+        wsMsg("Description saved.");
+      } catch (err) {
+        wsMsg("⚠ " + err.message, true);
+      }
+    }
+
+    $("wsDescEditBtn").addEventListener("click", openWsDescEdit);
+    $("wsDescCancelBtn").addEventListener("click", closeWsDescEdit);
+    $("wsDescSaveBtn").addEventListener("click", saveWsDesc);
+    $("wsDescInput").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); saveWsDesc(); }
+    });
 
     async function openWorkspace(id, title) {
       ws.current = id;
       $("wsDetail").hidden = false;
       $("wsDetailTitle").textContent = title || "Workspace";
-      loadWorkspaces(); // refresh the active card
+      await loadWorkspaces(); // refresh the active card (+ description row)
       await loadWsFiles();
     }
 

@@ -271,3 +271,93 @@ func TestWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("final list = %d workspaces, want 0", len(final.Workspaces))
 	}
 }
+
+// TestWorkspacePatchDescription — the edit mirror's user half (the design
+// log's WORKSPACE TOOLS section): PATCH /api/workspaces/{id} edits the
+// description (the v1 user-adjustable metadata) with the SAME validation as
+// the agent's workspace_edit tool — trimmed, capped at 500, absent field
+// unchanged, 404 on an unknown id.
+func TestWorkspacePatchDescription(t *testing.T) {
+	a, _, _ := twoModelApp(t)
+	bob := "tok-bob"
+
+	// A workspace to edit.
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPost, "/api/workspaces", bob, map[string]string{"title": "Notes", "description": "first"}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create code = %d body=%s", w.Code, w.Body.String())
+	}
+	var created struct {
+		Workspace struct {
+			ID string `json:"id"`
+		} `json:"workspace"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created.Workspace.ID
+
+	// The edit: trimmed, stored, visible in the list.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/workspaces/"+id, bob, map[string]string{"description": "  updated  "}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch code = %d body=%s", w.Code, w.Body.String())
+	}
+	var patched struct {
+		Workspace struct {
+			Description string `json:"description"`
+		} `json:"workspace"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &patched); err != nil {
+		t.Fatal(err)
+	}
+	if patched.Workspace.Description != "updated" {
+		t.Fatalf("patched description = %q, want trimmed \"updated\"", patched.Workspace.Description)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces", bob, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list code = %d", w.Code)
+	}
+	var listed struct {
+		Workspaces []struct {
+			Description string `json:"description"`
+		} `json:"workspaces"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &listed)
+	if len(listed.Workspaces) != 1 || listed.Workspaces[0].Description != "updated" {
+		t.Fatalf("list after patch = %+v", listed.Workspaces)
+	}
+
+	// An absent description is a no-op (204, unchanged).
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/workspaces/"+id, bob, map[string]string{}))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("no-op patch code = %d body=%s, want 204", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces", bob, nil))
+	var listed2 struct {
+		Workspaces []struct {
+			Description string `json:"description"`
+		} `json:"workspaces"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &listed2)
+	if len(listed2.Workspaces) != 1 || listed2.Workspaces[0].Description != "updated" {
+		t.Fatalf("no-op patch changed the row: %+v", listed2.Workspaces)
+	}
+
+	// The cap (500) — the same limit the agent tool enforces.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/workspaces/"+id, bob, map[string]string{"description": strings.Repeat("x", 501)}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("long patch code = %d, want 400", w.Code)
+	}
+
+	// An unknown id is a 404.
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/workspaces/doesnotexist", bob, map[string]string{"description": "x"}))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown patch code = %d, want 404", w.Code)
+	}
+}

@@ -337,6 +337,46 @@ func (a *App) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"workspace": ws})
 }
 
+// PATCH /api/workspaces/{id} — edit the user-adjustable workspace metadata.
+// v1 that set is the description (the title is the creation-time identity,
+// fixed on both surfaces). This is the user's half of the EDIT MIRROR: the
+// agent's workspace_edit tool and this endpoint carry the same validation
+// and write the same row. Body: {"description": "..."} (absent = unchanged).
+// Not disk-gated: a metadata edit writes no bytes into the user's data dir.
+func (a *App) patchWorkspace(w http.ResponseWriter, r *http.Request) {
+	_, us, ok := a.workspaceStore(w, r)
+	if !ok {
+		return
+	}
+	ws, ok := a.workspaceFor(w, r, us)
+	if !ok {
+		return
+	}
+	var req struct {
+		Description *string `json:"description"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Description == nil {
+		writeJSON(w, http.StatusNoContent, nil)
+		return
+	}
+	desc := strings.TrimSpace(*req.Description)
+	if len(desc) > 500 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "description too long (max 500)"})
+		return
+	}
+	if err := us.UpdateWorkspaceDescription(ws.ID, desc); err != nil {
+		log.Printf("workspace update: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	ws.Description = desc
+	writeJSON(w, http.StatusOK, map[string]any{"workspace": ws})
+}
+
 // DELETE /api/workspaces/{id} — delete the workspace: its folder (and
 // everything in it) from disk, then its metadata row (the file rows
 // cascade).

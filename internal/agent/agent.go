@@ -62,6 +62,13 @@ type Agent struct {
 	// every use because the backend is (re)built on config save.
 	containerBk func() sandbox.Backend
 
+	// diskRecheck re-checks a user's disk usage immediately after a
+	// workspace delete (the server's delete endpoint calls the same
+	// re-check — a delete frees space, and the frozen state + the disk
+	// page should reflect it without waiting for the next monitor walk).
+	// Nil-safe (a nil hook = the 45 s monitor walk catches it).
+	diskRecheck func(handle string)
+
 	// roster is the in-memory turn-start awareness state (concurrent-
 	// instances, layers 2+4): the in-flight set, the last-announced roster
 	// snapshots, and the purpose-nudge counters (see roster.go).
@@ -165,6 +172,13 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// workspaces gets the structured "create one first" result at use time.
 	if err := registerEditTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register edit_file: %w", err)
+	}
+	// The workspace tools (the design log's WORKSPACE TOOLS section): the
+	// agent manages workspace STATE on the user's behalf — create/edit/
+	// delete/list. Registered unconditionally like edit_file (a user's own
+	// workspaces have no admin toggle).
+	if err := registerWorkspaceTools(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register workspace tools: %w", err)
 	}
 	// The memory tools (the memory model's on-demand surface: recall /
 	// remember / forget over the user's P5 memories).
@@ -471,6 +485,21 @@ func (a *Agent) containerBackend() sandbox.Backend {
 		return nil
 	}
 	return a.containerBk()
+}
+
+// SetDiskRecheck wires the immediate post-delete disk re-check (the
+// server's workspace-delete endpoint's hook; the agent's workspace_delete
+// tool rides it too). Nil-safe: passing nil defers the re-check to the
+// next monitor walk.
+func (a *Agent) SetDiskRecheck(f func(handle string)) {
+	a.diskRecheck = f
+}
+
+// recheckDiskUsage runs the wired post-delete re-check (nil-safe).
+func (a *Agent) recheckDiskUsage(handle string) {
+	if a.diskRecheck != nil {
+		a.diskRecheck(handle)
+	}
 }
 
 // diskIsFrozen reports whether the user is over their disk cap (the same
