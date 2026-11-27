@@ -4,9 +4,15 @@
 // minimum 1). A conversation turn is a unit of work: it is queued into the
 // pool of its (the conversation's active) model and holds one slot for exactly
 // the duration of the turn, then releases it — it never holds a slot while
-// waiting for the user's next message. If there are more concurrent turns on a
-// model than slots in its pool, the extras wait FIFO. There is NO server-wide
-// cap on total concurrency; the per-model sum is the only bound.
+// waiting for the user's next message. Aux perception requests are the same
+// unit of work in a pool of their own: an aux model's perception requests
+// submit to its pool id (config.AssignAuxPoolIDs) — its OWN pool (the aux's
+// Slots, minimum 1) unless the aux EXACTLY matches an existing main model
+// (same provider + base URL + model id), in which case they reuse THAT MAIN
+// MODEL'S pool, so perception requests and that model's conversations share
+// one execution bound. If there are more concurrent jobs on a pool than
+// slots in it, the extras wait FIFO. There is NO server-wide cap on total
+// concurrency; the per-model sum is the only bound.
 //
 // This implements tier 1 of the execution model (interactive user
 // conversations). Tier 2 (autonomous task conversations, preemption,

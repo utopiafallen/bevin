@@ -111,6 +111,10 @@ type Agent struct {
 
 // New builds an Agent from a loaded config. It fails if no model is enabled.
 func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
+	// The aux pool ids are a derived relationship (config.AssignAuxPoolIDs
+	// normally runs in Validate); re-derive defensively so a config that
+	// skipped validation still carries correct pool keys.
+	config.AssignAuxPoolIDs(cfg)
 	a := &Agent{
 		cfg:       cfg,
 		dataDir:   dataDir,
@@ -369,6 +373,10 @@ func (a *Agent) ReasoningEffortsFor(ref string) []string {
 // immediately. It fails (leaving the agent on the old config) when the new
 // config has no enabled model.
 func (a *Agent) Reload(cfg *config.ServerConfig) error {
+	// The aux pool ids track the live model set (a main model added or
+	// removed changes which pool an aux joins) — re-derive before the swap
+	// so the pokes below reach the right pools.
+	config.AssignAuxPoolIDs(cfg)
 	providers := map[string]provider.Provider{}
 	defaultModel := ""
 	for _, m := range cfg.Models {
@@ -395,8 +403,22 @@ func (a *Agent) Reload(cfg *config.ServerConfig) error {
 	a.defaultModel = defaultModel
 	a.vec = a.buildVectorIndex(cfg)
 	a.mu.Unlock()
+	// Every pool that may have changed capacity: the main models' + the aux
+	// pools (an aux slot edit, or an aux joining/leaving a main model's pool
+	// as the catalog changes, must reach the scheduler live). A pool id only
+	// ever gets poked once (a shared aux reuses the main's id).
+	poked := map[string]bool{}
 	for _, m := range cfg.Models {
-		a.sched.Poke(m.ID)
+		if !poked[m.ID] {
+			a.sched.Poke(m.ID)
+			poked[m.ID] = true
+		}
+	}
+	for _, x := range cfg.Aux {
+		if x.PoolID != "" && !poked[x.PoolID] {
+			a.sched.Poke(x.PoolID)
+			poked[x.PoolID] = true
+		}
 	}
 	return nil
 }
@@ -1900,9 +1922,12 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, em
 
 // modelSlots returns a model's current execution-slot count (min 1) from live
 // config — the scheduler consults it on every dispatch, so the admin's slot
-// edits apply without a restart. A model removed from the config while a job
-// is queued gets 1, so its queued jobs complete quickly (with an error)
-// instead of waiting on a pool that no longer exists.
+// edits apply without a restart. It resolves BOTH pool kinds: a main model's
+// own id and an aux model's pool id (its own derived pool, or the main model
+// it exactly matches — the shared pool, so perception requests and that
+// model's conversations draw on the same slot count). A pool removed from the
+// config while a job is queued gets 1, so its queued jobs complete quickly
+// (with an error) instead of waiting on a pool that no longer exists.
 func (a *Agent) modelSlots(modelID string) int {
 	a.cfgMu.Lock()
 	defer a.cfgMu.Unlock()
@@ -1912,6 +1937,14 @@ func (a *Agent) modelSlots(modelID string) int {
 				return 1
 			}
 			return m.Slots
+		}
+	}
+	for _, x := range a.cfg.Aux {
+		if x.PoolID == modelID {
+			if x.Slots < 1 {
+				return 1
+			}
+			return x.Slots
 		}
 	}
 	return 1
@@ -1936,8 +1969,11 @@ func (a *Agent) executeToolCall(ctx context.Context, handle string, tc provider.
 	return out, true
 }
 
-// PoolStatus is one model's pool as seen by the admin dashboard: the slot
-// count + how many are busy + the turns waiting for a slot.
+// PoolStatus is one pool as seen by the admin dashboard: the slot count +
+// how many are busy + the turns waiting for a slot. Every pool gets a row:
+// each main model's pool, and each aux model's OWN pool (Aux=true) — a
+// shared aux adds no row (it runs in the main model's pool); that main row
+// then names the aux models that share it (Auxes).
 type PoolStatus struct {
 	ID           string      `json:"id"`
 	DisplayName  string      `json:"display_name"`
@@ -1946,29 +1982,74 @@ type PoolStatus struct {
 	Busy         int         `json:"busy"`
 	Enabled      bool        `json:"enabled"`
 	AutoDisabled bool        `json:"auto_disabled"`
+	Aux          bool        `json:"aux"`
+	Auxes        []string    `json:"auxes,omitempty"` // main pool: the aux models sharing it (exact match)
 	Waiting      []QueuedJob `json:"waiting"`
 }
 
-// Pools returns the live state of every configured model's execution-slot
-// pool (for the admin dashboard).
+// Pools returns the live state of every configured pool (for the admin
+// dashboard): the main models' execution-slot pools + each aux model's own
+// pool. A shared aux (an exact match of a main model) is folded into that
+// main model's row (Auxes) — its perception requests and the model's
+// conversations draw on the same slots, so it is one pool, not two.
 func (a *Agent) Pools() []PoolStatus {
 	load := a.sched.Load()
+	a.cfgMu.Lock()
+	models := make([]config.Model, len(a.cfg.Models))
+	copy(models, a.cfg.Models)
+	aux := make([]config.AuxModel, len(a.cfg.Aux))
+	copy(aux, a.cfg.Aux)
+	a.cfgMu.Unlock()
+	mainIDs := make(map[string]bool, len(models))
+	for _, m := range models {
+		mainIDs[m.ID] = true
+	}
+	// Split the aux models: those sharing a main model's pool (PoolID is a
+	// main id) vs. those with their own.
+	sharedBy := map[string][]string{}
+	var own []config.AuxModel
+	for _, x := range aux {
+		if x.PoolID == "" {
+			continue
+		}
+		if mainIDs[x.PoolID] {
+			sharedBy[x.PoolID] = append(sharedBy[x.PoolID], x.ModelID)
+		} else {
+			own = append(own, x)
+		}
+	}
 	out := []PoolStatus{}
-	for _, m := range a.AllModels() {
+	for _, m := range models {
 		slots := m.Slots
 		if slots < 1 {
 			slots = 1
 		}
 		wait := []QueuedJob{}
+		busy := 0
 		if l, ok := load[m.ID]; ok {
 			wait = l.Waiting
 			if wait == nil {
 				wait = []QueuedJob{}
 			}
-			out = append(out, PoolStatus{m.ID, m.DisplayName, m.Provider, slots, l.Busy, m.Enabled, m.AutoDisabled, wait})
-			continue
+			busy = l.Busy
 		}
-		out = append(out, PoolStatus{m.ID, m.DisplayName, m.Provider, slots, 0, m.Enabled, m.AutoDisabled, wait})
+		out = append(out, PoolStatus{ID: m.ID, DisplayName: m.DisplayName, Provider: m.Provider, Slots: slots, Busy: busy, Enabled: m.Enabled, AutoDisabled: m.AutoDisabled, Auxes: sharedBy[m.ID], Waiting: wait})
+	}
+	for _, x := range own {
+		slots := x.Slots
+		if slots < 1 {
+			slots = 1
+		}
+		wait := []QueuedJob{}
+		busy := 0
+		if l, ok := load[x.PoolID]; ok {
+			wait = l.Waiting
+			if wait == nil {
+				wait = []QueuedJob{}
+			}
+			busy = l.Busy
+		}
+		out = append(out, PoolStatus{ID: x.PoolID, DisplayName: x.ModelID, Provider: x.Provider, Slots: slots, Busy: busy, Enabled: true, Aux: true, Waiting: wait})
 	}
 	return out
 }

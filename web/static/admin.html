@@ -282,9 +282,10 @@ function poolRow(p) {
   let state = p.busy + "/" + p.slots + " slots";
   if (p.auto_disabled) state += " — unavailable (auto-disabled)";
   else if (!p.enabled) state += " — disabled";
+  if (p.auxes && p.auxes.length) state += " · perception: " + p.auxes.join(", ");
   d.innerHTML =
     "<div class='pool-head'><span class='pool-name'>" + esc(p.display_name || p.id) + "</span>" +
-    "<span class='pool-prov'>" + esc(p.provider) + "</span>" +
+    "<span class='pool-prov'>" + esc(p.provider) + (p.aux ? " · perception" : "") + "</span>" +
     "<span class='pool-state'>" + esc(state) + "</span></div>" +
     "<div class='slots'>" + blocks.join("") + "</div>" +
     "<div class='util'><i style='width:" + pct + "%'></i></div>";
@@ -415,6 +416,14 @@ function saveAuxModel() {
   if (!m.base_url) { S.auxFormError = "Base URL is required."; render(); return; }
   if (!m.model_id) { S.auxFormError = "Pick a model — press Detect to list the provider's models."; render(); return; }
   if (!(m.kinds || []).length) { S.auxFormError = "Pick at least one modality — an aux model with nothing to perceive is dead config."; render(); return; }
+  // Execution slots: a whole number >= 1 (the server clamps to 1 anyway; the
+  // form rejects invalid input so the error shows near the field). Skipped
+  // while the aux shares a main model's pool — its own count is inert then.
+  if (!auxSharedMain(m)) {
+    const sl = parseInt(m.slots, 10);
+    if (!Number.isFinite(sl) || sl < 1) { S.auxFormError = "Execution slots must be a whole number >= 1."; render(); return; }
+    m.slots = sl;
+  }
   const wasEditing = S.auxEditingIndex !== -1;
   const toSave = deepCopy(m); delete toSave._models; delete toSave._lastBase; delete toSave._detecting;
   if (!wasEditing) { S.aux.push(toSave); } else { const idx = Math.min(S.auxEditingIndex, S.aux.length); S.aux.splice(idx, 0, toSave); }
@@ -472,7 +481,7 @@ function renderAuxForm() {
     field("Model", sel),
     field("Modalities (input)", modWrap),
     el("p", { class: "field-help" }, "Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."),
-    el("div", { class: "row" }, profileField("auxf_prof", m, false, () => { S.auxFormError = null; }))
+    el("div", { class: "row" }, auxSlotsField("auxf_slots", m), profileField("auxf_prof", m, false, () => { S.auxFormError = null; }))
   );
   f.append(ph);
   // the form's button row: Cancel (discards the draft — restoring the
@@ -488,14 +497,19 @@ function renderAuxList() {
   if (!S.aux.length) { w.append(el("p", { class: "empty-list" }, "No aux models yet — press \u201c+ Add aux\u201d above.")); return w; }
   const t = el("table", { class: "model-table" });
   t.append(el("thead", {}, el("tr", {},
-    el("th", {}, "Kinds"), el("th", {}, "Provider"), el("th", {}, "Base URL"), el("th", {}, "Model ID"), el("th", {}, "Profile"), el("th", {}, ""))));
+    el("th", {}, "Kinds"), el("th", {}, "Provider"), el("th", {}, "Base URL"), el("th", {}, "Model ID"), el("th", {}, "Slots"), el("th", {}, "Pool"), el("th", {}, "Profile"), el("th", {}, ""))));
   const tb = el("tbody", {});
   S.aux.forEach((m, i) => {
+    const shared = auxSharedMain(m);
     tb.append(el("tr", {},
       el("td", {}, (m.kinds || []).join(", ") || "—"),
       el("td", {}, m.provider || "—"),
       el("td", {}, el("span", { class: "kv baseurl", title: m.base_url || "" }, m.base_url || "—")),
       el("td", {}, el("span", { class: "kv" }, m.model_id || "—")),
+      el("td", {}, String(shared ? (shared.slots || 1) : (m.slots || 1))),
+      el("td", {}, shared
+        ? el("span", { title: "This aux model exactly matches a main model (same provider, base URL, and model id) — its perception requests share that model's execution slots with its conversations." }, "shares " + (shared.display_name || shared.model_id))
+        : "own"),
       el("td", {}, m.profile || "general"),
       el("td", {}, el("div", { class: "row-actions" },
         el("button", { class: "row-btn", onclick: "editAuxModel(" + i + ")" }, "Edit"),

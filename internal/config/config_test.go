@@ -51,6 +51,14 @@ func TestServerRoundTrip(t *testing.T) {
 	if len(got.Aux[0].Kinds) != 1 || got.Aux[0].Kinds[0] != "vision" || got.Aux[0].ModelID != "v" {
 		t.Fatalf("aux = %+v", got.Aux[0])
 	}
+	// The aux pool id is derived at load (no exact match with the main
+	// model here → its own derived pool; the aux slots self-heal to 1).
+	if got.Aux[0].PoolID != "aux-v" {
+		t.Fatalf("aux pool id = %q, want aux-v (derived)", got.Aux[0].PoolID)
+	}
+	if got.Aux[0].Slots != 1 {
+		t.Fatalf("aux slots = %d, want 1 (self-healed)", got.Aux[0].Slots)
+	}
 	if got.Embedder.ModelID != "embeddinggemma-2" {
 		t.Fatalf("embedder = %+v", got.Embedder)
 	}
@@ -683,5 +691,115 @@ func TestPushValidate(t *testing.T) {
 	c.Push = Push{VAPIDPublic: "pub", VAPIDPrivate: "priv"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("both keys: %v", err)
+	}
+}
+
+// TestAuxSlotsSelfHeal — an aux model's execution-slot count has the same
+// min-1 self-heal as the main models (a missing or zeroed value in a
+// hand-edited config must not disable the pool).
+func TestAuxSlotsSelfHeal(t *testing.T) {
+	c := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{{ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", ModelID: "ornith", Slots: 2, Enabled: true}},
+		Aux: []AuxModel{
+			{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "v"},
+			{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8082/v1", ModelID: "v2", Slots: 4},
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if c.Aux[0].Slots != 1 {
+		t.Fatalf("blank aux slots = %d, want 1 (self-healed)", c.Aux[0].Slots)
+	}
+	if c.Aux[1].Slots != 4 {
+		t.Fatalf("set aux slots = %d, want 4 (untouched)", c.Aux[1].Slots)
+	}
+}
+
+// TestAssignAuxPoolIDs — the aux model's execution-slot pool id: an EXACT
+// match of an existing main model (same provider + base URL + model id)
+// reuses that main model's pool; everything else gets its own derived pool
+// (collision-suffixed). The match is a relationship against the live model
+// set — recomputed at every Validate, never trusted from a stored file.
+func TestAssignAuxPoolIDs(t *testing.T) {
+	auxV := AuxModel{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b"}
+	// Exact match (the API key differs — an auth detail, not identity) →
+	// the main model's pool.
+	c := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{{ID: "m1", Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b", Slots: 3, Enabled: true}},
+		Aux:    []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b", APIKey: "***"}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := c.Aux[0].PoolID; got != "m1" {
+		t.Fatalf("exact-match aux PoolID = %q, want m1 (the shared main pool)", got)
+	}
+	// No match (different endpoint) → its own derived pool; a second aux on
+	// the same endpoint gets the collision suffix (one pool per aux).
+	c.Aux = []AuxModel{
+		{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8082/v1", ModelID: "vision-27b"},
+		{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8082/v1", ModelID: "vision-27b"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := c.Aux[0].PoolID; got != "aux-vision-27b" {
+		t.Fatalf("unmatched aux PoolID = %q, want aux-vision-27b", got)
+	}
+	if got := c.Aux[1].PoolID; got != "aux-vision-27b-2" {
+		t.Fatalf("colliding aux PoolID = %q, want aux-vision-27b-2", got)
+	}
+	// The relationship tracks the live set: with the matching main model
+	// gone, the aux falls back to its own pool...
+	c.Models = []Model{{ID: "other", Provider: "openai", BaseURL: "https://api.openai.com/v1", ModelID: "ornith", Slots: 1, Enabled: true}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	own := []AuxModel{{Kinds: []string{"vision"}, Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b"}}
+	c.Aux = own
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := c.Aux[0].PoolID; got != "aux-vision-27b" {
+		t.Fatalf("aux after main removal = %q, want aux-vision-27b (its own pool)", got)
+	}
+	// ...and a newly ADDED exact match pulls the aux into the main's pool.
+	c.Models = append(c.Models, Model{ID: "m1", Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b", Slots: 2, Enabled: true})
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := c.Aux[0].PoolID; got != "m1" {
+		t.Fatalf("aux after main addition = %q, want m1 (the shared main pool)", got)
+	}
+	// The pool id is derived, not persisted: a saved server.toml carries no
+	// pool_id (the next Validate re-derives it).
+	dir := t.TempDir()
+	c2 := &ServerConfig{
+		Auth:   Auth{Mode: "internal", SessionSecret: "x"},
+		Models: []Model{{ID: "m1", Provider: "llama", BaseURL: "http://127.0.0.1:8081/v1", ModelID: "vision-27b", Slots: 2, Enabled: true}},
+		Aux:    []AuxModel{auxV},
+	}
+	if err := c2.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if err := Save(dir, c2); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(Path(dir))
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if strings.Contains(string(raw), "pool_id") {
+		t.Fatalf("pool_id persisted to server.toml (it is a derived field):\n%s", raw)
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Aux[0].PoolID != "m1" {
+		t.Fatalf("PoolID after round-trip = %q, want m1 (re-derived at load)", got.Aux[0].PoolID)
 	}
 }

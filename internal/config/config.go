@@ -282,6 +282,21 @@ type AuxModel struct {
 	// it when the aux-model perception loop lands; the assignment exists now
 	// so the surface is uniform across both model kinds.
 	Profile string `toml:"profile" json:"profile"`
+	// Slots is this aux model's execution-slot count (min 1 — self-heals at
+	// load, like the main models): the capacity of the pool its perception
+	// requests run in. Meaningful only while the aux keeps its OWN pool —
+	// an exact match of a main model reuses that model's pool (PoolID), so
+	// the main model's slots are the bound.
+	Slots int `toml:"slots" json:"slots"`
+	// PoolID is the execution-slot pool this aux model's perception requests
+	// join (the scheduler pool key). Derived — NOT persisted — and
+	// recomputed at every Validate (AssignAuxPoolIDs): an EXACT match of an
+	// existing main model (same provider + base URL + model id) reuses that
+	// main model's pool, so perception requests share that model's
+	// execution slots with its conversations; an unmatched aux gets its own
+	// pool under a derived id ("aux-" + the model-id slug, collision-
+	// suffixed against the main ids + the other aux entries).
+	PoolID string `toml:"-" json:"pool_id"`
 }
 
 // Embedder is the local llama-server serving /v1/embeddings (embeddinggemma-2).
@@ -543,6 +558,9 @@ func (c *ServerConfig) Validate() error {
 	}
 	for i := range c.Aux {
 		c.Aux[i].BaseURL = NormalizeBaseURL(c.Aux[i].BaseURL)
+		if c.Aux[i].Slots < 1 {
+			c.Aux[i].Slots = 1 // every aux model has at least one execution slot
+		}
 		// The same profile resolution as the main models (uniform surface —
 		// see the models loop above).
 		if p, err := ResolveProfileName(fmt.Sprintf("aux[%d]", i), c.Aux[i].Profile); err != nil {
@@ -551,6 +569,10 @@ func (c *ServerConfig) Validate() error {
 			c.Aux[i].Profile = p
 		}
 	}
+	// The aux execution-slot pools (derived from the live model set — see
+	// AssignAuxPoolIDs): after both base-URL canonicalization passes, so an
+	// exact match compares canonical forms.
+	AssignAuxPoolIDs(c)
 	// Required.
 	if len(c.Models) == 0 {
 		return errors.New("server.toml: at least one [[models]] entry is required")
@@ -678,6 +700,50 @@ func assignModelIDs(models []Model) {
 		}
 		models[i].ID = id
 		seen[id] = true
+	}
+}
+
+// AssignAuxPoolIDs derives each aux model's execution-slot pool id (the
+// scheduler pool key its perception requests submit to). It is a RELATIONSHIP
+// against the live model set, so it is recomputed at every Validate — never
+// trusted from a stored file — and the agent re-derives it at (re)load as a
+// defense against configs that skipped validation:
+//
+//   - an aux model that EXACTLY matches an existing main model — same
+//     provider, base URL, and model id (the same upstream model behind the
+//     same endpoint; the API key is an auth detail, not identity) — reuses
+//     THAT MAIN MODEL'S pool (its internal id). Its perception requests then
+//     share that model's execution slots with its conversations — the same
+//     physical capacity, one bound. Two matching main models (the same
+//     endpoint listed twice) resolve to the FIRST in catalog order.
+//   - an unmatched aux model gets its OWN pool under a derived id: "aux-" +
+//     ModelIDSlug(model_id), collision-suffixed (aux-v, aux-v-2, ...) against
+//     the main ids and the earlier aux entries, so it can never collapse
+//     onto a main model's pool or a sibling aux's.
+//
+// Matched or not, the result is deterministic for a given config.
+func AssignAuxPoolIDs(c *ServerConfig) {
+	taken := make(map[string]bool, len(c.Models))
+	for _, m := range c.Models {
+		taken[m.ID] = true
+	}
+	for i := range c.Aux {
+		id := ""
+		for _, m := range c.Models {
+			if m.Provider == c.Aux[i].Provider && m.BaseURL == c.Aux[i].BaseURL && m.ModelID == c.Aux[i].ModelID {
+				id = m.ID // exact match: reuse the main model's pool
+				break
+			}
+		}
+		if id == "" {
+			base := "aux-" + ModelIDSlug(c.Aux[i].ModelID)
+			id = base
+			for n := 2; taken[id]; n++ {
+				id = fmt.Sprintf("%s-%d", base, n)
+			}
+		}
+		taken[id] = true
+		c.Aux[i].PoolID = id
 	}
 }
 

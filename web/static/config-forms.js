@@ -14,10 +14,12 @@ function pwfield(label, id, val, ph){ const i=el("input",{id, type:"password", v
 
 // ---- model form helpers ----
 function freshModel(){ return {provider:"",base_url:"",api_key:"",model_id:"",display_name:"",max_context:"",context_auto:false,metadata:{reasoning:5,knowledge:5,speed:5},slots:1,profile:"general",enabled:true,auto_disabled:false,lockedTo:null}; }
-// base-URL normalization for "is this the same provider?" comparisons — match the
-// server probe, which treats scheme/host variants and a trailing /v1 as the same
-// endpoint (it tries /models and /v1/models). Trim, drop trailing slashes, drop /v1.
-function normBase(u){ return (u||"").trim().replace(/\/+$/,"").replace(/\/v1$/i,""); }
+// base-URL normalization for "is this the same provider?" comparisons — match
+// the server probe, which treats scheme variants, a missing scheme, and a
+// trailing /v1 as the same endpoint (it tries /models and /v1/models, and the
+// server canonicalizes a bare "host:port" to http://host:port/v1). Trim, drop
+// the scheme, drop trailing slashes, drop /v1.
+function normBase(u){ return (u||"").trim().replace(/^https?:\/\//i,"").replace(/\/+$/,"").replace(/\/v1$/i,""); }
 // is this model id already added for this base URL (i.e. already in the model list for this provider)?
 function modelAlreadyAdded(id, base){ return S.models.some(x => x.model_id===id && normBase(x.base_url)===normBase(base)); }
 // allKnownBases — every base URL configured anywhere (main models + aux), deduped.
@@ -155,7 +157,29 @@ async function detectModel(){ const m=S.modelDraft; if(m._detecting) return; if(
   catch(e){ S.formError="Detect failed: "+e.message+" — "+suggestedFix(e.message); }
   finally{ m._detecting=false; render(); }
 }
-function freshAux(){ return {kinds:[], provider:"", base_url:"", api_key:"", model_id:"", profile:"general"}; }
+function freshAux(){ return {kinds:[], provider:"", base_url:"", api_key:"", model_id:"", profile:"general", slots:1}; }
+// auxSharedMain — the main model this aux model EXACTLY matches (same
+// provider + base URL + model id — the server's pool-sharing rule, mirrored
+// client-side with the same endpoint normalization): when found, the aux has
+// no pool of its own — its perception requests run in THAT MAIN MODEL'S
+// execution-slot pool (sharing the model's conversations' slots), so the
+// main model's slot count is the bound.
+function auxSharedMain(m){ return S.models.find(x => x.provider===m.provider && normBase(x.base_url)===normBase(m.base_url) && x.model_id===m.model_id) || null; }
+// auxSlotsField — the aux form's "Execution slots" field (the main form's,
+// adapted for the pool-sharing rule): editable while the aux keeps its OWN
+// pool (min 1, the server clamps too), disabled + explanatory when the aux
+// exactly matches a main model (that model's slots are the effective bound).
+function auxSlotsField(id, m){
+  const shared = auxSharedMain(m);
+  const value = shared ? (shared.slots || 1) : (m.slots || 1);
+  const slotsInp = el("input", {id, type:"number", min:"1", step:"1", value:String(value), style:"max-width:6rem"});
+  if(shared) slotsInp.setAttribute("disabled","");
+  else slotsInp.addEventListener("input", () => { m.slots = slotsInp.value; });
+  const help = shared
+    ? "This model EXACTLY matches main model \u201c" + (shared.display_name || shared.model_id) + "\u201d (same provider, base URL, and model id) — its perception requests share that model's execution slots with its conversations (" + (shared.slots || 1) + " slot" + ((shared.slots || 1)===1?"":"s") + "). This count is informational while the match holds."
+    : "How many perception requests of this model may run at the same time (1 = strictly one at a time). Extra requests wait their turn in a queue.";
+  return el("div", {}, el("label", {}, "Execution slots"), el("p", {class:"field-help"}, help), slotsInp);
+}
 function addAux(){ S.aux.push(freshAux()); render(); notifyConfigChanged("aux"); }
 function removeAux(i){ S.aux.splice(i,1); if(S.auxError) delete S.auxError[i]; render(); notifyConfigChanged("aux"); }
 // modalitiesFromModel — the input modalities a detected model exposes (one or
@@ -435,7 +459,7 @@ function renderAuxPerception(i){
     field("Model", sel),
     field("Modalities (input)", modWrap),
     el("p",{class:"field-help"},"Which sense(s) this model perceives — pick one or more. Auto-filled from the model where the provider exposes them (llama-server does); set them manually otherwise. Its output is text."),
-    el("div",{class:"row"}, profileField("a_prof_"+i, m, false, null))
+    el("div",{class:"row"}, auxSlotsField("a_slots_"+i, m), profileField("a_prof_"+i, m, false, null))
   );
   return ph;
 }
