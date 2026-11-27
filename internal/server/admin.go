@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SherClockHolmes/webpush-go"
+
 	"github.com/utopiafallen/bevin/internal/config"
 	"github.com/utopiafallen/bevin/internal/email"
 	"github.com/utopiafallen/bevin/internal/profile"
@@ -175,6 +177,15 @@ func (a *App) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"from_name":    cfg.Email.FromName,
 			"use_starttls": cfg.Email.UseStartTLS,
 		},
+		// Web push (the PWA stage 2): the VAPID public key IS returned
+		// (the client needs it as the applicationServerKey to
+		// subscribe); the private key never is (only has_vapid_private
+		// — the masked-secret pattern).
+		"push": map[string]any{
+			"configured":        cfg.Push.Configured(),
+			"vapid_public":      cfg.Push.VAPIDPublic,
+			"has_vapid_private": cfg.Push.VAPIDPrivate != "",
+		},
 		"oauth": map[string]any{
 			"enabled":      cfg.Auth.OAuth.Enabled,
 			"name":         cfg.Auth.OAuth.Name,
@@ -253,6 +264,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 		OAuth   *config.OAuth      `json:"oauth"`
 		Sandbox *config.Sandbox    `json:"sandbox"`
 		Tools   *config.Tools      `json:"tools"`
+		Push    *config.Push       `json:"push"`
 		Server  *struct {
 			BaseURI *string `json:"base_uri"`
 		} `json:"server"`
@@ -265,7 +277,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	if p.Server != nil {
 		serverBase = p.Server.BaseURI // nil = area present but no key = no change
 	}
-	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && p.Sandbox == nil && p.Tools == nil && serverBase == nil {
+	if p.Models == nil && p.Aux == nil && p.Email == nil && p.OAuth == nil && p.Sandbox == nil && p.Tools == nil && p.Push == nil && serverBase == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to save"})
 		return
 	}
@@ -282,6 +294,14 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 	if p.Tools != nil && p.Tools.WebSearch.APIKey == "" {
 		if cur, err := config.Load(a.dataDir); err == nil {
 			p.Tools.WebSearch.APIKey = cur.Tools.WebSearch.APIKey // blank = keep the stored one
+		}
+	}
+	// The VAPID private key is server-generated (the keygen endpoint
+	// writes the pair); a blank one on a generic save keeps the stored
+	// one (the masked pattern — it is never sent to the browser).
+	if p.Push != nil && p.Push.VAPIDPrivate == "" {
+		if cur, err := config.Load(a.dataDir); err == nil {
+			p.Push.VAPIDPrivate = cur.Push.VAPIDPrivate // blank = keep the stored one
 		}
 	}
 	// A blank model/aux API key keeps the stored one (the masked pattern —
@@ -318,7 +338,7 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	oldSandbox := a.liveCfg().Sandbox
-	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox, p.Tools)
+	cfg, err := a.edit.CommitEdit(p.Models, p.Aux, p.Email, p.OAuth, serverBase, p.Sandbox, p.Tools, p.Push)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -336,6 +356,34 @@ func (a *App) adminConfigSave(w http.ResponseWriter, r *http.Request) {
 		restarted = a.restartRunningContainers(r.Context())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "reloaded": reloaded, "restarted": restarted})
+}
+
+// adminPushKeys generates the server's VAPID key pair and stores it in
+// [push] (the PWA stage 2: keys present = web push on — there is no
+// enabled flag). The pair is generated HERE, server-side: the private
+// key never leaves the server (the masked-secret pattern — the
+// response carries the public only, and the admin config read never
+// returns the private either). Re-running replaces the keys (existing
+// device subscriptions keep working — each carries its own keys — but
+// the old public key no longer matches, so already-subscribed devices
+// simply never hear again until they re-subscribe from the app).
+func (a *App) adminPushKeys(w http.ResponseWriter, r *http.Request) {
+	priv, pub, err := webpush.GenerateVAPIDKeys()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	cfg, err := a.edit.CommitEdit(nil, nil, nil, nil, nil, nil, nil, &config.Push{
+		VAPIDPublic:  pub,
+		VAPIDPrivate: priv,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	log.Printf("config: web-push VAPID keys generated (by admin, %s)", clientIP(r))
+	a.applyConfig(cfg)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "public_key": pub})
 }
 
 // adminProbeModel detects the provider + lists the models for a base URL (the

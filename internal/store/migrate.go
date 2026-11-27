@@ -109,6 +109,26 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		);
 		`,
 	},
+	{
+		// v8 (2026-11-26): web-push subscriptions (the PWA stage 2). One
+		// row per subscribed DEVICE — the per-user store is already
+		// per-user, so no handle column. The subscription IS the delivery
+		// gate (there is no separate "notifications on" flag): a device
+		// leaves by removing its row. p256dh/auth are the device's
+		// subscription keys exactly as the browser reports them
+		// (base64url); user_agent is diagnostic (which platform the
+		// subscription is from — Android is first-class, iOS best-effort).
+		version: 8,
+		up: `
+		CREATE TABLE IF NOT EXISTS push_subscriptions (
+		endpoint   TEXT PRIMARY KEY,
+		p256dh     TEXT NOT NULL,
+		auth       TEXT NOT NULL,
+		user_agent TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+		);
+		`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

@@ -127,6 +127,14 @@ func NewNormal(dataDir string, srv *store.ServerStore, prov auth.Provider) (*App
 	a.ag.NotifyConversation = func(handle, convID string) {
 		a.events.broadcast(handle, event{Type: "conversation", ConversationID: convID})
 	}
+	// Web push (the PWA stage 2): a task settled into a terminal state
+	// (done/blocked — fired from the task runner's settle point,
+	// alongside the completion-summary post). Same non-blocking
+	// contract as the nudges above; the framing + reason first-line
+	// compose in the push fan-out (pushSend).
+	a.ag.NotifyTaskTerminal = func(handle, taskTitle, convID, state, summary string) {
+		a.pushSend(handle, "Task \""+taskTitle+"\" is "+state, firstLineOf(summary, 120), convID, "task")
+	}
 	// Start the sidecar supervisor: it ensures the loopback sidecars (Qdrant,
 	// the llama-server embedder, ffmpeg) are up at boot (re-launching any that
 	// are down after a bevin restart or machine reboot) and respawns any that
@@ -194,6 +202,13 @@ func (a *App) routes() {
 	// learns a conversation changed and re-pulls it — the channel carries
 	// events only, never message content.
 	mux.HandleFunc("GET /api/me/events", a.requireAuth(a.userEvents))
+	// Web push (the PWA stage 2): per-user subscription management.
+	// The subscription IS the delivery gate (there is no "notifications
+	// on" flag) — a user is automatically enabled for notifications
+	// once subscribed; disabling means unsubscribing this device.
+	mux.HandleFunc("GET /api/push/status", a.requireAuth(a.pushStatus))
+	mux.HandleFunc("POST /api/push/subscribe", a.requireAuth(a.pushSubscribe))
+	mux.HandleFunc("DELETE /api/push/subscribe", a.requireAuth(a.pushSubscribe))
 	mux.HandleFunc("GET /api/models", a.requireAuth(a.models))
 	// The chat API is the user interaction surface: the admin is not a
 	// regular user, so it rejects admin sessions (GET / sends them to the
@@ -258,6 +273,11 @@ func (a *App) routes() {
 	mux.HandleFunc("GET /admin/api/sidecars", a.requireAdmin(a.adminSidecars))
 	mux.HandleFunc("GET /admin/api/email", a.requireAdmin(a.adminEmail))
 	mux.HandleFunc("POST /admin/api/email/test", a.requireAdmin(a.adminEmailTest))
+	// Web-push VAPID key generation (the PWA stage 2): the server
+	// generates the ES256 pair and stores it in [push]; the response
+	// carries the public key only (the private key never leaves the
+	// server — the masked-secret pattern).
+	mux.HandleFunc("POST /admin/api/push/keys", a.requireAdmin(a.adminPushKeys))
 	// Admin config pages (the setup wizard is first-time only; in normal mode
 	// the admin edits the live config in dedicated pages that reuse the
 	// wizard's form components): the gated entry points + the config APIs
@@ -785,7 +805,14 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
 		return
 	}
-	convID, reply, err := a.ag.Turn(r.Context(), u.Handle, id, req.Message)
+	// The turn runs on a context DETACHED from the request, exactly like
+	// the streaming path: a caller that walks away (or a client that
+	// drops) must not cancel in-flight work — it completes and is
+	// persisted regardless. ("Conversations run detached" is uniform
+	// across both chat paths; this one simply owes no push — its caller
+	// holds the reply synchronously.)
+	turnCtx := context.WithoutCancel(r.Context())
+	convID, reply, err := a.ag.Turn(turnCtx, u.Handle, id, req.Message)
 	if err != nil {
 		log.Printf("turn: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -935,6 +962,12 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("turn (stream %s): %v", u.Handle, err)
 		_ = writeEvent("error", map[string]string{"error": err.Error()})
+		// Web push (the PWA stage 2): an errored turn notifies too —
+		// the user must know the agent could not finish. convID is
+		// the resolved conversation (a new chat created it before
+		// failing, when it got that far); a push is a no-op when the
+		// conversation is gone.
+		a.pushTurnFailed(u.Handle, convID, err)
 		return
 	}
 	elapsed := time.Since(start)
@@ -966,13 +999,27 @@ func (a *App) sendMessageStream(w http.ResponseWriter, r *http.Request) {
 		"ttft_ms":         ttft.Milliseconds(),
 		"seqs":            seqs,
 	})
+	// Web push (the PWA stage 2): the turn COMPLETION is the primary
+	// notification event — fired here (the settle point) on BOTH
+	// outcomes (the error path fires above). Fire-and-forget: it never
+	// delays the response, and it is a no-op when push is off or the
+	// user has no subscribed devices.
+	a.pushTurnDone(u.Handle, convID, reply)
 }
 
-// notify sends an email notification to a user (by handle). It is fire-and-
-// forget: a notification must never block or break the calling path. It is a
-// no-op when email is not configured, the user has no email address, or the
-// send fails (the failure is logged, not returned).
+// notify sends a notification to a user (by handle) over every
+// configured transport: web push (the PWA stage 2 — the subscription
+// list is the gate; a no-op when push is unconfigured or the user has
+// no subscribed devices) + email. It is fire-and-forget: a
+// notification must never block or break the calling path. Each
+// transport is independently a no-op when unconfigured (the send
+// failure is logged, not returned).
 func (a *App) notify(handle, subject, body string) {
+	// System notifications (container restart, disk unfreeze) ride the
+	// push fan-out as a second transport on the SAME call — zero new
+	// call sites. convID is empty: a system notification deep-links the
+	// app root.
+	a.pushSend(handle, subject, body, "", "system")
 	if a.liveMail() == nil {
 		return
 	}

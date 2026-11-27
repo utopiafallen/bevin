@@ -420,7 +420,7 @@ func TestCommitEdit(t *testing.T) {
 		{ID: "m1", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o", DisplayName: "GPT-4o", MaxContext: 128000, Slots: 0, Enabled: true}, // slots 0 -> clamped to 1
 		{ID: "m2", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "gpt-4o-mini", DisplayName: "GPT-4o mini", MaxContext: 128000, Slots: 2, Enabled: true},
 	}
-	got, err := m.CommitEdit(&newModels, nil, nil, nil, nil, nil, nil)
+	got, err := m.CommitEdit(&newModels, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestCommitEdit(t *testing.T) {
 	}
 	// A save with NO areas is not a valid save (the caller rejects it), but an
 	// all-nil CommitEdit is a no-op write of the current config.
-	same, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, nil)
+	same, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestCommitEdit(t *testing.T) {
 	}
 	// An invalid model catalog is rejected and does NOT clobber the saved one.
 	bad := []config.Model{{ID: "mX", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "sk-x", ModelID: "x", Enabled: false}} // none enabled
-	if _, err := m.CommitEdit(&bad, nil, nil, nil, nil, nil, nil); err == nil {
+	if _, err := m.CommitEdit(&bad, nil, nil, nil, nil, nil, nil, nil); err == nil {
 		t.Fatal("expected error for a model catalog with no enabled model")
 	}
 	after, err := config.Load(m.dataDir)
@@ -965,7 +965,7 @@ func TestCommitEditTools(t *testing.T) {
 	}
 	// Save ONLY tools: web_search enabled + key set.
 	tools := &config.Tools{WebSearch: config.WebSearch{Enabled: true, Provider: "exa", APIKey: "exa-123"}}
-	got, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, tools)
+	got, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, tools, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +984,7 @@ func TestCommitEditTools(t *testing.T) {
 		t.Fatalf("the tools save did not persist: %+v", reloaded.Tools.WebSearch)
 	}
 	// An all-nil save leaves tools untouched (the tools arg is nil).
-	same, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, nil)
+	same, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +993,7 @@ func TestCommitEditTools(t *testing.T) {
 	}
 	// An invalid tools area is rejected + does not clobber the saved one.
 	bad := &config.Tools{WebSearch: config.WebSearch{Enabled: true}} // no provider, no key
-	if _, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, bad); err == nil {
+	if _, err := m.CommitEdit(nil, nil, nil, nil, nil, nil, bad, nil); err == nil {
 		t.Fatal("an enabled web_search without a provider/key must be rejected")
 	}
 	after, err := config.Load(m.dataDir)

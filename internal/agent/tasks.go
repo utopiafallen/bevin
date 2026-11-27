@@ -319,6 +319,9 @@ func (ts *taskSystem) run(handle, taskID string) {
 		// objective).
 		_, _ = us.AppendMessage(convID, roleAssistant, "Task failed: "+terr.Error(), "", "", nil)
 		_ = us.TransitionTask(taskID, "in-progress", "blocked")
+		if a.NotifyTaskTerminal != nil {
+			a.NotifyTaskTerminal(handle, task.Title, convID, "blocked", "the run failed: "+terr.Error())
+		}
 	default:
 		// The terminal state: the model's report when it made one, the
 		// harness default (done) otherwise.
@@ -345,6 +348,18 @@ func (ts *taskSystem) run(handle, taskID string) {
 				}
 				_, _ = us.AppendMessage(*origin, roleAssistant, framing+"\n\n"+summary, "", "", nil)
 			}
+		}
+		// Web push (the PWA stage 2): the "Task 'X' is done / is
+		// blocked" notification. The summary is the report note (when
+		// blocked, that IS the reason), else the final reply — the
+		// framing and the first-line truncation happen in the server's
+		// fan-out.
+		if a.NotifyTaskTerminal != nil {
+			summary := reply
+			if intent.note != "" {
+				summary = intent.note
+			}
+			a.NotifyTaskTerminal(handle, task.Title, convID, state, summary)
 		}
 	}
 }

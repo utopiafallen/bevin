@@ -95,6 +95,17 @@ type Agent struct {
 	// concurrency-safe.
 	NotifyConversation func(handle, convID string)
 
+	// NotifyTaskTerminal, if set, is called when a background task
+	// settles into a terminal state (done/blocked — after the
+	// TransitionTask + completion-summary post). The server wires it to
+	// the web-push fan-out (the PWA stage 2 "Task 'X' is done"
+	// notification). summary is the raw report (the advance_task note
+	// when given, else the final reply) — framing + truncation happen on
+	// the server side. A task the user CANCELED fires nothing (the user
+	// initiated it). Same contract as the nudges: the caller's goroutine,
+	// non-blocking, concurrency-safe, best-effort.
+	NotifyTaskTerminal func(handle, taskTitle, convID, state, summary string)
+
 	cfgMu sync.Mutex // guards reads/writes of cfg.Models (the auto-disable state)
 }
 
