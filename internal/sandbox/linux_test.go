@@ -279,6 +279,9 @@ func newTestBackend(t *testing.T) (*linuxBackend, *fakeRun, string) {
 		run:         fake.call,
 		machinesDir: filepath.Join(dataDir, "machines"),
 		unitBaseDir: filepath.Join(dataDir, "system"),
+		pty:         newPtyRegistry(),
+		ptyReapAt:   map[string]time.Time{},
+		envMu:       newEnvLocks(),
 	}
 	return b, fake, dataDir
 }

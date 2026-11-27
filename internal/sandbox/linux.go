@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -68,10 +69,19 @@ type linuxBackend struct {
 	// (overridden in tests — they are absolute system paths by default).
 	machinesDir string
 	unitBaseDir string
+	// pty is the live interactive-session registry (the WS2 layer);
+	// envMu serializes environment-use operations per user (the WS2
+	// concurrency rule: the environment is the queue, not the model slot).
+	pty   *ptyRegistry
+	envMu *envLocks
+	// ptyReapMu/ptyReapAt throttle the orphan reap on the already-running
+	// Ensure path (at most once a minute per handle).
+	ptyReapMu sync.Mutex
+	ptyReapAt map[string]time.Time
 }
 
 func newLinux(dataDir string, cfg Config) *linuxBackend {
-	return &linuxBackend{dataDir: dataDir, cfg: cfg, run: osRun, machinesDir: defaultMachinesDir, unitBaseDir: defaultUnitBaseDir}
+	return &linuxBackend{dataDir: dataDir, cfg: cfg, run: osRun, machinesDir: defaultMachinesDir, unitBaseDir: defaultUnitBaseDir, pty: newPtyRegistry(), ptyReapAt: map[string]time.Time{}, envMu: newEnvLocks()}
 }
 
 // Runtime reports whether the linux container runtime is ready (root,
@@ -167,6 +177,10 @@ func (b *linuxBackend) Ensure(ctx context.Context, handle string) (Info, error) 
 	if ok, err := b.running(ctx, handle); err != nil {
 		return Info{}, err
 	} else if ok {
+		// A bevin restart with the container still up leaves the pty
+		// sessions' units running (or to this fresh process): reclaim
+		// them (throttled — orphans can only appear after a restart).
+		b.reapOrphanPtyThrottled(ctx, handle)
 		return Info{handle, StateRunning}, nil
 	}
 
@@ -264,6 +278,9 @@ func (b *linuxBackend) Ensure(ctx context.Context, handle string) (Info, error) 
 		out, _ := b.runOut(ctx, "journalctl", "-u", "systemd-nspawn@"+m, "-n", "15", "--no-pager")
 		return Info{}, fmt.Errorf("the container did not come up: %v — %s", err, tail([]byte(out)))
 	}
+	// The pty orphan cleanup for the fresh boot: stale state files from
+	// the machine's previous life (their units died with it).
+	b.reapOrphanPty(ctx, handle, m)
 
 	// 6. Host side of the veth (it exists only while the container runs):
 	//    isolation first (no container→container, no container→host-LAN),
@@ -563,6 +580,11 @@ func (b *linuxBackend) ExecIn(ctx context.Context, handle, command, cwd string, 
 	if cwd != "" && !filepath.IsAbs(cwd) {
 		return Result{}, errors.New("working directory must be an absolute container path")
 	}
+	// The environment-use lock (one use of the environment at a time per
+	// user — the WS2 rule; an exec must not start mid-pty-session).
+	lk := b.envMu.lock(handle)
+	lk.Lock()
+	defer lk.Unlock()
 	if ok, err := b.running(ctx, handle); err != nil {
 		return Result{}, err
 	} else if !ok {
@@ -762,6 +784,9 @@ func (b *linuxBackend) WriteFileAtomic(ctx context.Context, handle, path string,
 
 // Stop stops the user's container (the storage is preserved).
 func (b *linuxBackend) Stop(ctx context.Context, handle string) (Info, error) {
+	// The interactive sessions go with the machine (clean teardown while
+	// the units are still reachable).
+	_ = b.PtyCloseAll(ctx, handle)
 	if _, errb, code, err := b.run(ctx, "", "systemctl", "stop", "systemd-nspawn@"+b.machineName(handle)); err != nil || code != 0 {
 		return Info{handle, b.currentState(handle)}, fmt.Errorf("stopping the container failed: %v (%s)", err, tail(errb))
 	}
@@ -784,6 +809,8 @@ func (b *linuxBackend) Restart(ctx context.Context, handle string) (Info, error)
 // (the user's data directory is untouched).
 func (b *linuxBackend) Remove(ctx context.Context, handle string) error {
 	m := b.machineName(handle)
+	// The interactive sessions go with the machine (before the stop below).
+	_ = b.PtyCloseAll(ctx, handle)
 	if ok, err := b.running(ctx, handle); err != nil {
 		return err
 	} else if ok {

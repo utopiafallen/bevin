@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	hcsshim "github.com/Microsoft/hcsshim"
@@ -59,10 +60,17 @@ type baseLayer struct {
 type windowsBackend struct {
 	dataDir string
 	cfg     Config
+	// ptyMu/ptySessions: the live console-session registry (in-memory —
+	// a bevin restart loses it, like the linux registry; the container's
+	// teardown orphans any surviving console process); envMu serializes
+	// environment-use operations per user (the WS2 concurrency rule).
+	ptyMu       sync.Mutex
+	ptySessions map[string]*winPtySession
+	envMu       *envLocks
 }
 
 func newWindows(dataDir string, cfg Config) *windowsBackend {
-	return &windowsBackend{dataDir: dataDir, cfg: cfg}
+	return &windowsBackend{dataDir: dataDir, cfg: cfg, ptySessions: map[string]*winPtySession{}, envMu: newEnvLocks()}
 }
 
 // windowsState is the per-user bookkeeping kept in state.json (next to the
@@ -380,6 +388,11 @@ func (b *windowsBackend) ExecIn(ctx context.Context, handle, command, cwd string
 	if timeout > 5*time.Minute {
 		timeout = 5 * time.Minute
 	}
+	// The environment-use lock (the WS2 rule: an exec must not start
+	// mid-console-session).
+	lk := b.envMu.lock(handle)
+	lk.Lock()
+	defer lk.Unlock()
 	c, err := hcsshim.OpenContainer(b.containerID(handle))
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrNotRunning, err)
@@ -598,8 +611,30 @@ func (b *windowsBackend) WriteFileAtomic(ctx context.Context, handle, path strin
 	return nil
 }
 
+// ptySessionsGone drops the handle's sessions from the registry: the
+// container's teardown (stop/remove) kills the console processes with the
+// machine — there is nothing to wait on, the bookkeeping just goes.
+func (b *windowsBackend) ptySessionsGone(handle string) {
+	b.ptyMu.Lock()
+	defer b.ptyMu.Unlock()
+	for id, s := range b.ptySessions {
+		if s.handle != handle {
+			continue
+		}
+		s.mu.Lock()
+		if !s.exited {
+			s.exited = true
+			s.code = -1
+		}
+		s.mu.Unlock()
+		delete(b.ptySessions, id)
+	}
+}
+
 // Stop stops the user's container (the storage is preserved).
 func (b *windowsBackend) Stop(_ context.Context, handle string) (Info, error) {
+	// The interactive sessions die with the machine.
+	b.ptySessionsGone(handle)
 	c, err := hcsshim.OpenContainer(b.containerID(handle))
 	if err != nil {
 		// No compute system — only disk state to report.
@@ -664,6 +699,8 @@ func (b *windowsBackend) Restart(ctx context.Context, handle string) (Info, erro
 // Remove stops the user's container and deletes its persistent storage
 // (the user's data directory is untouched).
 func (b *windowsBackend) Remove(ctx context.Context, handle string) error {
+	// The interactive sessions die with the machine.
+	b.ptySessionsGone(handle)
 	c, err := hcsshim.OpenContainer(b.containerID(handle))
 	if err == nil {
 		if err := c.Terminate(); err != nil && !isAlreadyStopped(err) {

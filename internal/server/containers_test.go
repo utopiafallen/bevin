@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -80,6 +81,22 @@ func (f *fakeSandbox) Restart(_ context.Context, handle string) (sandbox.Info, e
 	return sandbox.Info{Handle: handle, State: sandbox.StateRunning}, nil
 }
 func (f *fakeSandbox) Remove(context.Context, string) error { return nil }
+
+// The PTY methods (the server's tests don't drive sessions — the close-all
+// hook's nil is all they need).
+func (f *fakeSandbox) PtyStart(context.Context, string, string, string, int, int) (string, error) {
+	return "", fmt.Errorf("pty unsupported in the fake")
+}
+func (f *fakeSandbox) PtyWait(context.Context, string, string, time.Duration) (sandbox.PtyWaitResult, error) {
+	return sandbox.PtyWaitResult{}, fmt.Errorf("pty unsupported in the fake")
+}
+func (f *fakeSandbox) PtyInput(context.Context, string, string, string) error {
+	return fmt.Errorf("pty unsupported in the fake")
+}
+func (f *fakeSandbox) PtyClose(context.Context, string, string) (int, error) {
+	return -1, fmt.Errorf("pty unsupported in the fake")
+}
+func (f *fakeSandbox) PtyCloseAll(context.Context, string) error { return nil }
 
 func (f *fakeSandbox) wasRestarted(handle string) bool {
 	f.mu.Lock()

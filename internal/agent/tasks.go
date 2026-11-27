@@ -133,6 +133,10 @@ func (a *Agent) SpawnTask(ctx context.Context, handle string, spec TaskSpec) (*s
 	}
 	task, err := us.CreateTaskNew(store.TaskNew{
 		Title: spec.Title, Description: spec.Description,
+		// Agent-owned tasks are ALWAYS system-owned (Refinement B — the
+		// v1 guarantee is structural: this harness path + the
+		// interactive_exec tool are the only creation sites).
+		Owner: "system",
 		Model: model, MemStart: memStart, MemEnd: memEnd,
 	})
 	if err != nil {
@@ -306,6 +310,10 @@ func (ts *taskSystem) run(handle, taskID string) {
 	// (even on the error/cancel paths, so a failed run's report never
 	// leaks into a later re-run).
 	intent, hasIntent := ts.takeTerminalIntent(convID)
+	// The task's pty sessions are bound to the task (the design log's
+	// WS2 contract: task end → the sessions go — a cancel is exactly the
+	// standard task op). Runs on every settle path; best-effort.
+	a.closeTaskPtySessions(handle, convID)
 
 	switch {
 	case ctx.Err() != nil:

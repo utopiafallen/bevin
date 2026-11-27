@@ -129,6 +129,19 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		);
 		`,
 	},
+	{
+		// v9 (2026-11-27): tasks.owner — the task-ownership axis (the
+		// design log's Refinement B): user|system, ALWAYS set explicitly
+		// at creation. The user's board shows user-owned tasks only
+		// (system hidden); v1 has no user task-creation path (the board
+		// is a stub) so EVERY v1 task is system — the agent's only
+		// task-creation tool is interactive_exec. The DEFAULT covers the
+		// pre-v9 rows (all of them system work).
+		version: 9,
+		up: `
+		ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT 'system';
+		`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

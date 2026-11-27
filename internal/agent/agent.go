@@ -79,6 +79,14 @@ type Agent struct {
 	// per-model slot pools (see tasks.go).
 	tasks *taskSystem
 
+	// ptySessions is the task-bound pty session tracker (the design log's
+	// WS2 contract: a pty session's lifetime is bound to its task — task
+	// end, whatever the outcome, ends the sessions). conversation id →
+	// the session ids the conversation started (env_pty_start records
+	// here; the task runner's settle path closes them).
+	ptySessMu   sync.Mutex
+	ptySessions map[string]map[string]bool
+
 	// NotifyMessage, if set, is called after EVERY row persisted into a
 	// user's conversation (any role — user, assistant, checkin, summary).
 	// The server wires it to the per-user event hub: the nudge that tells
@@ -123,10 +131,11 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// skipped validation still carries correct pool keys.
 	config.AssignAuxPoolIDs(cfg)
 	a := &Agent{
-		cfg:       cfg,
-		dataDir:   dataDir,
-		providers: map[string]provider.Provider{},
-		users:     map[string]*store.UserStore{},
+		cfg:         cfg,
+		dataDir:     dataDir,
+		providers:   map[string]provider.Provider{},
+		users:       map[string]*store.UserStore{},
+		ptySessions: map[string]map[string]bool{},
 	}
 	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
@@ -185,6 +194,12 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// on first use; a non-zero exit is a result, not an error).
 	if err := registerExecTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register exec: %w", err)
+	}
+	// The pty tools (the design log's WS2 section): the interactive half
+	// (interactive_exec + env_pty_wait/input/close) — the pty-session
+	// conversation on top of the same environment.
+	if err := registerPtyTools(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register pty tools: %w", err)
 	}
 	// The memory tools (the memory model's on-demand surface: recall /
 	// remember / forget over the user's P5 memories).
@@ -289,6 +304,18 @@ func (a *Agent) wireTools(us *store.UserStore, conv *store.Conversation) []provi
 			continue
 		}
 		if !curationConv && t.Name == "set_profile" {
+			continue
+		}
+		// The pty split (the design log's WS3 reshape): interactive_exec
+		// is the USER agent's task-spawner — a task conversation must
+		// not nest another task (v1). The env_pty_* tools are the TASK
+		// agent's session surface — the user's live turn never drives a
+		// pty in-turn (that is what interactive_exec's background task is
+		// for).
+		if ownerTaskID != nil && t.Name == "interactive_exec" {
+			continue
+		}
+		if ownerTaskID == nil && isPtyTool(t.Name) {
 			continue
 		}
 		filtered = append(filtered, t)

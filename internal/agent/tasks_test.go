@@ -477,15 +477,25 @@ type toolCallProvider struct {
 	calls   int
 	results []provider.Result
 	errs    []error // per-call index; a non-nil entry makes that call fail
+	// delay simulates a real model call's latency (a real call takes far
+	// longer than a dispatch goroutine's startup — tests that need the
+	// caller to HOLD ITS SLOT across a spawned work item set this).
+	delay time.Duration
 }
 
 func (p *toolCallProvider) Name() string { return "tcall" }
 
 func (p *toolCallProvider) Chat(_ context.Context, _ string, _ provider.ChatRequest) (*provider.Result, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	i := p.calls
 	p.calls++
+	delay := p.delay
+	p.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if i < len(p.errs) && p.errs[i] != nil {
 		return nil, p.errs[i]
 	}

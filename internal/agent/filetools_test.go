@@ -32,6 +32,26 @@ type fakeContainerBackend struct {
 	execCalls   []fakeExecCall
 	execResult  sandbox.Result
 	execErr     error
+
+	// The pty layer (the interactive tools' test double).
+	ptySessions      map[string]*fakePtySession
+	ptySeq           int
+	ptyStartCalls    []fakePtyStartCall
+	ptyStartErr      error
+	ptyInitialOutput string
+	// ptyInitialWaiting makes new sessions report waiting_input (the prompt
+	// flow); ptyAutoExitAfterInput exits each new session (with
+	// ptyExitCode) as soon as the first input arrives (the one-answer
+	// command flow).
+	ptyInitialWaiting     bool
+	ptyAutoExitAfterInput bool
+	ptyExitCode           int
+	// ptyInputEcho is the output a new session emits when its first input
+	// arrives (a prompt echo / the answer's effect).
+	ptyInputEcho  string
+	ptyInputCalls []fakePtyInputCall
+	ptyCloseCalls []string
+	ptyCloseCode  int
 }
 
 // fakeExecCall is one recorded ExecIn (the exec tool's tests assert the
@@ -44,7 +64,7 @@ type fakeExecCall struct {
 }
 
 func newFakeContainerBackend() *fakeContainerBackend {
-	return &fakeContainerBackend{fs: map[string][]byte{}, dataDir: "/data"}
+	return &fakeContainerBackend{fs: map[string][]byte{}, dataDir: "/data", ptySessions: map[string]*fakePtySession{}}
 }
 
 func (f *fakeContainerBackend) Runtime(context.Context) sandbox.Runtime {
@@ -106,6 +126,140 @@ func (f *fakeContainerBackend) Restart(context.Context, string) (sandbox.Info, e
 	return sandbox.Info{}, nil
 }
 func (f *fakeContainerBackend) Remove(context.Context, string) error { return nil }
+
+// --- The in-memory pty layer (the interactive tools' test double) ---
+//
+// fakePtySession is one fake session: the test scripts its output + exit,
+// the tool's wait/input/close calls move it exactly as the real backends
+// would.
+type fakePtySession struct {
+	mu       sync.Mutex
+	output   string // the full output so far
+	deliver  int    // the offset already delivered by PtyWait
+	exited   bool
+	code     int
+	waiting  bool // the wait-state to report while running
+	prompt   string
+	emitNext string // output emitted when the next input arrives (a prompt echo)
+	// exitAfterInput exits the session (with exitCode) when the next input
+	// arrives — the scripted "answer the one prompt and it runs off" flow.
+	exitAfterInput bool
+	exitCode       int
+	inputs         []string
+}
+
+func (s *fakePtySession) wait() sandbox.PtyWaitResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := sandbox.PtyWaitResult{}
+	if s.exited {
+		res.State = sandbox.PtyStateExited
+		res.ExitCode = s.code
+	} else if s.waiting {
+		res.State = sandbox.PtyStateWaitingInput
+	} else {
+		res.State = sandbox.PtyStateRunning
+	}
+	res.NewOutput = s.output[s.deliver:]
+	s.deliver = len(s.output)
+	res.TotalBytes = int64(len(s.output))
+	res.Prompt = s.prompt
+	return res
+}
+func (s *fakePtySession) input(text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.exited {
+		return fmt.Errorf("the session has already exited (exit code %d)", s.code)
+	}
+	s.inputs = append(s.inputs, text)
+	if s.emitNext != "" {
+		s.output += s.emitNext
+		s.emitNext = ""
+	}
+	if s.exitAfterInput {
+		s.exited = true
+		s.code = s.exitCode
+	}
+	return nil
+}
+
+type fakePtyStartCall struct{ Command, Cwd string }
+type fakePtyInputCall struct{ Session, Text string }
+
+func (f *fakeContainerBackend) PtyStart(_ context.Context, _, command, cwd string, _, _ int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ptyStartCalls = append(f.ptyStartCalls, fakePtyStartCall{Command: command, Cwd: cwd})
+	if f.ptyStartErr != nil {
+		return "", f.ptyStartErr
+	}
+	id := fmt.Sprintf("s%d", f.ptySeq)
+	f.ptySeq++
+	f.ptySessions[id] = &fakePtySession{prompt: "prompt$ ", waiting: f.ptyInitialWaiting}
+	if f.ptyInitialOutput != "" {
+		f.ptySessions[id].output = f.ptyInitialOutput
+	}
+	if f.ptyInputEcho != "" {
+		f.ptySessions[id].emitNext = f.ptyInputEcho
+	}
+	if f.ptyAutoExitAfterInput {
+		f.ptySessions[id].exitAfterInput = true
+		f.ptySessions[id].exitCode = f.ptyExitCode
+	}
+	return id, nil
+}
+func (f *fakeContainerBackend) PtyWait(_ context.Context, _, sessionID string, _ time.Duration) (sandbox.PtyWaitResult, error) {
+	f.mu.Lock()
+	s, ok := f.ptySessions[sessionID]
+	f.mu.Unlock()
+	if !ok {
+		return sandbox.PtyWaitResult{}, fmt.Errorf("unknown pty session %q", sessionID)
+	}
+	return s.wait(), nil
+}
+func (f *fakeContainerBackend) PtyInput(_ context.Context, _, sessionID, text string) error {
+	f.mu.Lock()
+	s, ok := f.ptySessions[sessionID]
+	f.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown pty session %q", sessionID)
+	}
+	f.mu.Lock()
+	f.ptyInputCalls = append(f.ptyInputCalls, fakePtyInputCall{Session: sessionID, Text: text})
+	f.mu.Unlock()
+	return s.input(text)
+}
+func (f *fakeContainerBackend) PtyClose(_ context.Context, _, sessionID string) (int, error) {
+	f.mu.Lock()
+	s, ok := f.ptySessions[sessionID]
+	f.ptyCloseCalls = append(f.ptyCloseCalls, sessionID)
+	f.mu.Unlock()
+	if !ok {
+		return -1, fmt.Errorf("unknown pty session %q", sessionID)
+	}
+	s.mu.Lock()
+	if !s.exited {
+		s.exited = true
+		s.code = f.ptyCloseCode
+	}
+	code := s.code
+	s.mu.Unlock()
+	return code, nil
+}
+func (f *fakeContainerBackend) PtyCloseAll(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, s := range f.ptySessions {
+		s.mu.Lock()
+		if !s.exited {
+			s.exited = true
+			s.code = f.ptyCloseCode
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
 
 func (f *fakeContainerBackend) set(path, content string) {
 	f.mu.Lock()

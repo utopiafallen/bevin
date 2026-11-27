@@ -190,6 +190,37 @@ type Backend interface {
 	// Remove stops the user's container and deletes its persistent
 	// storage (the user's data directory is untouched).
 	Remove(ctx context.Context, handle string) error
+
+	// --- The interactive (PTY) layer (the design log's WS2 section) ---
+
+	// PtyStart starts an interactive session: the command runs in the
+	// user's environment on a pseudo-terminal (windows: an HCS console).
+	// The environment must be running (ErrNotRunning). It returns the
+	// session id (the handle's sessions are addressable by it only).
+	PtyStart(ctx context.Context, handle, command, cwd string, cols, rows int) (string, error)
+
+	// PtyWait blocks up to timeout for new output / a state change / the
+	// command exiting, and returns what happened: the output produced
+	// since the previous wait (the 64 KB ring budget — see PtyWaitResult),
+	// the current wait-chain state (running | waiting_input | waiting |
+	// exited), and the exit code when exited. A timeout is NOT an error
+	// (the model simply waits again).
+	PtyWait(ctx context.Context, handle, sessionID string, timeout time.Duration) (PtyWaitResult, error)
+
+	// PtyInput writes text to the session's stdin (the model's answer to
+	// a prompt). A session that has already exited is an error (there is
+	// no process to send it to).
+	PtyInput(ctx context.Context, handle, sessionID, text string) error
+
+	// PtyClose ends the session (killing the command's process group) and
+	// returns its exit code (best effort: -1 when unknown). Idempotent.
+	PtyClose(ctx context.Context, handle, sessionID string) (int, error)
+
+	// PtyCloseAll ends every live session of the handle (the environment
+	// Stop/Remove paths + the server shutdown call it — a stopped
+	// environment takes its sessions with it; the host-side session files
+	// and registry entries are cleaned up here).
+	PtyCloseAll(ctx context.Context, handle string) error
 }
 
 // Storage layout under the data directory (all container state lives here
@@ -204,6 +235,9 @@ type Backend interface {
 //	    state.json    per-user bookkeeping
 //	    rootfs/       (linux) the container's rootfs (persistent)
 //	    rwlayer/      (windows) the container's read-write layer
+//	<data>/users/<handle>/.bevin-pty/   (linux) the pty session state files
+//	  (inside the MAPPED data dir — the container sees it at /data/.bevin-pty;
+//	  the helper writes, the host reads directly)
 func SandboxRoot(dataDir string) string {
 	return filepath.Join(dataDir, "sandboxes")
 }

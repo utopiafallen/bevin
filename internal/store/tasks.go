@@ -12,8 +12,14 @@ type Task struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	State       string `json:"state"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	// Owner is the task-ownership axis (v9; the design log's Refinement
+	// B): "user" or "system". ALWAYS set explicitly at creation; the
+	// user's board shows user-owned tasks only (system hidden). Every
+	// v1 task is system (the agent's only task-creation tool is
+	// interactive_exec; there is no user task-creation path yet).
+	Owner     string `json:"owner"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 	// ConversationID is the task's owned conversation. A todo task may not
 	// have one yet: the conversation is created at DISPATCH, with the
 	// resolved model (the task model rule — no explicit target means any
@@ -47,20 +53,26 @@ var taskTerminal = map[string]bool{"done": true, "blocked": true, "canceled": tr
 // TaskStateValid reports whether s is a known task state.
 func TaskStateValid(s string) bool { return taskStates[s] }
 
-const taskCols = `id, title, description, state, created_at, updated_at, conversation_id, origin_conversation_id, model, memory_start, memory_end`
+const taskCols = `id, title, description, state, created_at, updated_at, conversation_id, origin_conversation_id, model, memory_start, memory_end, owner`
 
 func scanTask(rs interface{ Scan(...any) error }, t *Task) error {
-	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID, &t.OriginConversationID, &t.Model, &t.MemoryStart, &t.MemoryEnd)
+	return rs.Scan(&t.ID, &t.Title, &t.Description, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.ConversationID, &t.OriginConversationID, &t.Model, &t.MemoryStart, &t.MemoryEnd, &t.Owner)
 }
 
-func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, deps []string, model *string, memStart, memEnd *int64) (*Task, error) {
+// taskOwners are the valid values of tasks.owner (Refinement B).
+var taskOwners = map[string]bool{"user": true, "system": true}
+
+func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state, owner string, deps []string, model *string, memStart, memEnd *int64) (*Task, error) {
 	if !taskStates[state] {
 		return nil, fmt.Errorf("invalid task state %q", state)
 	}
+	if !taskOwners[owner] {
+		return nil, fmt.Errorf("invalid task owner %q (user|system)", owner)
+	}
 	id := newID()
 	now := nowUTC()
-	if _, err := tx.Exec(`INSERT INTO tasks (id, title, description, state, created_at, updated_at, model, memory_start, memory_end) VALUES (?,?,?,?,?,?,?,?,?)`,
-		id, title, description, state, now, now, model, memStart, memEnd); err != nil {
+	if _, err := tx.Exec(`INSERT INTO tasks (id, title, description, state, created_at, updated_at, model, memory_start, memory_end, owner) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		id, title, description, state, now, now, model, memStart, memEnd, owner); err != nil {
 		return nil, err
 	}
 	for _, p := range deps {
@@ -68,14 +80,15 @@ func (s *UserStore) createTaskTx(tx *sql.Tx, title, description, state string, d
 			return nil, err
 		}
 	}
-	return &Task{ID: id, Title: title, Description: description, State: state, CreatedAt: now, UpdatedAt: now, Model: model, MemoryStart: memStart, MemoryEnd: memEnd, Dependencies: deps}, nil
+	return &Task{ID: id, Title: title, Description: description, State: state, Owner: owner, CreatedAt: now, UpdatedAt: now, Model: model, MemoryStart: memStart, MemoryEnd: memEnd, Dependencies: deps}, nil
 }
 
 // CreateTask creates a task with (0..N) parent dependencies. A cycle-forming
 // dependency is rejected. (The plain creation path — no model target, no
-// curation range: the task model rule's "any available main model" applies.)
+// curation range, no explicit owner: system-owned, the task model rule's
+// "any available main model" applies.)
 func (s *UserStore) CreateTask(title, description, state string, deps []string) (*Task, error) {
-	return s.CreateTaskNew(TaskNew{Title: title, Description: description, State: state, Deps: deps})
+	return s.CreateTaskNew(TaskNew{Title: title, Description: description, State: state, Deps: deps, Owner: "system"})
 }
 
 // TaskNew is the full creation request (CreateTask's zero-valued
@@ -84,10 +97,15 @@ type TaskNew struct {
 	Title       string
 	Description string
 	State       string // "" = todo
-	Deps        []string
-	Model       *string // explicit model target (nil = any available main model)
-	MemStart    *int64  // curation range, inclusive (nil on non-curation tasks)
-	MemEnd      *int64
+	// Owner is the task-ownership axis (Refinement B: user|system).
+	// "" = system (the v1 default — the agent's interactive_exec is the
+	// only task-creation tool, and agent-owned tasks are always system).
+	// Always validated; an invalid value is a creation error.
+	Owner    string
+	Deps     []string
+	Model    *string // explicit model target (nil = any available main model)
+	MemStart *int64  // curation range, inclusive (nil on non-curation tasks)
+	MemEnd   *int64
 }
 
 // CreateTaskNew creates a task with an optional explicit model target and
@@ -96,12 +114,15 @@ func (s *UserStore) CreateTaskNew(n TaskNew) (*Task, error) {
 	if n.State == "" {
 		n.State = "todo"
 	}
+	if n.Owner == "" {
+		n.Owner = "system"
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	t, err := s.createTaskTx(tx, n.Title, n.Description, n.State, n.Deps, n.Model, n.MemStart, n.MemEnd)
+	t, err := s.createTaskTx(tx, n.Title, n.Description, n.State, n.Owner, n.Deps, n.Model, n.MemStart, n.MemEnd)
 	if err != nil {
 		return nil, err
 	}
