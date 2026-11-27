@@ -298,6 +298,11 @@
                 <button class="btn" id="emailSaveBtn" type="button">Save</button>
               </div>
               <span id="emailMsg" class="muted" style="font-size:.85rem;"></span>
+              <div style="margin-top:.8rem; font-weight:700; font-size:.85rem;">Web push</div>
+              <div style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin-top:.3rem;">
+                <span id="pushStatus" class="muted" style="font-size:.85rem; flex:1; min-width:11rem;">…</span>
+                <button class="btn" id="pushToggleBtn" type="button" hidden></button>
+              </div>
             </div>
             <div class="profile-section">
               <h4>Personas</h4>
@@ -1567,6 +1572,14 @@
       setRailAuth(true);
       openEventChannel(); // multi-device sync: this tab's nudge channel (idempotent)
       refreshPwaPrompt(); // the one-shot install card (mobile, until dismissed)
+      maybeAutoSubscribe(); // web push: first standalone launch subscribes (one-shot)
+      // ?conv= deep link (a web-push notification click): one-shot —
+      // point the restore below at that conversation, strip the param.
+      var _dl = new URLSearchParams(location.search).get("conv");
+      if (_dl) {
+        try { localStorage.setItem("bevin-conv", _dl); } catch (e) {}
+        history.replaceState(null, "", location.pathname);
+      }
       try { convID = localStorage.getItem("bevin-conv"); } catch (e) { convID = null; }
       // The select shows the conversation's OWN model (the server default
       // only before it exists) — the model list must land first.
@@ -2377,6 +2390,7 @@
           if (!ej.configured) $("emailMsg").textContent = "Email notifications are not configured on this server yet.";
           else $("emailMsg").textContent = "";
         }
+        await refreshPushRow();
       } catch (e) { /* the page renders its empty states */ }
     }
     $("emailSaveBtn").addEventListener("click", async function () {
@@ -2395,6 +2409,117 @@
         $("emailMsg").textContent = "⚠ " + err.message;
       }
     });
+
+    // ---- Web push (the PWA stage 2). The SUBSCRIPTION is the delivery
+    // gate: there is no "notifications on" flag — a device is enabled
+    // once subscribed, and disabling means unsubscribing. Auto path: the
+    // first launch of the installed PWA (standalone) subscribes
+    // (maybeAutoSubscribe, one-shot). Manual path + the only disable
+    // path: the row above on this page.
+
+    function b64urlToUint8Array(s) {
+      var pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+      var bin = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+      var out = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    async function doSubscribe(reg, st) {
+      var sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToUint8Array(st.public_key) });
+      var j = sub.toJSON();
+      var r = await fetch("/api/push/subscribe", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: j.endpoint, keys: { p256dh: j.keys.p256dh, auth: j.keys.auth }, user_agent: navigator.userAgent })
+      });
+      if (!r.ok) throw new Error("subscribe failed (HTTP " + r.status + ")");
+      try { localStorage.setItem("bevin-push-pubkey", st.public_key); } catch (e) {}
+      return sub;
+    }
+
+    async function refreshPushRow() {
+      var status = $("pushStatus"), btn = $("pushToggleBtn");
+      if (!status || !btn) return;
+      btn.hidden = true;
+      status.textContent = "…";
+      var st = null;
+      try {
+        var r = await fetch("/api/push/status");
+        if (r.ok) st = await r.json();
+      } catch (e) {}
+      if (!st || !st.configured) {
+        status.textContent = "Web push is not configured on this server yet.";
+        return;
+      }
+      var reg = ("serviceWorker" in navigator) ? await navigator.serviceWorker.getRegistration() : null;
+      var sub = reg ? await reg.pushManager.getSubscription() : null;
+      if (sub) {
+        status.textContent = "Notifications are on for this device.";
+        btn.textContent = "Disable";
+        btn.hidden = false;
+        btn.onclick = async function () {
+          btn.disabled = true;
+          try {
+            await fetch("/api/push/subscribe", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: sub.endpoint }) });
+            await sub.unsubscribe();
+          } catch (e) {}
+          refreshPushRow();
+        };
+      } else {
+        status.textContent = "Notifications are off for this device.";
+        btn.textContent = "Enable";
+        btn.hidden = false;
+        btn.onclick = async function () {
+          btn.disabled = true;
+          status.textContent = "asking the browser…";
+          try {
+            var perm = Notification.permission;
+            if (perm === "default") perm = await Notification.requestPermission();
+            if (perm !== "granted") { status.textContent = "permission not granted."; btn.disabled = false; return; }
+            var reg2 = await navigator.serviceWorker.ready;
+            await doSubscribe(reg2, st);
+          } catch (e) {
+            status.textContent = "⚠ " + (e.message || e);
+            btn.disabled = false;
+            return;
+          }
+          refreshPushRow();
+        };
+      }
+    }
+
+    async function maybeAutoSubscribe() {
+      // The first launch of the installed PWA (standalone): request
+      // permission + subscribe, once. A denied permission (or a plain
+      // non-installed tab — which never auto-subscribes) never nags;
+      // the Profile row stays the manual path. A stored subscription
+      // whose key pair no longer matches the server's (an admin keygen)
+      // is re-subscribed against the current key.
+      try {
+        if (!window.matchMedia("(display-mode: standalone)").matches) return;
+        if (localStorage.getItem("bevin-push-auto")) return;
+        if (!("serviceWorker" in navigator) || !window.isSecureContext || !("Notification" in window)) return;
+        var st = await (await fetch("/api/push/status")).json();
+        if (!st.configured) return;
+        var reg = await navigator.serviceWorker.ready;
+        var sub = await reg.pushManager.getSubscription();
+        if (sub) {
+          var saved = null;
+          try { saved = localStorage.getItem("bevin-push-pubkey"); } catch (e) {}
+          if (saved && saved !== st.public_key) {
+            await fetch("/api/push/subscribe", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: sub.endpoint }) });
+            await sub.unsubscribe();
+            sub = null;
+          }
+        }
+        if (!sub) {
+          if (Notification.permission === "denied") { localStorage.setItem("bevin-push-auto", "1"); return; }
+          var perm = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+          if (perm === "granted") await doSubscribe(reg, st);
+        }
+        localStorage.setItem("bevin-push-auto", "1");
+      } catch (e) { /* auto-subscribe is best-effort — the manual path remains */ }
+    }
 
     // openConversation switches the active conversation (from a history
     // row or a search hit): set the id, clear the log, and restore the

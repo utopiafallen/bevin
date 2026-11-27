@@ -891,6 +891,46 @@ function renderServer() {
   };
   c2.append(btn);
   m.append(c2);
+
+  // Web push (the PWA stage 2): the server's VAPID pair. Keys present =
+  // on (there is no enable flag). Generated HERE, server-side — the
+  // private key never transits the admin UI.
+  const c3 = document.createElement("div");
+  c3.className = "card";
+  c3.innerHTML = "<h2>Web push</h2>";
+  c3.append(elP("Notifications for the installed PWA: an interactive turn completing (or failing), a task going done/blocked, and system events (restart, disk unfreeze). Devices subscribe per user; the subscription is the delivery gate — there is no separate enable flag."));
+  const pushStatusEl = document.createElement("div");
+  pushStatusEl.className = "kv";
+  pushStatusEl.textContent = "Loading…";
+  c3.append(pushStatusEl);
+  const genBtn = document.createElement("button");
+  genBtn.className = "btn";
+  genBtn.style.marginTop = "8px";
+  genBtn.textContent = "Generate VAPID keys";
+  genBtn.onclick = async () => {
+    if (!confirm("Generate a new VAPID key pair? Devices with existing subscriptions are pruned on their next push — they re-subscribe against the new key on their next standalone launch.")) return;
+    genBtn.disabled = true; genBtn.textContent = "Generating…";
+    try {
+      await j("/admin/api/push/keys", { method: "POST" });
+      msg("Web push keys generated — push can send now.", "ok");
+      const cfg = await j("/admin/api/config");
+      pushStatusEl.textContent = (cfg.push && cfg.push.configured) ? "Configured — web push can send." : "Not configured.";
+      genBtn.textContent = "Rotate VAPID keys";
+    } catch (e) {
+      msg("Keygen failed: " + e.message, "err");
+      genBtn.disabled = false; genBtn.textContent = "Generate VAPID keys";
+    }
+  };
+  c3.append(genBtn);
+  j("/admin/api/config").then((cfg) => {
+    if (cfg.push) {
+      pushStatusEl.textContent = cfg.push.configured ? "Configured — web push can send." : "Not configured — web push is off.";
+      if (cfg.push.configured) genBtn.textContent = "Rotate VAPID keys";
+    } else {
+      pushStatusEl.textContent = "Not configured — web push is off.";
+    }
+  }).catch(() => { pushStatusEl.textContent = "Not configured — web push is off."; });
+  m.append(c3);
 }
 
 // ---- Containers (inlined on this page) ----

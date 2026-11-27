@@ -67,6 +67,9 @@ func (a *App) pushVAPID() (pub, priv, subject string, ok bool) {
 // is gone — 404/410 and friends), a 5xx is logged (no retry queue in
 // v1). Never returns an error.
 func (a *App) pushSend(handle string, title, body, convID, kind string) {
+	if a.ag == nil {
+		return // no agent (a bare test fixture) — nothing to resolve a user store from
+	}
 	pub, priv, subject, ok := a.pushVAPID()
 	if !ok {
 		return
@@ -127,7 +130,7 @@ func (a *App) pushSend(handle string, title, body, convID, kind string) {
 // conversation no longer exists (deleted mid-turn — nothing to notify
 // about).
 func (a *App) convNotification(handle, convID string) (label, firstLine string) {
-	if convID == "" {
+	if convID == "" || a.ag == nil {
 		return "", ""
 	}
 	us, err := a.ag.UserStoreFor(handle)
@@ -214,6 +217,10 @@ func (a *App) pushSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if a.ag == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent not ready"})
 		return
 	}
 	us, err := a.ag.UserStoreFor(u.Handle)

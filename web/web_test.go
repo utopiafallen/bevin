@@ -228,3 +228,55 @@ func checkInlineJSValid(t *testing.T, pageName string) {
 		}
 	}
 }
+
+// TestPwaPushWiring — the web-push (stage 2) wiring is pinned to the
+// embedded bytes: the SW's push + click handlers (with the visibility
+// gate), the client's subscription/auto-subscribe/deep-link paths, and
+// the admin keygen endpoint.
+func TestPwaPushWiring(t *testing.T) {
+	read := func(name string) []byte {
+		t.Helper()
+		f, err := FS.Open("static/" + name)
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		defer f.Close()
+		var b bytes.Buffer
+		if _, err := io.Copy(&b, f); err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return b.Bytes()
+	}
+	sw := read("sw.js")
+	for _, want := range []string{
+		`self.addEventListener("push"`,
+		`self.addEventListener("notificationclick"`,
+		`visibilityState === "visible"`, // the double-notify gate
+		`e.data.json()`,                 // the UA-decrypted payload
+		`"/?conv="`,                     // the deep-link data
+	} {
+		if !bytes.Contains(sw, []byte(want)) {
+			t.Errorf("sw.js missing the push wiring: %s", want)
+		}
+	}
+	page := read("index.html")
+	for _, want := range []string{
+		`/api/push/status`,
+		`/api/push/subscribe`,
+		`maybeAutoSubscribe()`,
+		`bevin-push-auto`,
+		`get("conv")`,
+		`applicationServerKey`,
+		`pushStatus`,
+	} {
+		if !bytes.Contains(page, []byte(want)) {
+			t.Errorf("index.html missing the push wiring: %s", want)
+		}
+	}
+	admin := read("admin.html")
+	for _, want := range []string{`/admin/api/push/keys`, `Generate VAPID keys`} {
+		if !bytes.Contains(admin, []byte(want)) {
+			t.Errorf("admin.html missing the push wiring: %s", want)
+		}
+	}
+}

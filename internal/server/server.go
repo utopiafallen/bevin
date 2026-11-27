@@ -343,7 +343,10 @@ func (a *App) liveMail() *email.Sender {
 // it fails the config is still saved on disk (the agent keeps the old one
 // until the next restart).
 func (a *App) applyConfig(cfg *config.ServerConfig) (reloaded bool) {
-	err := a.ag.Reload(cfg)
+	var err error
+	if a.ag != nil { // a bare test fixture has no agent — there is nothing to reload
+		err = a.ag.Reload(cfg)
+	}
 	a.cfgMu.Lock()
 	a.cfg = cfg
 	a.mail = email.New(cfg.Email)

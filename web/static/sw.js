@@ -19,7 +19,7 @@
  */
 "use strict";
 
-const VERSION = "shell-v1";
+const VERSION = "shell-v2";
 const CACHE = "bevin-" + VERSION;
 
 // The app shell, precached at install so first open after install works
@@ -94,5 +94,68 @@ self.addEventListener("fetch", (event) => {
             (req.mode === "navigate" ? caches.match("/index.html") : Promise.reject(new Error("offline")))
         )
       )
+  );
+});
+
+// ---- Web push (the PWA stage 2) --------------------------------------
+// The payload arrives encrypted by the server (VAPID, the standard
+// aes128gcm content encoding). The BROWSER decrypts it with the
+// device's subscription keys before delivering it (the spec's standard
+// encodings are UA-decrypted), so the handler just parses the JSON:
+// {conv_id, title, body, kind}.
+
+// The visibility gate: if the app is open AND visible on this device,
+// its /api/me/events channel is already updating the UI live — a push
+// for the same turn would be a double notification. Suppress it.
+async function anyClientVisible() {
+  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  return clients.some((c) => c.visibilityState === "visible");
+}
+
+self.addEventListener("push", (e) => {
+  let payload = null;
+  if (e.data) {
+    try {
+      payload = e.data.json();
+    } catch (err) {
+      try {
+        payload = { body: e.data.text() };
+      } catch (err2) {}
+    }
+  }
+  if (!payload) return;
+  e.waitUntil(
+    (async () => {
+      if (await anyClientVisible()) return; // the app is looking at it
+      await self.registration.showNotification(payload.title || "bevin", {
+        body: payload.body || undefined,
+        icon: "/icon-192.png",
+        badge: "/icon-192.png",
+        // Same tag = the newest turn replaces the previous one (no
+        // stack of "turn complete" notifications per tool loop).
+        tag: "bevin-" + (payload.conv_id || payload.kind || "system"),
+        data: { url: payload.conv_id ? "/?conv=" + payload.conv_id : "/" },
+      });
+    })()
+  );
+});
+
+// Click a notification: open (or focus) the app at the conversation.
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || "/";
+  e.waitUntil(
+    (async () => {
+      const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const c of all) {
+        if (c.visibilityState === "visible") {
+          try {
+            await c.focus();
+            return;
+          } catch (err) {}
+        }
+      }
+      await self.clients.openWindow(url);
+    })()
   );
 });

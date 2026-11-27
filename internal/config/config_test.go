@@ -658,3 +658,30 @@ func TestValidateTools(t *testing.T) {
 		t.Fatalf("provider = %q, want the trimmed exa", c.Tools.WebSearch.Provider)
 	}
 }
+
+func TestPushValidate(t *testing.T) {
+	valid := func() *ServerConfig {
+		return &ServerConfig{Models: []Model{{Provider: "openai", BaseURL: "u", ModelID: "m"}}, Auth: Auth{SessionSecret: "x"}}
+	}
+	// Web push: both VAPID keys or neither (a half pair is a broken setup).
+	c := valid()
+	c.Push = Push{VAPIDPublic: "pub-only"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "VAPID keys must be set together") {
+		t.Fatalf("public without private: err = %v", err)
+	}
+	c = valid()
+	c.Push = Push{VAPIDPrivate: "priv-only"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "VAPID keys must be set together") {
+		t.Fatalf("private without public: err = %v", err)
+	}
+	c = valid()
+	c.Push = Push{}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("no keys (push off): %v", err)
+	}
+	c = valid()
+	c.Push = Push{VAPIDPublic: "pub", VAPIDPrivate: "priv"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("both keys: %v", err)
+	}
+}
