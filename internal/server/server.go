@@ -842,9 +842,9 @@ func (a *App) searchAll(w http.ResponseWriter, r *http.Request) {
 	if limit > 25 {
 		limit = 25
 	}
-	out, err := a.ag.SearchAll(r.Context(), u.Handle, q, r.URL.Query().Get("workspace"), limit)
+	out, err := a.ag.SearchAll(r.Context(), u.Handle, q, r.URL.Query().Get("conversation"), r.URL.Query().Get("workspace"), limit)
 	if errors.Is(err, store.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation or workspace not found"})
 		return
 	}
 	if err != nil {

@@ -236,19 +236,24 @@
           </section>
 
           <!-- The dedicated search page: searches everything bevin has on
-               the user (conversations, profile, memories), with a scope
-               selector for future advanced scopes (a specific workspace). -->
+               the user (conversations, profile, memories, workspace files),
+               with independent scope selectors for a specific conversation
+               and/or a specific workspace. -->
           <section class="page-card" id="searchPage" style="display:none;">
             <div class="eyebrow">Search</div>
             <h3 style="margin:.3rem 0 .2rem;">Search everything</h3>
             <p class="muted" style="margin-top:.2rem;">
-              Across all of your data — conversations, your profile, and bevin's
-              memories. Scope it to a workspace once workspaces land.
+              Across all of your data — conversations, your profile, bevin's
+              memories, and workspace files. Scope it to one conversation
+              and/or one workspace.
             </p>
             <form id="searchForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.6rem;">
               <input id="searchInput" placeholder="What are you looking for?" autocomplete="off" style="flex:1; min-width:12rem;">
-              <select id="scopeSelect" title="Search scope" style="width:auto; max-width:12rem;">
-                <option value="">All my data</option>
+              <select id="convScopeSelect" title="Conversation scope" style="width:auto; max-width:13rem;">
+                <option value="">All conversations</option>
+              </select>
+              <select id="scopeSelect" title="Workspace scope" style="width:auto; max-width:12rem;">
+                <option value="">All workspaces</option>
               </select>
               <button class="btn btn-primary" type="submit">Search</button>
             </form>
@@ -427,7 +432,7 @@
       $("searchBtn").classList.toggle("active", name === "search");
       $("workspaceBtn").classList.toggle("active", name === "workspace");
       $("profileBtn").classList.toggle("active", name === "profile");
-      if (name === "search") { loadScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
+      if (name === "search") { loadScopes(); loadConvScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
       if (name === "workspace") loadWorkspaces();
       if (name === "profile") loadProfilePage();
       if (name === "chat" && syncPending) doSync(); // a nudge arrived while off the page
@@ -2368,9 +2373,10 @@
     // lexically, the selected workspace's files by name/path) and the
     // results render grouped by source.
     var lastWorkspaces = [];
+    var lastConvs = [];
     function loadScopes() {
-      // Populate the scope selector with the user's workspaces (from the
-      // last search response — the default "all my data" scope needs none).
+      // Populate the workspace scope selector (from the last search
+      // response — the default "all my data" scope needs none).
       var keep = $("scopeSelect").value;
       var sel = $("scopeSelect");
       while (sel.options.length > 1) sel.remove(1);
@@ -2381,6 +2387,21 @@
         sel.appendChild(o);
       });
       sel.value = (lastWorkspaces || []).some(function (w) { return w.id === keep; }) ? keep : "";
+    }
+    function loadConvScopes() {
+      // Populate the conversation scope selector (the same option list the
+      // search response returns in conversations_scope — the conversation
+      // list's labels: the rolling purpose in place of the title).
+      var keep = $("convScopeSelect").value;
+      var sel = $("convScopeSelect");
+      while (sel.options.length > 1) sel.remove(1);
+      (lastConvs || []).forEach(function (c) {
+        var o = document.createElement("option");
+        o.value = c.id;
+        o.textContent = (c.label || c.id);
+        sel.appendChild(o);
+      });
+      sel.value = (lastConvs || []).some(function (c) { return c.id === keep; }) ? keep : "";
     }
 
     function searchSection(label, items, render) {
@@ -2400,18 +2421,22 @@
       var box = $("searchResults");
       if (!q) return;
       var ws = $("scopeSelect").value;
+      var conv = $("convScopeSelect").value;
       box.hidden = false;
       box.innerHTML = '<p class="muted" style="font-size:.85rem;">searching…</p>';
       try {
-        var r = await fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=10" + (ws ? "&workspace=" + encodeURIComponent(ws) : ""));
+        var r = await fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=10" + (ws ? "&workspace=" + encodeURIComponent(ws) : "") + (conv ? "&conversation=" + encodeURIComponent(conv) : ""));
         if (!r.ok) { var je = {}; try { je = await r.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + r.status)); }
         var d = await r.json();
         lastWorkspaces = d.workspaces || [];
+        lastConvs = d.conversations_scope || [];
         loadScopes();
+        loadConvScopes();
         box.innerHTML = "";
         var any = false;
+        var convNote = conv ? " · this conversation" : "";
 
-        searchSection("Conversations", d.conversations, function (h) {
+        searchSection("Conversations" + convNote, d.conversations, function (h) {
           any = true;
           var item = document.createElement("div");
           item.className = "search-hit";
@@ -2434,7 +2459,7 @@
           return item;
         });
 
-        searchSection("Memories", d.memories, function (m) {
+        searchSection("Memories" + convNote, d.memories, function (m) {
           any = true;
           var item = document.createElement("div");
           item.className = "search-hit";

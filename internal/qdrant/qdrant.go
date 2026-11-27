@@ -152,12 +152,30 @@ func (c *Client) DeletePoints(ctx context.Context, name string, ids []int64) err
 // Search returns the limit nearest vectors (cosine, as the collection is
 // created) with their payloads.
 func (c *Client) Search(ctx context.Context, name string, vector []float32, limit int) ([]Hit, error) {
+	return c.SearchFilter(ctx, name, vector, limit, nil)
+}
+
+// SearchFilter is Search with an optional payload filter: exact-match
+// equality on the given payload keys (a Qdrant "must" match). must == nil
+// (or empty) is an unfiltered search.
+func (c *Client) SearchFilter(ctx context.Context, name string, vector []float32, limit int, must map[string]string) ([]Hit, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	body, _ := json.Marshal(map[string]any{
+	req := map[string]any{
 		"vector": vector, "limit": limit, "with_payload": true,
-	})
+	}
+	if len(must) > 0 {
+		entries := make([]map[string]any, 0, len(must))
+		for k, v := range must {
+			entries = append(entries, map[string]any{
+				"key":   k,
+				"match": map[string]any{"value": v},
+			})
+		}
+		req["filter"] = map[string]any{"must": entries}
+	}
+	body, _ := json.Marshal(req)
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/collections/"+name+"/points/search", bytes.NewReader(body))
 	if err != nil {
 		return nil, err

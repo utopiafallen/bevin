@@ -171,6 +171,12 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerMemoryTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register memory tools: %w", err)
 	}
+	// The search tool (the user's search page, agent-side): one query over
+	// all of the user's data — conversations (semantic), memories, profile,
+	// workspace files — with optional conversation / workspace scopes.
+	if err := registerSearchTool(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register search: %w", err)
+	}
 	// The concurrent-instances tools (layers 2+4): set_purpose (the rolling
 	// purpose the roster shows to siblings) + agent_message (the sibling
 	// queue — queued, delivered at the recipient's next user turn).
@@ -1090,6 +1096,18 @@ func (a *Agent) SearchConversations(ctx context.Context, handle, query string, l
 	return vi.Search(ctx, handle, query, limit)
 }
 
+// SearchConversationsInConversation is SearchConversations restricted to one
+// of the user's conversations (the search scope). The restriction happens in
+// Qdrant (payload filter on conversation_id). An unconfigured index yields an
+// empty result, like SearchConversations.
+func (a *Agent) SearchConversationsInConversation(ctx context.Context, handle, conversationID, query string, limit int) ([]SearchHit, error) {
+	vi := a.vectorIndex()
+	if vi == nil {
+		return []SearchHit{}, nil
+	}
+	return vi.SearchInConversation(ctx, handle, conversationID, query, limit)
+}
+
 // UserProfileData returns the user's profile-page data: bevin's profile of
 // them (the durable profile KVs that are injected into the system prompt —
 // what bevin knows about the user), the learned facts (active memories), and
@@ -1131,42 +1149,73 @@ func ftsQuery(raw string) string {
 	return strings.Join(out, " ")
 }
 
-// SearchAll backs the dedicated search page: it searches the user's data
-// across every source at once — conversations (semantic, the per-user vector
-// index), memories (FTS5), the profile (case-insensitive substring over keys
-// + values), and, when a workspace is named, that workspace's files (name +
-// path match — file CONTENTS are not indexed yet, metadata only). An empty
-// workspaceID is the default scope: all of the user's data. The
-// user's workspaces are returned in `workspaces` so the page's scope
-// selector can offer them. The vector-index leg is best-effort (an
+// profileHit is one profile match (a key or value containing the query) —
+// shared by SearchAll's JSON output and the search tool's result text.
+type profileHit struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// SearchAll backs the dedicated search page + the search tool: it searches
+// the user's data across every source at once — conversations (semantic, the
+// per-user vector index), memories (FTS5), the profile (case-insensitive
+// substring over keys + values), and, when a workspace is named, that
+// workspace's files (name + path match — file CONTENTS are not indexed yet,
+// metadata only).
+//
+// Two independent, optional scopes: conversationID restricts the
+// CONVERSATION leg to that conversation (a Qdrant payload filter) and the
+// MEMORY leg to memories whose provenance touches it; workspaceID restricts
+// the FILE leg to that workspace. The profile is always searched whole — it
+// is the user's global context, with no conversation or workspace
+// dimension. Empty scopes = all of the user's data.
+//
+// The user's workspaces are returned in `workspaces` (and their
+// conversations' summaries in `conversations_scope`) so the search page's
+// scope selectors can offer them. The vector-index leg is best-effort (an
 // unconfigured index or a sidecar blip leaves the local sources intact);
 // a store failure is a real error.
-func (a *Agent) SearchAll(ctx context.Context, handle, query, workspaceID string, limit int) (map[string]any, error) {
+func (a *Agent) SearchAll(ctx context.Context, handle, query, conversationID, workspaceID string, limit int) (map[string]any, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	out := map[string]any{
-		"conversations": []any{},
-		"memories":      []any{},
-		"profile":       []any{},
-		"workspaces":    []any{},
-		"workspace":     []any{},
+		"conversations":       []any{},
+		"memories":            []any{},
+		"profile":             []any{},
+		"workspaces":          []any{},
+		"workspace":           []any{},
+		"conversations_scope": []any{},
 	}
-	if hits, err := a.SearchConversations(ctx, handle, query, limit); err == nil {
+	if conversationID != "" {
+		if hits, err := a.SearchConversationsInConversation(ctx, handle, conversationID, query, limit); err == nil {
+			out["conversations"] = hits
+		}
+	} else if hits, err := a.SearchConversations(ctx, handle, query, limit); err == nil {
 		out["conversations"] = hits
 	}
 	us, err := a.userStore(handle)
 	if err != nil {
 		return nil, err
 	}
-	if fq := ftsQuery(query); fq != "" {
-		if mems, err := us.SearchMemories(fq, limit); err == nil && mems != nil {
-			out["memories"] = mems
+	// Validate the named scopes before any search: a bad id is a 404, not a
+	// silent empty result (mirrors the workspace scope's contract).
+	if conversationID != "" {
+		if _, err := us.GetConversation(conversationID); err != nil {
+			return nil, err
 		}
 	}
-	type kvHit struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
+	if fq := ftsQuery(query); fq != "" {
+		var mems []store.Memory
+		var merr error
+		if conversationID != "" {
+			mems, merr = us.SearchMemoriesInConversation(fq, conversationID, limit)
+		} else {
+			mems, merr = us.SearchMemories(fq, limit)
+		}
+		if merr == nil && mems != nil {
+			out["memories"] = mems
+		}
 	}
 	kv, err := us.GetProfile()
 	if err != nil {
@@ -1175,7 +1224,7 @@ func (a *Agent) SearchAll(ctx context.Context, handle, query, workspaceID string
 	var profileHits []any
 	for k, v := range kv {
 		if strings.Contains(strings.ToLower(k), strings.ToLower(query)) || strings.Contains(strings.ToLower(v), strings.ToLower(query)) {
-			profileHits = append(profileHits, kvHit{k, v})
+			profileHits = append(profileHits, profileHit{k, v})
 		}
 	}
 	out["profile"] = profileHits
@@ -1191,7 +1240,30 @@ func (a *Agent) SearchAll(ctx context.Context, handle, query, workspaceID string
 	for _, w := range ws {
 		wsRefs = append(wsRefs, wsRef{w.ID, w.Title})
 	}
-	out["workspaces"] = wsRefs
+	wsRefsAny := make([]any, 0, len(wsRefs))
+	for _, w := range wsRefs {
+		wsRefsAny = append(wsRefsAny, w)
+	}
+	out["workspaces"] = wsRefsAny
+	// The conversation scope's option list (the search page's selector) —
+	// the same summaries the conversation list uses, most recently active
+	// first.
+	if convos, cerr := us.ListConversations(); cerr == nil {
+		type convRef struct {
+			ID             string `json:"id"`
+			Label          string `json:"label"` // the list label: the rolling purpose, else the title
+			LastActivityAt string `json:"last_activity_at"`
+		}
+		refs := make([]any, 0, len(convos))
+		for _, c := range convos {
+			label := c.Title
+			if c.Purpose != "" {
+				label = c.Purpose // the list label: the rolling purpose replaces the title
+			}
+			refs = append(refs, convRef{c.ID, label, c.LastActivityAt})
+		}
+		out["conversations_scope"] = refs
+	}
 	if workspaceID != "" {
 		if _, err := us.GetWorkspace(workspaceID); err != nil {
 			return nil, err

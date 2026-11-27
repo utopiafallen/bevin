@@ -113,6 +113,42 @@ func (s *UserStore) SearchMemories(query string, limit int) ([]Memory, error) {
 	return out, rows.Err()
 }
 
+// SearchMemoriesInConversation is SearchMemories restricted to memories whose
+// provenance (memory_provenance → messages) touches the given conversation —
+// the search tool / UI's conversation scope. A memory without provenance (or
+// provenance only in other conversations) does not match.
+func (s *UserStore) SearchMemoriesInConversation(query, conversationID string, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+		SELECT `+memCols+`
+		FROM memories
+		WHERE status = 'active'
+		  AND EXISTS (SELECT 1 FROM memories_fts WHERE memories_fts.rowid = memories.id AND memories_fts MATCH ?)
+		  AND EXISTS (
+		    SELECT 1
+		    FROM memory_provenance mp
+		    JOIN messages m ON m.id = mp.message_id
+		    WHERE mp.memory_id = memories.id
+		      AND m.conversation_id = ?)
+		ORDER BY id
+		LIMIT ?`, query, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := scanMem(rows, &m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // SupersedeMemory marks a memory superseded by another (supersession, not
 // deletion).
 func (s *UserStore) SupersedeMemory(id, supersededBy int64) error {

@@ -211,3 +211,59 @@ func TestNewEmpty(t *testing.T) {
 		t.Fatal("New(\"\") must return nil")
 	}
 }
+
+// TestSearchFilter — the payload-filtered search: the conversation scope's
+// wire form. must == nil sends NO filter key (behavior identical to the
+// pre-filter Search); a non-empty must sends {"filter":{"must":[...]}} with
+// one exact-match condition per key.
+func TestSearchFilter(t *testing.T) {
+	var searchBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/collections/c1/points/search":
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &searchBody)
+			_, _ = w.Write([]byte(`{"result":[{"id":7,"score":0.9,"payload":{"conversation_id":"cv1"}}]}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	ctx := context.Background()
+	vec := []float32{0.9, 0.1, 0.1}
+
+	// Unfiltered: no filter key in the body at all.
+	if _, err := c.SearchFilter(ctx, "c1", vec, 5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := searchBody["filter"]; has {
+		t.Fatalf("unfiltered search body carries a filter: %v", searchBody)
+	}
+
+	// Filtered: one must condition per key, exact-match values.
+	if _, err := c.SearchFilter(ctx, "c1", vec, 5, map[string]string{"conversation_id": "cv1"}); err != nil {
+		t.Fatal(err)
+	}
+	filter, ok := searchBody["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("filtered search body missing filter: %v", searchBody)
+	}
+	must, ok := filter["must"].([]any)
+	if !ok || len(must) != 1 {
+		t.Fatalf("filter.must = %v, want one condition", filter)
+	}
+	cond, ok := must[0].(map[string]any)
+	if !ok {
+		t.Fatalf("condition = %v", must[0])
+	}
+	if cond["key"] != "conversation_id" {
+		t.Fatalf("condition key = %v, want conversation_id", cond["key"])
+	}
+	match, ok := cond["match"].(map[string]any)
+	if !ok || match["value"] != "cv1" {
+		t.Fatalf("condition match = %v, want {value: cv1}", cond["match"])
+	}
+}

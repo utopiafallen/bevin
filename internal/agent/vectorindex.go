@@ -140,6 +140,23 @@ func (v *vectorIndex) DeleteMessages(ctx context.Context, handle string, msgIDs 
 // A query longer than one embedder input is chunked like a message (each
 // piece keeps the search prefix) and combined the same way.
 func (v *vectorIndex) Search(ctx context.Context, handle, query string, limit int) ([]SearchHit, error) {
+	return v.SearchFilter(ctx, handle, query, limit, nil)
+}
+
+// SearchInConversation is Search restricted to one of the user's
+// conversations — the scope the search tool / search page offer
+// (conversation = which conversation to look in). The restriction happens
+// inside Qdrant (a payload filter on the point's conversation_id), not by
+// post-filtering: a scoped search never wastes its limit on points from
+// other conversations.
+func (v *vectorIndex) SearchInConversation(ctx context.Context, handle, conversationID, query string, limit int) ([]SearchHit, error) {
+	return v.SearchFilter(ctx, handle, query, limit, map[string]string{"conversation_id": conversationID})
+}
+
+// SearchFilter is Search with an optional payload filter (exact-match
+// equality on the given payload keys). must == nil (or empty) is an
+// unfiltered search.
+func (v *vectorIndex) SearchFilter(ctx context.Context, handle, query string, limit int, must map[string]string) ([]SearchHit, error) {
 	chunks := chunkForEmbedding(query)
 	inputs := make([]string, len(chunks))
 	for i, c := range chunks {
@@ -149,7 +166,7 @@ func (v *vectorIndex) Search(ctx context.Context, handle, query string, limit in
 	if err != nil {
 		return nil, err
 	}
-	hits, err := v.qd.Search(ctx, v.collection(handle), vec, limit)
+	hits, err := v.qd.SearchFilter(ctx, v.collection(handle), vec, limit, must)
 	if err != nil {
 		return nil, err
 	}
