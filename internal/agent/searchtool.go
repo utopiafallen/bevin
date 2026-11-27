@@ -32,7 +32,7 @@ const (
 func registerSearchTool(r *ToolRegistry, a *Agent) error {
 	return r.Register(Tool{
 		Name:        "search",
-		Description: `Search the user's own data for additional context: their past conversation messages (by meaning), bevin's stored memories, the user's profile, and workspace file names/paths. Use it to recall what was said or decided in earlier conversations, what you remember about the user, or which files exist in a workspace. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace. For deeper semantic memory retrieval, use recall.`,
+		Description: `Search the user's own data for additional context: their past conversation messages (by meaning), bevin's stored memories (by meaning, confidence and recency), the user's profile, and workspace file names/paths. Use it to recall what was said or decided in earlier conversations, what you remember about the user, or which files exist in a workspace. Memory results carry the memory id (#N) — the id forget and remember's supersede_id need. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace.`,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -118,7 +118,9 @@ func (a *Agent) execSearch(ctx context.Context, handle string, args json.RawMess
 		b.WriteString(label + "\n")
 		for _, mem := range mems {
 			anyHit = true
-			fmt.Fprintf(&b, "- [%s] %s (confidence %.2f, %s)\n", mem.Facet, mem.Statement, mem.Confidence, memoryAge(now, mem.UpdatedAt))
+			// The #id is load-bearing: forget and remember's supersede_id
+			// take it (recall's result format, which the search absorbed).
+			fmt.Fprintf(&b, "#%d [%s] %s (confidence %.2f, %s)\n", mem.ID, mem.Facet, mem.Statement, mem.Confidence, memoryAge(now, mem.UpdatedAt))
 		}
 		b.WriteString("\n")
 	}

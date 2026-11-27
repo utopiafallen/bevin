@@ -9,7 +9,8 @@ import (
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
-// The memory tools (recall / remember / forget).
+// The memory tools (remember / forget) + the search tool's memory leg
+// (rankMemories — recall was folded into search, 2026-11-27).
 
 func newTestConversation(t *testing.T, a *Agent, handle string) (string, *store.UserStore) {
 	t.Helper()
@@ -48,7 +49,7 @@ func withConversation(ctx context.Context, convID string) context.Context {
 	return context.WithValue(ctx, ctxConversationKey, convID)
 }
 
-func TestMemoryRememberRecallForget(t *testing.T) {
+func TestMemoryRememberSearchForget(t *testing.T) {
 	a, _, _ := newTestAgent(t)
 	_, us := newTestConversation(t, a, "u1")
 	const conv = "c1"
@@ -62,15 +63,16 @@ func TestMemoryRememberRecallForget(t *testing.T) {
 		t.Fatalf("want remembered, got %q", out)
 	}
 
-	// recall (lexical mode — no embedder in the test agent): the keyword
-	// match ranks the memory first.
-	out = execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "Go web server project"})
+	// The search tool's memory leg (lexical mode — no embedder in the test
+	// agent): the keyword match surfaces the memory, and the result line
+	// carries the #id that forget / supersede_id need.
+	out = execSearchTool(t, a, "u1", map[string]any{"q": "Go web server project"})
 	if !strings.Contains(out, "#1 [work] The user works on a Go web server project") {
-		t.Fatalf("recall missed the keyword match: %q", out)
+		t.Fatalf("search missed the keyword match: %q", out)
 	}
-	// A query with no lexical hit at all → the no-match result.
-	out = execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "zzzqqqxyz"})
-	if !strings.Contains(out, "no stored memories match") {
+	// A query with no hit at all → the no-match result.
+	out = execSearchTool(t, a, "u1", map[string]any{"q": "zzzqqqxyz"})
+	if !strings.Contains(out, "no matches") {
 		t.Fatalf("want the no-match result, got %q", out)
 	}
 
@@ -98,10 +100,10 @@ func TestMemoryRememberRecallForget(t *testing.T) {
 	if mem.SupersededBy != nil {
 		t.Fatalf("a forget carries no replacement, got %v", *mem.SupersededBy)
 	}
-	// Forgotten memories are not recalled.
-	out = execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "Go web server project"})
+	// Forgotten memories don't surface in search.
+	out = execSearchTool(t, a, "u1", map[string]any{"q": "Go web server project"})
 	if strings.Contains(out, "#1 [work]") {
-		t.Fatalf("a forgotten memory must not be recalled: %q", out)
+		t.Fatalf("a forgotten memory must not be surfaced: %q", out)
 	}
 	// Forgetting again: not active.
 	out = execMemoryTool(t, a, "forget", "u1", conv, map[string]any{"id": 1})
@@ -156,32 +158,35 @@ func TestMemoryRememberSupersede(t *testing.T) {
 	}
 }
 
-// TestMemoryRecallRanking checks the blend: with an embedder wired (fake,
-// via the vector index seam is not available here — so this exercises the
-// lexical-mode ordering), a keyword hit with higher confidence + recency
-// ranks above a weaker hit.
-func TestMemoryRecallRanking(t *testing.T) {
+// TestMemorySearchRanking checks the memory leg's blend in lexical mode
+// (the test agent has no embedder): among the FTS hits, the higher
+// confidence + recency memory ranks above the weaker one, and the limit
+// caps the list. (The semantic mode's cosine component is the same blend
+// recall used to run — the weights are the memW* constants.)
+func TestMemorySearchRanking(t *testing.T) {
 	a, _, _ := newTestAgent(t)
+	defer a.Close()
 	_, us := newTestConversation(t, a, "u1")
-	const conv = "c1"
 	if _, err := us.CreateMemory("a", "The cat sleeps on the couch", nil, 0.5, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := us.CreateMemory("b", "The cat hates the couch", nil, 0.95, "test", nil); err != nil {
 		t.Fatal(err)
 	}
-	out := execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "cat couch"})
-	i1 := strings.Index(out, "#1 [a]")
-	i2 := strings.Index(out, "#2 [b]")
-	if i1 < 0 || i2 < 0 {
-		t.Fatalf("both memories should match: %q", out)
+	out, err := a.SearchAll(context.Background(), "u1", "cat couch", "", "", 10)
+	if err != nil {
+		t.Fatalf("SearchAll: %v", err)
 	}
-	if !(i2 < i1) {
-		t.Fatalf("the higher-confidence memory must rank first:\n%s", out)
+	got := memIDs(out["memories"])
+	if len(got) != 2 || got[0] != 2 || got[1] != 1 {
+		t.Fatalf("memories = %v, want [2 1] (the higher-confidence memory first)", got)
 	}
-	// top caps the list.
-	out = execMemoryTool(t, a, "recall", "u1", conv, map[string]any{"query": "cat couch", "top": 1})
-	if strings.Count(out, "#") != 1 {
-		t.Fatalf("top=1 must return one memory:\n%s", out)
+	// The limit caps the list (one source, one line).
+	out, err = a.SearchAll(context.Background(), "u1", "cat couch", "", "", 1)
+	if err != nil {
+		t.Fatalf("SearchAll limit: %v", err)
+	}
+	if got := memIDs(out["memories"]); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("limit=1 = %v, want just the top hit [2]", got)
 	}
 }

@@ -149,6 +149,40 @@ func (s *UserStore) SearchMemoriesInConversation(query, conversationID string, l
 	return out, rows.Err()
 }
 
+// ListActiveMemoriesInConversation returns every ACTIVE memory whose
+// provenance (memory_provenance → messages) touches the given conversation,
+// with embeddings — the conversation scope's candidate set for the hybrid
+// memory ranking (rankMemories): unlike SearchMemoriesInConversation it
+// does NOT require an FTS match, so a semantically close memory about this
+// conversation is a candidate even without a keyword hit. A memory without
+// provenance (or provenance only in other conversations) is not a candidate.
+func (s *UserStore) ListActiveMemoriesInConversation(conversationID string) ([]Memory, error) {
+	rows, err := s.db.Query(`
+		SELECT `+memCols+`
+		FROM memories
+		WHERE status = 'active'
+		  AND EXISTS (
+		    SELECT 1
+		    FROM memory_provenance mp
+		    JOIN messages m ON m.id = mp.message_id
+		    WHERE mp.memory_id = memories.id
+		      AND m.conversation_id = ?)
+		ORDER BY id`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := scanMem(rows, &m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // SupersedeMemory marks a memory superseded by another (supersession, not
 // deletion).
 func (s *UserStore) SupersedeMemory(id, supersededBy int64) error {

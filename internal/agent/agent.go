@@ -201,14 +201,16 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	if err := registerPtyTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register pty tools: %w", err)
 	}
-	// The memory tools (the memory model's on-demand surface: recall /
-	// remember / forget over the user's P5 memories).
+	// The memory tools (the memory model's write surface: remember /
+	// forget over the user's P5 memories — retrieval is the search tool's
+	// memory leg, rankMemories).
 	if err := registerMemoryTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register memory tools: %w", err)
 	}
 	// The search tool (the user's search page, agent-side): one query over
-	// all of the user's data — conversations (semantic), memories, profile,
-	// workspace files — with optional conversation / workspace scopes.
+	// all of the user's data — conversations (semantic), memories (the
+	// hybrid blend that recall used to do on its own), profile, workspace
+	// files — with optional conversation / workspace scopes.
 	if err := registerSearchTool(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register search: %w", err)
 	}
@@ -1219,11 +1221,12 @@ type profileHit struct {
 }
 
 // SearchAll backs the dedicated search page + the search tool: it searches
-// the user's data across every source at once — conversations (semantic, the
-// per-user vector index), memories (FTS5), the profile (case-insensitive
-// substring over keys + values), and, when a workspace is named, that
-// workspace's files (name + path match — file CONTENTS are not indexed yet,
-// metadata only).
+// the user's data across every source at once — conversations (semantic,
+// the per-user vector index), memories (recall's hybrid blend — semantic +
+// confidence + recency + the lexical floor; recall was folded in 2026-11-27),
+// the profile (case-insensitive substring over keys + values), and, when a
+// workspace is named, that workspace's files (name + path match — file
+// CONTENTS are not indexed yet, metadata only).
 //
 // Two independent, optional scopes: conversationID restricts the
 // CONVERSATION leg to that conversation (a Qdrant payload filter) and the
@@ -1267,17 +1270,13 @@ func (a *Agent) SearchAll(ctx context.Context, handle, query, conversationID, wo
 			return nil, err
 		}
 	}
-	if fq := ftsQuery(query); fq != "" {
-		var mems []store.Memory
-		var merr error
-		if conversationID != "" {
-			mems, merr = us.SearchMemoriesInConversation(fq, conversationID, limit)
-		} else {
-			mems, merr = us.SearchMemories(fq, limit)
-		}
-		if merr == nil && mems != nil {
-			out["memories"] = mems
-		}
+	// The MEMORY leg: recall's hybrid blend (semantic + confidence +
+	// recency + the lexical floor) — recall was folded into search
+	// (2026-11-27), so SearchAll is the one memory-retrieval surface.
+	// Best-effort like the conversation leg: a store failure here leaves
+	// the other sources intact.
+	if mems, merr := a.rankMemories(ctx, us, query, conversationID, limit); merr == nil && mems != nil {
+		out["memories"] = mems
 	}
 	kv, err := us.GetProfile()
 	if err != nil {

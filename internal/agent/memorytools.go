@@ -13,8 +13,9 @@ import (
 )
 
 // The memory tools: the model's own surface over the user's memories (P5).
-// recall = on-demand retrieval (the memory model: the long tail is QUERIED,
-// never injected); remember = consolidation-on-write (near-duplicates are
+// Retrieval is the search tool's memory leg (rankMemories — recall was
+// folded into search, 2026-11-27: it was the same search restricted to
+// memories); remember = consolidation-on-write (near-duplicates are
 // surfaced, the model decides via supersede_id); forget = supersede without
 // a replacement. All failures are RESULTS back to the model.
 
@@ -32,44 +33,24 @@ func conversationFromContext(ctx context.Context) string {
 	return v
 }
 
-// recall scoring blend (internal constants): cosine is the primary signal
-// (the query's one embedding call), confidence the model's stated certainty,
-// recency the half-life decay, the FTS hit the lexical floor (it keeps a
-// keyword match rankable when the semantics are weak). No embedder
-// configured → lexical mode (FTS hits only, confidence + recency blend).
+// The memory ranking blend (internal constants) — recall's scoring, now
+// the search tool / search page's memory leg (recall was folded into
+// search, 2026-11-27): cosine is the primary signal (the query's one
+// embedding call), confidence the model's stated certainty, recency the
+// half-life decay, the FTS hit the lexical floor (it keeps a keyword match
+// rankable when the semantics are weak). No embedder configured → lexical
+// mode (FTS hits only, confidence + recency blend).
 const (
-	recallWcosine         = 0.55
-	recallWconf           = 0.20
-	recallWrecency        = 0.15
-	recallWfts            = 0.10
-	recallRecencyHalfLife = 30 * 24 * time.Hour
-	recallNearDup         = 0.85 // remember's consolidation threshold
-	recallDefaultTop      = 5
-	recallMaxTop          = 20
+	memWcosine         = 0.55
+	memWconf           = 0.20
+	memWrecency        = 0.15
+	memWfts            = 0.10
+	memRecencyHalfLife = 30 * 24 * time.Hour
+	memFTSCap          = 20   // the FTS candidate/bonus cap (both modes)
+	memNearDup         = 0.85 // remember's consolidation threshold
 )
 
 func registerMemoryTools(r *ToolRegistry, a *Agent) error {
-	if err := r.Register(Tool{
-		Name:        "recall",
-		Description: "Search the user's stored memories (durable facts about the user and their world) by meaning. Returns the closest matches.",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"query": map[string]any{
-					"type":        "string",
-					"description": "what to recall, in natural language",
-				},
-				"top": map[string]any{
-					"type":        "number",
-					"description": "how many to return (default 5, max 20)",
-				},
-			},
-			"required": []string{"query"},
-		},
-		Execute: a.execRecall,
-	}); err != nil {
-		return err
-	}
 	if err := r.Register(Tool{
 		Name:        "remember",
 		Description: "Store a durable fact about the user or their world as a memory. Near-duplicates are reported back; pass supersede_id to replace an existing memory instead.",
@@ -111,7 +92,7 @@ func registerMemoryTools(r *ToolRegistry, a *Agent) error {
 			"properties": map[string]any{
 				"id": map[string]any{
 					"type":        "number",
-					"description": "the memory id (from recall)",
+					"description": "the memory id (from the search tool's memory results)",
 				},
 			},
 			"required": []string{"id"},
@@ -120,8 +101,8 @@ func registerMemoryTools(r *ToolRegistry, a *Agent) error {
 	})
 }
 
-// recallScore is one memory's blend score + its parts (for the result text).
-type recallScore struct {
+// rankedMemory is one memory's blend score + its parts (for ranking).
+type rankedMemory struct {
 	mem     store.Memory
 	score   float64
 	cosine  float64
@@ -129,56 +110,78 @@ type recallScore struct {
 	recency float64
 }
 
-func (a *Agent) execRecall(ctx context.Context, handle string, args json.RawMessage) (string, error) {
-	var p struct {
-		Query string `json:"query"`
-		Top   int    `json:"top"`
+// rankMemories is the search tool / search page's memory leg — recall's
+// hybrid blend, folded into search (2026-11-27, user directive: recall was
+// the same search restricted to memories). It scores the user's active
+// memories for the query:
+//
+//	semantic mode (an embedder is configured): every active memory is a
+//	candidate, scored 0.55·cosine + 0.20·confidence + 0.15·recency
+//	(+ 0.10 for an FTS hit). The query is embedded RAW — memories are
+//	stored raw, with no "task: search result" prefix (that belongs to the
+//	conversation leg's query encoding), so the cosine is apples-to-apples.
+//	lexical mode (no embedder, or the embed call fails): only the FTS hits
+//	are candidates, scored 0.5·confidence + 0.5·recency.
+//
+// conversationID != "" restricts the CANDIDATE SET to memories whose
+// provenance touches that conversation (the search scope) — before scoring,
+// so a scoped search never surfaces another conversation's memories. The
+// result is sorted best-first and capped at limit.
+func (a *Agent) rankMemories(ctx context.Context, us *store.UserStore, query, conversationID string, limit int) ([]store.Memory, error) {
+	if limit <= 0 {
+		limit = 10
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return fmt.Sprintf("invalid arguments: %v — \"query\" is required.", err), nil
+	// The lexical floor: which memories the FTS pre-filter hit. In
+	// semantic mode this is the +0.10 bonus set; in lexical mode it IS the
+	// candidate set. The cap is the candidate budget, never the final list
+	// size — a small `limit` must not pre-truncate the pool by id order and
+	// defeat the ranking.
+	fq := ftsQuery(query)
+	ftsSet := map[int64]bool{}
+	var lexicalHits []store.Memory
+	if fq != "" {
+		var err error
+		if conversationID != "" {
+			lexicalHits, err = us.SearchMemoriesInConversation(fq, conversationID, memFTSCap)
+		} else {
+			lexicalHits, err = us.SearchMemories(fq, memFTSCap)
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, h := range lexicalHits {
+			ftsSet[h.ID] = true
+		}
 	}
-	if strings.TrimSpace(p.Query) == "" {
-		return "recall needs a query (what to recall, in natural language).", nil
-	}
-	top := p.Top
-	if top <= 0 {
-		top = recallDefaultTop
-	}
-	if top > recallMaxTop {
-		top = recallMaxTop
-	}
-	us, err := a.userStore(handle)
-	if err != nil {
-		return "internal error: could not open the user store.", nil
-	}
-	mems, err := us.ListActiveMemories()
-	if err != nil {
-		return "internal error: could not list memories.", nil
-	}
-	if len(mems) == 0 {
-		return "you have no stored memories yet.", nil
-	}
-	// The one embedding call per recall (the DECIDED contract): the query's
-	// vector for cosine. Absent embedder → lexical mode.
+	// One embedding call per search (the query's vector for cosine). Absent
+	// embedder (or a failed call) → lexical mode, best-effort.
 	var qvec []float32
 	if a.vec != nil {
-		if v, err := a.vec.embedInputs(ctx, []string{p.Query}); err == nil {
+		if v, err := a.vec.embedInputs(ctx, []string{query}); err == nil {
 			qvec = v
 		}
 	}
-	// The lexical floor: which candidates the FTS pre-filter hit.
-	ftsHits := map[int64]bool{}
-	if fq := ftsQuery(p.Query); fq != "" {
-		if hits, err := us.SearchMemories(fq, recallMaxTop); err == nil {
-			for _, h := range hits {
-				ftsHits[h.ID] = true
-			}
+	var candidates []store.Memory
+	if qvec != nil {
+		// Semantic mode: the whole active set is rankable (a keyword miss
+		// can still be a semantic hit); the FTS bonus set (lexicalHits,
+		// capped at the candidate budget) already covers the +0.10.
+		var err error
+		if conversationID != "" {
+			candidates, err = us.ListActiveMemoriesInConversation(conversationID)
+		} else {
+			candidates, err = us.ListActiveMemories()
 		}
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		candidates = lexicalHits
 	}
 	now := time.Now()
-	scored := make([]recallScore, 0, len(mems))
-	for _, m := range mems {
-		s := recallScore{mem: m, ftsHit: ftsHits[m.ID]}
+	scored := make([]rankedMemory, 0, len(candidates))
+	for _, m := range candidates {
+		s := rankedMemory{mem: m, ftsHit: ftsSet[m.ID]}
 		if qvec != nil {
 			s.cosine = cosine(qvec, m.Embedding)
 		}
@@ -189,18 +192,14 @@ func (a *Agent) execRecall(ctx context.Context, handle string, args json.RawMess
 		if age < 0 {
 			age = 0
 		}
-		halfLifeHours := recallRecencyHalfLife.Hours()
+		halfLifeHours := memRecencyHalfLife.Hours()
 		s.recency = halfLifeHours / (halfLifeHours + age.Hours())
 		if qvec != nil {
-			s.score = recallWcosine*s.cosine + recallWconf*m.Confidence + recallWrecency*s.recency
+			s.score = memWcosine*s.cosine + memWconf*m.Confidence + memWrecency*s.recency
 			if s.ftsHit {
-				s.score += recallWfts
+				s.score += memWfts
 			}
 		} else {
-			// Lexical mode: only the FTS hits are surfaced.
-			if !s.ftsHit {
-				continue
-			}
 			s.score = 0.5*m.Confidence + 0.5*s.recency
 		}
 		scored = append(scored, s)
@@ -211,17 +210,14 @@ func (a *Agent) execRecall(ctx context.Context, handle string, args json.RawMess
 		}
 		return scored[i].mem.ID < scored[j].mem.ID
 	})
-	if len(scored) == 0 {
-		return "no stored memories match that — you have memories, but none match the query.", nil
+	if len(scored) > limit {
+		scored = scored[:limit]
 	}
-	if len(scored) > top {
-		scored = scored[:top]
-	}
-	var b strings.Builder
+	out := make([]store.Memory, 0, len(scored))
 	for _, s := range scored {
-		fmt.Fprintf(&b, "#%d [%s] %s (confidence %.2f, %s)\n", s.mem.ID, s.mem.Facet, s.mem.Statement, s.mem.Confidence, memoryAge(now, s.mem.UpdatedAt))
+		out = append(out, s.mem)
 	}
-	return strings.TrimRight(b.String(), "\n"), nil
+	return out, nil
 }
 
 // memoryAge renders an age for the result text.
@@ -306,7 +302,7 @@ func (a *Agent) execRemember(ctx context.Context, handle string, args json.RawMe
 	if emb != nil {
 		if mems, err := us.ListActiveMemories(); err == nil {
 			for _, m := range mems {
-				if c := cosine(emb, m.Embedding); c >= recallNearDup {
+				if c := cosine(emb, m.Embedding); c >= memNearDup {
 					nearDups = append(nearDups, m)
 				}
 			}
@@ -329,7 +325,7 @@ func (a *Agent) execRemember(ctx context.Context, handle string, args json.RawMe
 	if p.SupersedeID != nil {
 		old, err := us.GetMemory(*p.SupersedeID)
 		if err != nil {
-			return fmt.Sprintf("remembered as #%d, but supersede_id %d does not name an existing memory — recall to find the right id.", created.ID, *p.SupersedeID), nil
+			return fmt.Sprintf("remembered as #%d, but supersede_id %d does not name an existing memory — search your memories to find the right id.", created.ID, *p.SupersedeID), nil
 		}
 		if old.Status != "active" {
 			return fmt.Sprintf("remembered as #%d, but memory %d is not active (already superseded or forgotten) — nothing was replaced.", created.ID, old.ID), nil
@@ -359,7 +355,7 @@ func (a *Agent) execForget(ctx context.Context, handle string, args json.RawMess
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil || p.ID <= 0 {
-		return "forget needs \"id\" (the memory id, from recall).", nil
+		return "forget needs \"id\" (the memory id — search your memories to find it).", nil
 	}
 	us, err := a.userStore(handle)
 	if err != nil {
@@ -367,7 +363,7 @@ func (a *Agent) execForget(ctx context.Context, handle string, args json.RawMess
 	}
 	mem, err := us.GetMemory(p.ID)
 	if err != nil {
-		return fmt.Sprintf("no memory with id %d — recall to find the right one.", p.ID), nil
+		return fmt.Sprintf("no memory with id %d — search your memories to find the right one.", p.ID), nil
 	}
 	if mem.Status != "active" {
 		return fmt.Sprintf("memory %d is not active (already superseded or forgotten).", p.ID), nil

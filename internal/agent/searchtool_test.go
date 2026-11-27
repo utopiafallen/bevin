@@ -173,11 +173,12 @@ func TestSearchTool(t *testing.T) {
 	defer a.Close()
 	convA, convB, wsID, _, _, _ := seedSearchFixtures(t, a, "u1")
 
-	// Unscoped: the memories render, and the result carries the
+	// Unscoped: the memories render (with the #id lines forget and
+	// supersede_id consume), and the result carries the
 	// not-configured-vector-index note (the test agent has no embedder).
 	out := execSearchTool(t, a, "u1", map[string]any{"q": "zephyr"})
-	if !strings.Contains(out, "MEMORIES") || !strings.Contains(out, "zephyr project kickoff") {
-		t.Fatalf("unscoped search result missing the memories section:\n%s", out)
+	if !strings.Contains(out, "MEMORIES") || !strings.Contains(out, "#1 [work] the zephyr project kickoff") {
+		t.Fatalf("unscoped search result missing the memories section (with #id lines):\n%s", out)
 	}
 	if !strings.Contains(out, "semantic conversation search is not configured") {
 		t.Fatalf("unscoped search result missing the no-index note:\n%s", out)
