@@ -353,9 +353,9 @@ func TestSearchDefaultWorkspaceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tl, ok := a.tools.Get("search")
+	tl, ok := a.tools.Get("user_data_search")
 	if !ok {
-		t.Fatal("tool \"search\" not registered")
+		t.Fatal("tool \"user_data_search\" not registered")
 	}
 	run := func(convID string, args map[string]any) string {
 		raw, err := json.Marshal(args)
