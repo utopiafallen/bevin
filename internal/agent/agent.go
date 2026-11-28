@@ -1108,6 +1108,78 @@ func (a *Agent) idleSlotsFor(m config.Model) int {
 	return 0
 }
 
+// resolveModelRefTracked is resolveModelRef with the bevin-side KV-cache
+// backend preference (2026-11-27): when the reference is a display name
+// served by several providers, the provider on trackedBackend — the llama
+// backend whose --slot-save-path holds the conversation's KV cache file — is
+// preferred over the least-loaded one, so long as it is still available: the
+// conversation's next model call then loads its cache and prefills only the
+// delta instead of a full prefill. A stale tracking (no provider on that base
+// URL, or the provider no longer available) falls back to the normal
+// least-loaded resolution. Concrete model IDs resolve to themselves, as in
+// resolveModelRef. trackedBackend "" = plain resolveModelRef.
+func (a *Agent) resolveModelRefTracked(ref, trackedBackend string) (string, bool) {
+	a.cfgMu.Lock()
+	models := make([]config.Model, len(a.cfg.Models))
+	copy(models, a.cfg.Models)
+	a.cfgMu.Unlock()
+	// 1. A concrete model ID (exact match, available) resolves to itself.
+	for _, m := range models {
+		if m.ID == ref && m.Available() {
+			return m.ID, true
+		}
+	}
+	// 2. The KV-cache holder preference: a provider on the tracked backend
+	// that serves the display name and is available wins over
+	// least-loaded (cache locality — the conversation's cache file lives
+	// on that backend).
+	if trackedBackend != "" {
+		for _, m := range models {
+			if m.DisplayName == ref && m.BaseURL == trackedBackend && m.Available() {
+				return m.ID, true
+			}
+		}
+	}
+	// 3. Otherwise the least-loaded available provider (the plain rule).
+	for _, m := range models {
+		if m.DisplayName == ref && m.Available() {
+			if resolved, ok := config.ResolveDisplayName(models, ref, a.idleSlotsFor); ok && resolved.ID != "" {
+				return resolved.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+// kvBackendFor returns the base URL of the llama backend to record as the
+// holder of a conversation's KV cache file after a model call on modelID
+// completes — "" for a non-llama model (its backend holds no bevin-managed
+// KV file) or an unknown model.
+func (a *Agent) kvBackendFor(modelID string) string {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	for _, m := range a.cfg.Models {
+		if m.ID == modelID && m.Provider == "llama" {
+			return m.BaseURL
+		}
+	}
+	return ""
+}
+
+// backendInConfig reports whether any model in the live config points at the
+// base URL (the tracked KV-cache holder's server is still configured —
+// possibly temporarily unavailable, in which case the tracking is kept).
+func (a *Agent) backendInConfig(baseURL string) bool {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	for _, m := range a.cfg.Models {
+		if m.BaseURL == baseURL {
+			return true
+		}
+	}
+	return false
+}
+
 // displayNameFor returns a concrete model ID's display name (the user-facing
 // model identity) — "" when the ID is unknown (a model removed from the
 // config). The conversation summary carries it so the picker (keyed by
@@ -1465,7 +1537,24 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 		// available provider that serves it (the execution pool), a concrete id
 		// keeps itself. The conversation KEEPS the resolved concrete id (a
 		// stable provider — its KV cache is preserved).
-		resolved, ok := a.resolveModelRef(*modelID)
+		// KV-cache holder preference (2026-11-27): when the reference is a
+		// display name with several providers, the provider on the backend
+		// that HOLDS this conversation's KV cache file wins over
+		// least-loaded (the next model call loads the cache and prefills
+		// only the delta). A tracking whose backend is gone from the config
+		// is stale — cleared here (the next llama completion re-records a
+		// live holder) and the plain least-loaded rule applies.
+		tracked, terr := us.GetConversationKVBackend(convID)
+		if terr != nil {
+			tracked = ""
+		}
+		if tracked != "" && !a.backendInConfig(tracked) {
+			tracked = ""
+			if cerr := us.SetConversationKVBackend(convID, ""); cerr != nil {
+				log.Printf("bevin: clearing stale kv-cache backend tracking %s: %v", convID, cerr)
+			}
+		}
+		resolved, ok := a.resolveModelRefTracked(*modelID, tracked)
 		if !ok || resolved == "" {
 			return nil, fmt.Errorf("model %s is not available", *modelID)
 		}
@@ -1931,6 +2020,18 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 		// always maxed in as well.
 		if res.Usage != nil {
 			lastUsage = res.Usage.TotalTokens
+		}
+		// Bevin-side KV-cache backend tracking (2026-11-27): a completed
+		// model call on a llama backend means the conversation's KV cache
+		// file belongs to that backend (the always-save rule just
+		// wrote/updated it there). Record the holder durably so model
+		// resolution can route the conversation back to it (cache locality
+		// beats least-loaded). Best-effort: a tracking write failure never
+		// affects the turn.
+		if kb := a.kvBackendFor(conv.ActiveModelID); kb != "" {
+			if cerr := us.SetConversationKVBackend(convID, kb); cerr != nil {
+				log.Printf("bevin: kv-cache backend tracking %s: %v", convID, cerr)
+			}
 		}
 		if len(res.ToolCalls) == 0 {
 			break // the final answer

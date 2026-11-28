@@ -171,6 +171,22 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		ALTER TABLE conversations ADD COLUMN skill_set TEXT NOT NULL DEFAULT '';
 		`,
 	},
+	{
+		// v12 (2026-11-28): conversations.kv_cache_backend — the base URL
+		// of the llama backend that holds this conversation's KV cache file
+		// (bevin-side explicit KV management; design log: TIER 2 COOPERATIVE
+		// YIELD + BEVIN-SIDE KV SAVE-RULE SIMPLIFICATION). The file
+		// (cache_conv_<id>.bin) lives on the backend that last saved it;
+		// model resolution (a display name with several providers) prefers
+		// a provider on the holder so the conversation's next model call
+		// loads its cache and prefills only the delta instead of a full
+		// prefill. '' = no holder recorded (new conversation, a
+		// non-llama model, or a stale tracking that was cleared).
+		version: 12,
+		up: `
+		ALTER TABLE conversations ADD COLUMN kv_cache_backend TEXT NOT NULL DEFAULT '';
+		`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

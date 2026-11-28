@@ -156,6 +156,39 @@ func (s *UserStore) SetConversationModel(id, modelID string) error {
 	return nil
 }
 
+// GetConversationKVBackend returns the base URL of the llama backend that
+// holds the conversation's KV cache file (the v12 column) — empty when no
+// holder is recorded (a new conversation, a non-llama model, or a cleared
+// stale tracking). store.ErrNotFound when the conversation is missing.
+func (s *UserStore) GetConversationKVBackend(id string) (string, error) {
+	var backend string
+	err := s.db.QueryRow(`SELECT kv_cache_backend FROM conversations WHERE id = ?`, id).Scan(&backend)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return backend, nil
+}
+
+// SetConversationKVBackend records ("" clears) the llama backend that holds
+// the conversation's KV cache file. Written after every completed model call
+// on a llama backend (the always-save rule keeps the file current there) and
+// cleared when the tracked backend disappears from the config; model
+// resolution prefers a provider on the recorded holder (cache locality over
+// least-loaded). store.ErrNotFound when the conversation is missing.
+func (s *UserStore) SetConversationKVBackend(id, backend string) error {
+	res, err := s.db.Exec(`UPDATE conversations SET kv_cache_backend = ? WHERE id = ?`, backend, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetConversationOwnerTask links a conversation to the task that owns it
 // (pass "" to clear).
 func (s *UserStore) SetConversationOwnerTask(convID, taskID string) error {

@@ -742,3 +742,50 @@ func TestWorkspaceDeleteCascade(t *testing.T) {
 		t.Fatalf("files after workspace delete = %+v (err %v), want none", files, err)
 	}
 }
+
+// TestConversationKVBackendTracking verifies the v12 kv_cache_backend column
+// (bevin-side explicit KV management, 2026-11-27): the base URL of the llama
+// backend that holds the conversation's KV cache file. New conversations
+// start untracked (empty), the holder is recorded and re-recorded by
+// SetConversationKVBackend ("" clears it), and unknown conversations give
+// ErrNotFound on both sides.
+func TestConversationKVBackendTracking(t *testing.T) {
+	s := openTestStore(t)
+	c, err := s.CreateConversation("hello", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A new conversation starts untracked.
+	if b, err := s.GetConversationKVBackend(c.ID); err != nil || b != "" {
+		t.Fatalf("new conversation: backend = (%q, %v), want (\"\", nil)", b, err)
+	}
+	// Record the holder (a completed llama model call just saved the file
+	// there — the always-save rule).
+	if err := s.SetConversationKVBackend(c.ID, "http://a:1/v1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := s.GetConversationKVBackend(c.ID); err != nil || b != "http://a:1/v1" {
+		t.Fatalf("backend = (%q, %v), want (\"http://a:1/v1\", nil)", b, err)
+	}
+	// Re-record on another backend (a model switch moved the holder).
+	if err := s.SetConversationKVBackend(c.ID, "http://b:1/v1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := s.GetConversationKVBackend(c.ID); b != "http://b:1/v1" {
+		t.Fatalf("backend = %q, want http://b:1/v1 (re-recorded holder)", b)
+	}
+	// Clear (a stale tracking, or a switch off llama).
+	if err := s.SetConversationKVBackend(c.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := s.GetConversationKVBackend(c.ID); b != "" {
+		t.Fatalf("cleared backend = %q, want \"\"", b)
+	}
+	// Unknown conversation -> ErrNotFound (both sides).
+	if err := s.SetConversationKVBackend("nope", "http://a:1/v1"); err != ErrNotFound {
+		t.Fatalf("set unknown: err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetConversationKVBackend("nope"); err != ErrNotFound {
+		t.Fatalf("get unknown: err = %v, want ErrNotFound", err)
+	}
+}
