@@ -92,7 +92,7 @@ func registerMemoryTools(r *ToolRegistry, a *Agent) error {
 			"properties": map[string]any{
 				"id": map[string]any{
 					"type":        "number",
-					"description": "the memory id (from the search tool's memory results)",
+					"description": "the memory id (from user_data_search's memory results)",
 				},
 			},
 			"required": []string{"id"},
@@ -325,7 +325,7 @@ func (a *Agent) execRemember(ctx context.Context, handle string, args json.RawMe
 	if p.SupersedeID != nil {
 		old, err := us.GetMemory(*p.SupersedeID)
 		if err != nil {
-			return fmt.Sprintf("remembered as #%d, but supersede_id %d does not name an existing memory — search your memories to find the right id.", created.ID, *p.SupersedeID), nil
+			return fmt.Sprintf("remembered as #%d, but supersede_id %d does not name an existing memory — user_data_search finds the right id.", created.ID, *p.SupersedeID), nil
 		}
 		if old.Status != "active" {
 			return fmt.Sprintf("remembered as #%d, but memory %d is not active (already superseded or forgotten) — nothing was replaced.", created.ID, old.ID), nil
@@ -355,7 +355,7 @@ func (a *Agent) execForget(ctx context.Context, handle string, args json.RawMess
 		ID int64 `json:"id"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil || p.ID <= 0 {
-		return "forget needs \"id\" (the memory id — search your memories to find it).", nil
+		return "forget needs \"id\" (the memory id — user_data_search's memory results carry it).", nil
 	}
 	us, err := a.userStore(handle)
 	if err != nil {
@@ -363,7 +363,7 @@ func (a *Agent) execForget(ctx context.Context, handle string, args json.RawMess
 	}
 	mem, err := us.GetMemory(p.ID)
 	if err != nil {
-		return fmt.Sprintf("no memory with id %d — search your memories to find the right one.", p.ID), nil
+		return fmt.Sprintf("no memory with id %d — user_data_search finds the right one.", p.ID), nil
 	}
 	if mem.Status != "active" {
 		return fmt.Sprintf("memory %d is not active (already superseded or forgotten).", p.ID), nil

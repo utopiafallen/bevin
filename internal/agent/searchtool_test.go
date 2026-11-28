@@ -157,9 +157,9 @@ func execSearchTool(t *testing.T, a *Agent, handle string, args map[string]any) 
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	tl, ok := a.tools.Get("search")
+	tl, ok := a.tools.Get("user_data_search")
 	if !ok {
-		t.Fatal("tool \"search\" not registered")
+		t.Fatal("tool \"user_data_search\" not registered")
 	}
 	out, err := tl.Execute(context.Background(), handle, raw)
 	if err != nil {

@@ -11,14 +11,19 @@ import (
 	"github.com/utopiafallen/bevin/internal/store"
 )
 
-// The search tool: bevin's own surface over the user's data, mirroring the
-// web UI's search page (one query fans out across every source —
-// conversations semantically, memories + profile lexically, workspace files
-// by name/path). The optional scopes narrow the sources that have that
-// dimension: conversation = conversation hits + provenance-linked memories;
-// workspace = file hits. The profile is always searched whole (it is the
-// user's global context — no conversation or workspace dimension).
-// All failures are RESULTS back to the model, like the memory tools.
+// The user-data search tool: bevin's own surface over the user's data,
+// mirroring the web UI's search page (one query fans out across every
+// source — conversations semantically, memories as recall's hybrid blend,
+// profile lexically, workspace files by name/path). The optional scopes
+// narrow the sources that have that dimension: conversation = conversation
+// hits + provenance-linked memories; workspace = file hits. The profile is
+// always searched whole (it is the user's global context — no conversation
+// or workspace dimension). All failures are RESULTS back to the model,
+// like the memory tools.
+//
+// Named user_data_search (not bare "search") so the model never conflates
+// it with web_search or reads it as an umbrella over web + user data —
+// user directive, 2026-11-27.
 
 const (
 	// searchToolMaxSnippet caps a conversation hit's content in the result
@@ -31,8 +36,8 @@ const (
 
 func registerSearchTool(r *ToolRegistry, a *Agent) error {
 	return r.Register(Tool{
-		Name:        "search",
-		Description: `Search the user's own data for additional context: their past conversation messages (by meaning), bevin's stored memories (by meaning, confidence and recency), the user's profile, and workspace file names/paths. Use it to recall what was said or decided in earlier conversations, what you remember about the user, or which files exist in a workspace. Memory results carry the memory id (#N) — the id forget and remember's supersede_id need. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace.`,
+		Name:        "user_data_search",
+		Description: `Search the user's own data for additional context: their past conversation messages (by meaning), bevin's stored memories (by meaning, confidence and recency), the user's profile, and workspace file names/paths. Use it to recall what was said or decided in earlier conversations, what you remember about the user, or which files exist in a workspace. Memory results carry the memory id (#N) — the id forget and remember's supersede_id need. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace. This is the user's own data, not the web — web_search is for web content.`,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -71,7 +76,7 @@ func (a *Agent) execSearch(ctx context.Context, handle string, args json.RawMess
 	}
 	q := strings.TrimSpace(p.Q)
 	if q == "" {
-		return "search needs a query (\"q\").", nil
+		return "user_data_search needs a query (\"q\").", nil
 	}
 	limit := p.Limit
 	if limit <= 0 {
