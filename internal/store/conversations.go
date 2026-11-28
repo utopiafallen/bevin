@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Conversation is a P2 row.
@@ -34,6 +36,15 @@ type Conversation struct {
 	// derived effects are the workspace-local skill availability and the
 	// search tool's default workspace scope.
 	WorkspaceID string `json:"workspace_id"`
+	// SkillSet: the conversation's ACTIVE SKILL SET (the design log's
+	// SKILL SYSTEM section) — the identifiers of the skills the
+	// conversation has loaded (a JSON array of "global:<name>" /
+	// "ws:<workspace>:<name>" keys, empty = none). IDENTIFIERS ONLY — the
+	// request's skill block is rebuilt from them on every request (the
+	// content re-read from the store / .SKILLS file), so the loaded
+	// context survives a bevin restart: the set is state, not a runtime
+	// handle.
+	SkillSet string `json:"skill_set"`
 }
 
 // ErrNotFound is returned when a row is missing.
@@ -51,10 +62,10 @@ func (s *UserStore) CreateConversation(title, activeModelID string) (*Conversati
 	return &Conversation{ID: id, Title: title, CreatedAt: now, LastActivityAt: now, State: "active", ActiveModelID: activeModelID}, nil
 }
 
-const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort, purpose, topic, purpose_updated_at, workspace_id`
+const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort, purpose, topic, purpose_updated_at, workspace_id, skill_set`
 
 func scanConv(rs interface{ Scan(...any) error }, c *Conversation) error {
-	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort, &c.Purpose, &c.Topic, &c.PurposeUpdatedAt, &c.WorkspaceID)
+	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort, &c.Purpose, &c.Topic, &c.PurposeUpdatedAt, &c.WorkspaceID, &c.SkillSet)
 }
 
 func (s *UserStore) GetConversation(id string) (*Conversation, error) {
@@ -197,6 +208,43 @@ func (s *UserStore) SetConversationWorkspace(id, workspaceID string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetConversationSkillSet stores the conversation's ACTIVE SKILL SET (the
+// SKILL SYSTEM section): the loaded skills' identifiers (a JSON array —
+// empty when nothing is loaded).
+func (s *UserStore) SetConversationSkillSet(id string, keys []string) error {
+	enc := ""
+	if len(keys) > 0 {
+		b, err := json.Marshal(keys)
+		if err != nil {
+			return err
+		}
+		enc = string(b)
+	}
+	res, err := s.db.Exec(`UPDATE conversations SET skill_set = ? WHERE id = ?`, enc, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ParseSkillSet decodes a stored active skill set (the JSON array in
+// conversations.skill_set). A blank or unparseable value is an EMPTY set,
+// never an error — a corrupt set must not kill the request path (the
+// block simply renders nothing).
+func ParseSkillSet(set string) []string {
+	if strings.TrimSpace(set) == "" {
+		return nil
+	}
+	var keys []string
+	if err := json.Unmarshal([]byte(set), &keys); err != nil {
+		return nil
+	}
+	return keys
 }
 
 // SetFrozenSystemPrompt stores the conversation's frozen system prompt:

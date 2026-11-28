@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/utopiafallen/bevin/internal/store"
 )
 
 // The skill system (the design log's SKILL SYSTEM + WORKSPACE LOADING
@@ -87,7 +89,7 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if !strings.Contains(out, "make && test") || !strings.Contains(out, "workspace "+w1) {
 		t.Fatalf("skill_load = %s", out)
 	}
-	keys := a.activeSkillKeys(convID)
+	keys := a.activeSkillKeys("u1", convID)
 	if len(keys) != 1 || keys[0] != "ws:"+w1+":build-notes" {
 		t.Fatalf("active keys = %v", keys)
 	}
@@ -112,11 +114,11 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if !strings.Contains(out, "run the deploy script") {
 		t.Fatalf("global load = %s", out)
 	}
-	if n := len(a.activeSkillKeys(convID)); n != 2 {
+	if n := len(a.activeSkillKeys("u1", convID)); n != 2 {
 		t.Fatalf("active keys = %d, want 2", n)
 	}
 	skToolRun(t, a, ctx, a.execSkillLoad, "u1", `{"name":"deploy-cli"}`)
-	if n := len(a.activeSkillKeys(convID)); n != 2 {
+	if n := len(a.activeSkillKeys("u1", convID)); n != 2 {
 		t.Fatalf("idempotent load failed: %d keys", n)
 	}
 
@@ -140,7 +142,7 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if !strings.Contains(out, "were unloaded") {
 		t.Fatalf("switch result missing the eviction: %s", out)
 	}
-	keys = a.activeSkillKeys(convID)
+	keys = a.activeSkillKeys("u1", convID)
 	if len(keys) != 1 || keys[0] != "global:deploy-cli" {
 		t.Fatalf("after switch keys = %v (want only the global)", keys)
 	}
@@ -150,7 +152,7 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if !strings.Contains(out, "no longer injected") {
 		t.Fatalf("skill_unload = %s", out)
 	}
-	if n := len(a.activeSkillKeys(convID)); n != 0 {
+	if n := len(a.activeSkillKeys("u1", convID)); n != 0 {
 		t.Fatalf("after unload keys = %d, want 0", n)
 	}
 	out = skToolRun(t, a, ctx, a.execSkillUnload, "u1", `{"name":"deploy-cli"}`)
@@ -168,7 +170,7 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if row, _ := us.GetConversation(convID); row.WorkspaceID != "" {
 		t.Fatalf("pointer = %q after clear, want empty", row.WorkspaceID)
 	}
-	if n := len(a.activeSkillKeys(convID)); n != 0 {
+	if n := len(a.activeSkillKeys("u1", convID)); n != 0 {
 		t.Fatalf("keys after clear = %d, want 0", n)
 	}
 	_ = dir
@@ -285,7 +287,7 @@ func TestSkillCreateEditDelete(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(a.wsSkillsDir("u1", w1), "ws-skill.json")); !os.IsNotExist(err) {
 		t.Fatalf("ws skill file still present: %v", err)
 	}
-	if n := len(a.activeSkillKeys(convID)); n != 0 {
+	if n := len(a.activeSkillKeys("u1", convID)); n != 0 {
 		t.Fatalf("deleted skill still in the active set: %d keys", n)
 	}
 	out = skToolRun(t, a, ctx, a.execSkillDelete, "u1", `{"name":"g-skill"}`)
@@ -391,5 +393,112 @@ func TestSearchDefaultWorkspaceScope(t *testing.T) {
 	out = run("", map[string]any{"q": "zephyr"})
 	if strings.Contains(out, "WORKSPACE FILES") {
 		t.Fatalf("no conversation context must not add a file leg: %s", out)
+	}
+}
+
+// TestSkillSetSurvivesRestart — the v11 amendment (the user): the active
+// set is STATE on the conversation row (skill_set), not a runtime handle
+// — a fresh Agent over the same data dir rebuilds the request's skill
+// block from the stored identifiers (the content re-read, so a skill
+// edited while loaded renders its CURRENT content, and the loaded
+// context is intact across the restart).
+func TestSkillSetSurvivesRestart(t *testing.T) {
+	a, cfg, dir := newTestAgent(t)
+	defer a.Close()
+	convID, us := newTestConversation(t, a, "u1")
+	ctx := skCtx(t, convID)
+
+	if _, err := us.CreateSkill("deploy-cli", "deploys the app", "run the deploy script", nil); err != nil {
+		t.Fatal(err)
+	}
+	skToolRun(t, a, ctx, a.execWorkspaceCreate, "u1", `{"title":"W1","description":""}`)
+	wss, err := us.ListWorkspaces()
+	if err != nil || len(wss) != 1 {
+		t.Fatalf("workspaces = %+v, %v", wss, err)
+	}
+	w1 := wss[0].ID
+	if err := writeWsSkill(a.wsSkillsDir("u1", w1), wsSkillFile{Name: "build-notes", Description: "the build recipe", Content: "make && test"}); err != nil {
+		t.Fatal(err)
+	}
+	skToolRun(t, a, ctx, a.execSetWorkspace, "u1", `{"workspace_id":"`+w1+`"}`)
+	skToolRun(t, a, ctx, a.execSkillLoad, "u1", `{"name":"build-notes"}`)
+	skToolRun(t, a, ctx, a.execSkillLoad, "u1", `{"name":"deploy-cli"}`)
+	if keys := a.activeSkillKeys("u1", convID); len(keys) != 2 {
+		t.Fatalf("keys before restart = %v", keys)
+	}
+	// Edited while loaded: the content is re-read, never cached.
+	skToolRun(t, a, ctx, a.execSkillEdit, "u1", `{"name":"deploy-cli","content":"run the deploy script (v2)"}`)
+
+	// The RESTART: a fresh Agent over the same data dir.
+	a2, err := New(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+	us2, err := a2.userStore("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := a2.activeSkillKeys("u1", convID); len(keys) != 2 {
+		t.Fatalf("restarted agent's keys = %v (want the two loaded)", keys)
+	}
+	block := a2.activeSkillBlock(us2, "u1", convID)
+	if !strings.Contains(block, "Loaded skills (this conversation)") ||
+		!strings.Contains(block, "make && test") ||
+		!strings.Contains(block, "run the deploy script (v2)") {
+		t.Fatalf("restarted agent's block lacks the loaded skills:\\n%s", block)
+	}
+}
+
+// TestSkillBlockPrunesUnresolvable — keys whose skills no longer exist
+// (or whose workspace is gone) never linger: the workspace-delete
+// cascade scrubs its ws keys from the pointing conversations' sets (same
+// tx as the pointer clear), and the render prunes any remaining stale
+// key (self-heal) instead of failing the request.
+func TestSkillBlockPrunesUnresolvable(t *testing.T) {
+	a, _, _ := newTestAgent(t)
+	defer a.Close()
+	convID, us := newTestConversation(t, a, "u1")
+	ctx := skCtx(t, convID)
+
+	if _, err := us.CreateSkill("temp", "a temp skill", "temp body", nil); err != nil {
+		t.Fatal(err)
+	}
+	skToolRun(t, a, ctx, a.execSkillLoad, "u1", `{"name":"temp"}`)
+	skToolRun(t, a, ctx, a.execWorkspaceCreate, "u1", `{"title":"W1","description":""}`)
+	wss, _ := us.ListWorkspaces()
+	w1 := wss[0].ID
+	if err := writeWsSkill(a.wsSkillsDir("u1", w1), wsSkillFile{Name: "note", Description: "a note", Content: "note body"}); err != nil {
+		t.Fatal(err)
+	}
+	skToolRun(t, a, ctx, a.execSetWorkspace, "u1", `{"workspace_id":"`+w1+`"}`)
+	skToolRun(t, a, ctx, a.execSkillLoad, "u1", `{"name":"note"}`)
+
+	// Delete the workspace: the cascade clears the pointer AND scrubs
+	// the ws key from the set (same tx).
+	if err := us.DeleteWorkspace(w1); err != nil {
+		t.Fatal(err)
+	}
+	row, err := us.GetConversation(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.WorkspaceID != "" {
+		t.Fatalf("pointer not cleared by the cascade: %q", row.WorkspaceID)
+	}
+	if keys := store.ParseSkillSet(row.SkillSet); len(keys) != 1 || keys[0] != "global:temp" {
+		t.Fatalf("cascade did not scrub the ws key: %v", keys)
+	}
+
+	// Delete the last (global) skill: the render prunes the stale key
+	// from the stored set and the block goes empty.
+	if err := us.DeleteSkill("temp"); err != nil {
+		t.Fatal(err)
+	}
+	if block := a.activeSkillBlock(us, "u1", convID); block != "" {
+		t.Fatalf("block after all skills are gone = %q (want empty)", block)
+	}
+	if row, _ := us.GetConversation(convID); row.SkillSet != "" {
+		t.Fatalf("stored set not pruned: %q", row.SkillSet)
 	}
 }

@@ -65,6 +65,11 @@ func TestWorkspaceDeleteClearsConversationPointers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// c1 also carries a loaded-skill set (v11): a global key that must
+	// survive + a ws key of the doomed workspace that must not.
+	if err := s.SetConversationSkillSet(c1.ID, []string{"global:keep", "ws:" + ws.ID + ":gone"}); err != nil {
+		t.Fatal(err)
+	}
 	// The third conversation is unpointed — it must survive untouched.
 	c3, err := s.CreateConversation("c", "m1")
 	if err != nil {
@@ -93,6 +98,63 @@ func TestWorkspaceDeleteClearsConversationPointers(t *testing.T) {
 	// Deleting the (gone) workspace again is a 404, not a silent no-op.
 	if err := s.DeleteWorkspace(ws.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: err = %v, want ErrNotFound", err)
+	}
+	// The cascade scrubbed c1's ws key (same tx) and kept its global.
+	got, err = s.GetConversation(c1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys := ParseSkillSet(got.SkillSet); len(keys) != 1 || keys[0] != "global:keep" {
+		t.Fatalf("c1 skill_set after the cascade = %v, want [global:keep]", keys)
+	}
+}
+
+// The v11 active skill set: the round-trip (identifiers only — a JSON
+// array, empty = none) and ParseSkillSet's robustness (a blank or
+// corrupt set is empty, never an error — it must not kill the request
+// path).
+func TestConversationSkillSet(t *testing.T) {
+	s := openTestStore(t)
+	c, err := s.CreateConversation("hello", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v11's default: nothing loaded.
+	if c.SkillSet != "" {
+		t.Fatalf("new conversation skill_set = %q, want empty (the v11 default)", c.SkillSet)
+	}
+	if err := s.SetConversationSkillSet(c.ID, []string{"global:deploy-cli", "ws:ws1:build-notes"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetConversation(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := ParseSkillSet(got.SkillSet)
+	if len(keys) != 2 || keys[0] != "global:deploy-cli" || keys[1] != "ws:ws1:build-notes" {
+		t.Fatalf("skill_set = %v (stored %q), want the two keys in order", keys, got.SkillSet)
+	}
+	// Empty back again: the column is blank, not "null" or "[]".
+	if err := s.SetConversationSkillSet(c.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetConversation(c.ID)
+	if got.SkillSet != "" {
+		t.Fatalf("cleared skill_set = %q, want empty", got.SkillSet)
+	}
+	if err := s.SetConversationSkillSet("no-such-conv", []string{"global:x"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown conversation: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestParseSkillSetRobust(t *testing.T) {
+	for _, in := range []string{"", "   ", "not json", `"a string"`, `{"a":1}`, `42`} {
+		if keys := ParseSkillSet(in); keys != nil {
+			t.Fatalf("ParseSkillSet(%q) = %v, want nil", in, keys)
+		}
+	}
+	if keys := ParseSkillSet(`["global:a","ws:b:c"]`); len(keys) != 2 || keys[1] != "ws:b:c" {
+		t.Fatalf("valid set = %v", keys)
 	}
 }
 

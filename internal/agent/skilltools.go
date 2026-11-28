@@ -130,126 +130,177 @@ func wsSkillExists(skillsDir, name string) bool {
 	return false
 }
 
-// ---- per-conversation active skill set ----
+// ---- per-conversation active skill set (STORE-BACKED) ----
 //
 // The design log's SKILL SYSTEM section: a loaded skill joins the
 // conversation's ACTIVE SET; its content is re-injected into every request
 // until skill_unload drops it (or the conversation's workspace pointer
-// changes, evicting that workspace's skills). Keys:
-// "global:<name>" or "ws:<workspaceID>:<name>". In-memory runtime state —
-// a bevin restart clears the sets (v1), like the pty session registry.
+// changes, evicting that workspace's skills). The set is the conversation
+// row's skill_set column (v11): IDENTIFIERS only — "global:<name>" or
+// "ws:<workspaceID>:<name>". The request's block is rebuilt from the
+// stored identifiers on every request (the content re-read from the store
+// / .SKILLS file), so the loaded context survives a bevin restart: the
+// set is state, not a runtime handle.
 
-func (a *Agent) activeSkillKeys(convID string) []string {
-	a.skillMu.Lock()
-	defer a.skillMu.Unlock()
-	keys := make([]string, 0, len(a.skillLoaded[convID]))
-	for k := range a.skillLoaded[convID] {
-		keys = append(keys, k)
+// activeSkillKeys is the conversation's stored active set (sorted).
+func (a *Agent) activeSkillKeys(handle, convID string) []string {
+	us, err := a.userStore(handle)
+	if err != nil {
+		return nil
 	}
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return nil
+	}
+	keys := store.ParseSkillSet(conv.SkillSet)
 	sort.Strings(keys)
 	return keys
 }
 
-func (a *Agent) addLoadedSkill(convID, key string) bool {
-	a.skillMu.Lock()
-	defer a.skillMu.Unlock()
-	set := a.skillLoaded[convID]
-	if set == nil {
-		set = map[string]bool{}
-		a.skillLoaded[convID] = set
+// addLoadedSkill adds a key to the conversation's active set. fresh = it
+// wasn't already loaded.
+func (a *Agent) addLoadedSkill(us *store.UserStore, convID, key string) (bool, error) {
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return false, err
 	}
-	if set[key] {
-		return false
+	keys := store.ParseSkillSet(conv.SkillSet)
+	for _, k := range keys {
+		if k == key {
+			return false, nil
+		}
 	}
-	set[key] = true
-	return true
+	if err := us.SetConversationSkillSet(convID, append(keys, key)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func (a *Agent) removeLoadedSkill(convID, key string) bool {
-	a.skillMu.Lock()
-	defer a.skillMu.Unlock()
-	set := a.skillLoaded[convID]
-	if !set[key] {
-		return false
+// removeLoadedSkill drops a key from the conversation's active set.
+// removed = it was there.
+func (a *Agent) removeLoadedSkill(us *store.UserStore, convID, key string) (bool, error) {
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return false, err
 	}
-	delete(set, key)
-	if len(set) == 0 {
-		delete(a.skillLoaded, convID)
+	keys := store.ParseSkillSet(conv.SkillSet)
+	var kept []string
+	removed := false
+	for _, k := range keys {
+		if k == key {
+			removed = true
+			continue
+		}
+		kept = append(kept, k)
 	}
-	return true
+	if !removed {
+		return false, nil
+	}
+	if err := us.SetConversationSkillSet(convID, kept); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // evictWorkspaceSkills drops every skill loaded from one workspace (the
 // WORKSPACE LOADING section's switch rule). Returns the evicted keys.
-func (a *Agent) evictWorkspaceSkills(convID, workspaceID string) []string {
-	a.skillMu.Lock()
-	defer a.skillMu.Unlock()
-	prefix := "ws:" + workspaceID + ":"
-	set := a.skillLoaded[convID]
-	var evicted []string
-	for k := range set {
-		if strings.HasPrefix(k, prefix) {
-			delete(set, k)
-			evicted = append(evicted, k)
-		}
+func (a *Agent) evictWorkspaceSkills(us *store.UserStore, convID, workspaceID string) ([]string, error) {
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return nil, err
 	}
-	if len(set) == 0 {
-		delete(a.skillLoaded, convID)
+	prefix := "ws:" + workspaceID + ":"
+	keys := store.ParseSkillSet(conv.SkillSet)
+	var kept, evicted []string
+	for _, k := range keys {
+		if strings.HasPrefix(k, prefix) {
+			evicted = append(evicted, k)
+			continue
+		}
+		kept = append(kept, k)
+	}
+	if len(evicted) == 0 {
+		return nil, nil
+	}
+	if err := us.SetConversationSkillSet(convID, kept); err != nil {
+		return nil, err
 	}
 	sort.Strings(evicted)
-	return evicted
+	return evicted, nil
 }
 
-// activeSkillBlock renders the conversation's ACTIVE SKILL SET as the block
-// every request carries (the SKILL SYSTEM section's re-injection): one
-// section per loaded skill. It floats at the HEAD of the message list as a
-// single ephemeral user message, injected right after the compaction
-// message (buildRequest) — never the system prompt, whose head is the
+// skillContentByKey resolves a stored active-set key to the skill's
+// CURRENT content (re-read, never cached) + its scope label. ok=false =
+// unresolvable: the skill was deleted, the workspace is gone, or the
+// key's workspace is no longer the one the conversation points at
+// (availability).
+func (a *Agent) skillContentByKey(us *store.UserStore, handle, loadedWS, key string) (wsSkillFile, string, bool) {
+	switch {
+	case strings.HasPrefix(key, "global:"):
+		name := strings.TrimPrefix(key, "global:")
+		sk, err := us.GetSkillByName(name)
+		if err != nil {
+			return wsSkillFile{}, "", false
+		}
+		return wsSkillFile{Name: sk.Name, Description: sk.Description, Content: sk.Content}, "global", true
+	default:
+		rest := strings.TrimPrefix(key, "ws:")
+		wsID, name, ok := strings.Cut(rest, ":")
+		if !ok || wsID != loadedWS {
+			return wsSkillFile{}, "", false
+		}
+		for _, f := range listWsSkills(a.wsSkillsDir(handle, wsID)) {
+			if f.Name == name {
+				return f, "workspace-local", true
+			}
+		}
+		return wsSkillFile{}, "", false
+	}
+}
+
+// activeSkillBlock renders the conversation's ACTIVE SKILL SET as the
+// block every request carries (the SKILL SYSTEM section's re-injection):
+// one section per loaded skill. The set is the conversation row's
+// skill_set column (v11) — identifiers only; the content is re-read from
+// the store (global) or the .SKILLS file (workspace-local) here, so the
+// block always carries the skill's CURRENT content and the loaded context
+// survives a bevin restart (the row outlives the process).
+//
+// The block FLOATS at the head of the message list as a single ephemeral
+// user message, injected right after the compaction message
+// (buildRequest) — never the system prompt, whose head is the
 // prefix-cached part of every request. Anchored to the top of the window,
 // history grows below it and every request is an exact extension of the
 // previous one, so the KV prefix cache survives all turns; only a
-// load/unload or a compaction re-encodes. Unresolved keys (a skill
-// deleted, or its workspace gone) are skipped rather than failing the
-// request.
+// load/unload or a compaction re-encodes.
+//
+// Unresolvable keys are PRUNED: skipped in the block and dropped from the
+// stored set (self-heal, best-effort) — a stale identifier never lingers.
 func (a *Agent) activeSkillBlock(us *store.UserStore, handle, convID string) string {
-	keys := a.activeSkillKeys(convID)
+	conv, err := us.GetConversation(convID)
+	if err != nil {
+		return ""
+	}
+	keys := store.ParseSkillSet(conv.SkillSet)
 	if len(keys) == 0 {
 		return ""
 	}
+	sort.Strings(keys)
+	kept := make([]string, 0, len(keys))
 	var b strings.Builder
 	b.WriteString("Loaded skills (this conversation):\n")
 	wroteAny := false
 	for _, key := range keys {
-		var f wsSkillFile
-		var scope string
-		switch {
-		case strings.HasPrefix(key, "global:"):
-			name := strings.TrimPrefix(key, "global:")
-			sk, err := us.GetSkillByName(name)
-			if err != nil {
-				continue // deleted since the load — skip
-			}
-			f = wsSkillFile{Name: sk.Name, Description: sk.Description, Content: sk.Content}
-			scope = "global"
-		default:
-			rest := strings.TrimPrefix(key, "ws:")
-			wsID, name, ok := strings.Cut(rest, ":")
-			if !ok {
-				continue
-			}
-			for _, f2 := range listWsSkills(a.wsSkillsDir(handle, wsID)) {
-				if f2.Name == name {
-					f = f2
-					break
-				}
-			}
-			if f.Name == "" {
-				continue // workspace/skill gone — skip
-			}
-			scope = "workspace-local"
+		f, scope, ok := a.skillContentByKey(us, handle, conv.WorkspaceID, key)
+		if !ok {
+			continue // unresolvable — pruned (not appended to kept)
 		}
+		kept = append(kept, key)
 		b.WriteString(fmt.Sprintf("\n### Skill: %s (%s)\n%s\n\n%s\n", f.Name, scope, f.Description, f.Content))
 		wroteAny = true
+	}
+	if len(kept) != len(keys) {
+		_ = us.SetConversationSkillSet(convID, kept) // self-heal; best-effort
 	}
 	if !wroteAny {
 		return ""
@@ -588,7 +639,10 @@ func (a *Agent) execSkillLoad(ctx context.Context, handle string, args json.RawM
 		}
 		return fmt.Sprintf("no skill named %q in workspace %s — skill_search lists what exists", name, ref.wsID), nil
 	}
-	fresh := a.addLoadedSkill(convID, ref.key())
+	fresh, err := a.addLoadedSkill(us, convID, ref.key())
+	if err != nil {
+		return "could not record the load in this conversation: " + err.Error(), nil
+	}
 	note := "it is now part of your context on every turn until skill_unload"
 	if !fresh {
 		note = "it was already loaded"
@@ -608,6 +662,10 @@ func (a *Agent) execSkillUnload(ctx context.Context, handle string, args json.Ra
 	if name == "" {
 		return "name is required", nil
 	}
+	us, errMsg := a.userStoreOrResult(handle)
+	if us == nil {
+		return errMsg, nil
+	}
 	convID := conversationFromContext(ctx)
 	loadedWS := a.loadedWorkspace(handle, convID)
 	// Try both possible keys so the model never needs the tier when only
@@ -624,7 +682,11 @@ func (a *Agent) execSkillUnload(ctx context.Context, handle string, args json.Ra
 		tried = append(tried, skillRef{name: name, tier: "global"}.key())
 	}
 	for _, key := range tried {
-		if a.removeLoadedSkill(convID, key) {
+		removed, err := a.removeLoadedSkill(us, convID, key)
+		if err != nil {
+			return "could not update this conversation's loaded skills: " + err.Error(), nil
+		}
+		if removed {
 			return fmt.Sprintf("unloaded skill %q (%s) from this conversation — its content is no longer injected", name, keyTierLabel(key)), nil
 		}
 	}
@@ -842,7 +904,7 @@ func (a *Agent) execSkillDelete(ctx context.Context, handle string, args json.Ra
 	if tryGlobal {
 		err := us.DeleteSkill(name)
 		if err == nil {
-			a.removeLoadedSkill(convID, skillRef{name: name, tier: "global"}.key())
+			_, _ = a.removeLoadedSkill(us, convID, skillRef{name: name, tier: "global"}.key())
 			return fmt.Sprintf("deleted global skill %q", name), nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -856,7 +918,7 @@ func (a *Agent) execSkillDelete(ctx context.Context, handle string, args json.Ra
 		if err := os.Remove(wsSkillFileFor(dir(wsID), name)); err != nil {
 			return fmt.Sprintf("no skill named %q in workspace %s", name, wsID), nil
 		}
-		a.removeLoadedSkill(convID, skillRef{name: name, tier: "workspace", wsID: wsID}.key())
+		_, _ = a.removeLoadedSkill(us, convID, skillRef{name: name, tier: "workspace", wsID: wsID}.key())
 		return fmt.Sprintf("deleted skill %q from workspace %s", name, wsID), nil
 	}
 	return fmt.Sprintf("no skill named %q to delete (no global skill by that name%s)", name, loadedWSTail(wsID)), nil
@@ -918,7 +980,11 @@ func (a *Agent) execSetWorkspace(ctx context.Context, handle string, args json.R
 	}
 	evicted := []string{}
 	if conv.WorkspaceID != "" {
-		evicted = a.evictWorkspaceSkills(convID, conv.WorkspaceID)
+		var err error
+		evicted, err = a.evictWorkspaceSkills(us, convID, conv.WorkspaceID)
+		if err != nil {
+			return "could not update this conversation's loaded skills: " + err.Error(), nil
+		}
 	}
 	if target == "" {
 		out := "the workspace was cleared — this conversation now has no workspace"

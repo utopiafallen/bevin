@@ -154,6 +154,23 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		ALTER TABLE conversations ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
 		`,
 	},
+	{
+		// v11 (2026-11-27): conversations.skill_set — the conversation's
+		// ACTIVE SKILL SET (the design log's SKILL SYSTEM section): the
+		// identifiers of the loaded skills (a JSON array of
+		// "global:<name>" / "ws:<workspace>:<name>" keys, empty = none).
+		// The request's skill block is REBUILT from these identifiers on
+		// every request (the content re-read from the store / .SKILLS
+		// file), so the loaded context survives a bevin restart — the set
+		// is state, not a runtime handle (the user's amendment: the
+		// identifiers are trackable, so the block is rebuildable). The
+		// column is internal: the agent's skill tools and the
+		// workspace-pointer change paths own it, never the UI.
+		version: 11,
+		up: `
+		ALTER TABLE conversations ADD COLUMN skill_set TEXT NOT NULL DEFAULT '';
+		`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

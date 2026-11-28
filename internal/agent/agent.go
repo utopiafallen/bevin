@@ -86,15 +86,6 @@ type Agent struct {
 	// here; the task runner's settle path closes them).
 	ptySessMu   sync.Mutex
 	ptySessions map[string]map[string]bool
-	// skillLoaded is the per-conversation ACTIVE SKILL SET (the design
-	// log's SKILL SYSTEM section): the skills the conversation has loaded
-	// — their content floats at the head of every request's message list
-	// (activeSkillBlock) until skill_unload drops them or the conversation's
-	// workspace pointer changes (evictWorkspaceSkills). Conversation id -> set of
-	// "global:<name>" / "ws:<workspaceID>:<name>". In-memory runtime
-	// state — a bevin restart clears the sets (v1), like ptySessions.
-	skillMu     sync.Mutex
-	skillLoaded map[string]map[string]bool
 
 	// NotifyMessage, if set, is called after EVERY row persisted into a
 	// user's conversation (any role — user, assistant, checkin, summary).
@@ -145,7 +136,6 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		providers:   map[string]provider.Provider{},
 		users:       map[string]*store.UserStore{},
 		ptySessions: map[string]map[string]bool{},
-		skillLoaded: map[string]map[string]bool{},
 	}
 	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
@@ -1538,13 +1528,16 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 	// The workspace pointer (WORKSPACE LOADING section): the caller
 	// validated existence ("" clears). A change away from a workspace
 	// evicts that workspace's loaded skills from this conversation's
-	// active set — the switch rule (the user's decision).
+	// active set (the skill_set column — the switch rule, the user's
+	// decision).
 	if workspaceID != nil && *workspaceID != cur.WorkspaceID {
 		if err := us.SetConversationWorkspace(convID, *workspaceID); err != nil {
 			return nil, err
 		}
 		if cur.WorkspaceID != "" {
-			a.evictWorkspaceSkills(convID, cur.WorkspaceID)
+			if _, err := a.evictWorkspaceSkills(us, convID, cur.WorkspaceID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	c, err := us.GetConversation(convID)

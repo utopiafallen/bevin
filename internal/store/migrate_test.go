@@ -85,7 +85,7 @@ func checkPostMigration(t *testing.T, dir string) {
 		}
 	}
 	cols := conversationColumns(t, dir)
-	for _, c := range []string{"purpose", "topic", "purpose_updated_at"} {
+	for _, c := range []string{"purpose", "topic", "purpose_updated_at", "workspace_id", "skill_set"} {
 		if !cols[c] {
 			t.Fatalf("conversations missing column %q (columns: %v)", c, cols)
 		}

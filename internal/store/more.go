@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -361,6 +362,51 @@ func (s *UserStore) DeleteWorkspace(id string) error {
 	}
 	if _, err := tx.Exec(`UPDATE conversations SET workspace_id = '' WHERE workspace_id = ?`, id); err != nil {
 		return err
+	}
+	// Scrub the deleted workspace's skills from those conversations'
+	// ACTIVE SKILL SETS (the pointer is cleared above): a
+	// "ws:<id>:<name>" key can never resolve again. (The block render
+	// prunes stale keys lazily too — this keeps the stored set true.)
+	rows, err := tx.Query(`SELECT id, skill_set FROM conversations WHERE skill_set != ''`)
+	if err != nil {
+		return err
+	}
+	var scrubs [][2]string // (conversation id, pruned set)
+	for rows.Next() {
+		var cid, set string
+		if err := rows.Scan(&cid, &set); err != nil {
+			rows.Close()
+			return err
+		}
+		prefix := "ws:" + id + ":"
+		var kept []string
+		for _, k := range ParseSkillSet(set) {
+			if !strings.HasPrefix(k, prefix) {
+				kept = append(kept, k)
+			}
+		}
+		if len(kept) != len(ParseSkillSet(set)) {
+			enc := ""
+			if len(kept) > 0 {
+				b, err := json.Marshal(kept)
+				if err != nil {
+					rows.Close()
+					return err
+				}
+				enc = string(b)
+			}
+			scrubs = append(scrubs, [2]string{cid, enc})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, s := range scrubs {
+		if _, err := tx.Exec(`UPDATE conversations SET skill_set = ? WHERE id = ?`, s[1], s[0]); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

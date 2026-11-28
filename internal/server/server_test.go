@@ -801,6 +801,24 @@ func TestConversationManagement(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("workspace patch code = %d body=%s", w.Code, w.Body.String())
 	}
+	// The switch rule (the UI path): the pointer change evicts the
+	// old workspace's loaded skills from the conversation's skill_set.
+	bobUs, err := a.ag.UserStoreFor("bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bobUs.SetConversationSkillSet(cNew, []string{"global:keep", "ws:" + wsid + ":loaded"}); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": wsid}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("no-op workspace patch code = %d body=%s", w.Code, w.Body.String())
+	}
+	// Same workspace again = no change: the set survives a no-op.
+	if row, _ := bobUs.GetConversation(cNew); len(store.ParseSkillSet(row.SkillSet)) != 2 {
+		t.Fatalf("no-op switch touched the skill set: %v", store.ParseSkillSet(row.SkillSet))
+	}
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": "nope"}))
 	if w.Code != http.StatusBadRequest {
@@ -810,6 +828,11 @@ func TestConversationManagement(t *testing.T) {
 	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": ""}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("clear workspace code = %d body=%s", w.Code, w.Body.String())
+	}
+	// The clear evicted the loaded workspace's key; the global survives.
+	row, _ := bobUs.GetConversation(cNew)
+	if keys := store.ParseSkillSet(row.SkillSet); len(keys) != 1 || keys[0] != "global:keep" {
+		t.Fatalf("skill set after clear = %v, want [global:keep]", keys)
 	}
 	// A blank title is rejected.
 	w = httptest.NewRecorder()
