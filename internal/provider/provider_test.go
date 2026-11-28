@@ -323,10 +323,11 @@ data: [DONE]
 // TestLlamaSlotCache verifies the per-conversation KV cache management on the
 // llama provider: the slot pinning (id_slot), the load decision driven by the
 // cache-hit check (load the conversation's cache only when the outgoing request
-// matches the slot's current cache <= 50%), the save of the prior conversation
-// before overwriting it, the 8k-token resave cadence, and the best-effort
-// guarantees (a failed cache-hit check falls back to a load; a failed
-// save/restore never breaks the request). A mock llama server serves a
+// matches the slot's current cache <= 50%), the ALWAYS-save rule (every
+// completed assistant message saves — the fork's differential writes keep each
+// save to the new delta, and the save-on-eviction is subsumed), and the
+// best-effort guarantees (a failed cache-hit check falls back to a load; a
+// failed save/restore never breaks the request). A mock llama server serves a
 // configurable cache-hit ratio + records the cache-management slot calls
 // (save/restore; the read-only cache-hit check is served but not recorded).
 func TestLlamaSlotCache(t *testing.T) {
@@ -336,10 +337,11 @@ func TestLlamaSlotCache(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var calls []call
-	completionTokens := 100 // default per-turn completion tokens
-	failSlots := false      // when true, save/restore return 500 (best-effort)
-	cacheHitRatio := 0.0    // the ratio the cache-hit check reports
-	failCacheHit := false   // when true, the cache-hit check returns 500
+	completionTokens := 100 // per-turn completion tokens (usage only — the
+	// always-save rule no longer keys saves off tokens)
+	failSlots := false    // when true, save/restore return 500 (best-effort)
+	cacheHitRatio := 0.0  // the ratio the cache-hit check reports
+	failCacheHit := false // when true, the cache-hit check returns 500
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -431,8 +433,8 @@ func TestLlamaSlotCache(t *testing.T) {
 
 	// Turn A1: convA's FIRST turn — the slot is empty (the check reports a 0
 	// match) so it restores A's cache (a no-op load of a not-yet-existing
-	// file), and the completed turn triggers the first-turn save (a new
-	// conversation gets an on-disk entry regardless of its token count).
+	// file), and the completed turn saves (the always-save rule: every
+	// completed assistant message).
 	setRatio(0.0)
 	before := len(snapshot())
 	if err := chat("convA"); err != nil {
@@ -443,96 +445,82 @@ func TestLlamaSlotCache(t *testing.T) {
 		t.Fatalf("A1 must restore cache_conv_convA.bin (cache miss), new calls = %v", newCalls)
 	}
 	if !hasCall(newCalls, "save", cacheFile("convA")) {
-		t.Fatalf("A1 (a new conversation's first completed turn) must save cache_conv_convA.bin, new calls = %v", newCalls)
+		t.Fatalf("A1 (a completed assistant message) must save cache_conv_convA.bin, new calls = %v", newCalls)
 	}
 	if len(newCalls) != 2 {
-		t.Fatalf("A1 must make exactly two cache actions (the restore, then the first-turn save), new calls = %v", newCalls)
+		t.Fatalf("A1 must make exactly two cache actions (the restore, then the completion save), new calls = %v", newCalls)
 	}
 
 	// Turn A2: the SAME conversation again, and the slot now matches it well
-	// (ratio > 0.5) — the slot's cache is reused: no restore, and no save (not
-	// a new conversation, and the 8k cadence hasn't been hit).
+	// (ratio > 0.5) — the slot's cache is reused: no restore. The completed
+	// message still saves (the always-save rule — the fork's differential
+	// write costs only this message's tokens).
 	setRatio(0.9)
 	before = len(snapshot())
 	if err := chat("convA"); err != nil {
 		t.Fatalf("A2: %v", err)
 	}
 	newCalls = newCallsSince(before)
-	if len(newCalls) != 0 {
-		t.Fatalf("A2 (match > 50%%) must make no cache actions (the cache is reused), new calls = %v", newCalls)
+	if !hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("A2 (a completed assistant message) must save cache_conv_convA.bin, new calls = %v", newCalls)
+	}
+	if hasCall(newCalls, "restore", cacheFile("convA")) {
+		t.Fatalf("A2 (match > 50%%) must NOT restore, new calls = %v", newCalls)
+	}
+	if len(newCalls) != 1 {
+		t.Fatalf("A2 must make exactly one cache action (the completion save), new calls = %v", newCalls)
 	}
 
 	// Turn B1: switch to conversation B — the slot no longer matches (ratio
-	// <= 0.5), so it saves A's cache (the prior conversation) + restores B's,
-	// and B's first completed turn saves its own cache.
+	// <= 0.5), so it restores B's cache. No save of A: A's file is already
+	// current through A2's completed message (the always-save rule subsumed
+	// the old save-on-eviction). B's completed message saves B.
 	setRatio(0.1)
 	before = len(snapshot())
 	if err := chat("convB"); err != nil {
 		t.Fatalf("B1: %v", err)
 	}
 	newCalls = newCallsSince(before)
-	if !hasCall(newCalls, "save", cacheFile("convA")) {
-		t.Fatalf("B1 must save the prior conversation (convA), new calls = %v", newCalls)
-	}
 	if !hasCall(newCalls, "restore", cacheFile("convB")) {
 		t.Fatalf("B1 must restore cache_conv_convB.bin, new calls = %v", newCalls)
 	}
 	if !hasCall(newCalls, "save", cacheFile("convB")) {
-		t.Fatalf("B1 (a new conversation's first completed turn) must save cache_conv_convB.bin, new calls = %v", newCalls)
+		t.Fatalf("B1 (a completed assistant message) must save cache_conv_convB.bin, new calls = %v", newCalls)
 	}
-	if len(newCalls) != 3 {
-		t.Fatalf("B1 must make exactly three cache actions (save prior, restore, first-turn save), new calls = %v", newCalls)
+	if hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("B1 must NOT save convA (its file is already current — always-save), new calls = %v", newCalls)
+	}
+	if len(newCalls) != 2 {
+		t.Fatalf("B1 must make exactly two cache actions (restore, completion save), new calls = %v", newCalls)
 	}
 
 	// Turn A3: back to conversation A — the slot now holds B (low match), so
-	// it saves B's cache (the prior) + restores A's. No save of A's own cache:
-	// A already has an on-disk entry (saved on its first turn) and its 8k
-	// cadence hasn't been hit.
+	// it restores A's cache (current through A2) and A's completed message
+	// saves. No save of B either (B's file is current through B1).
 	before = len(snapshot())
 	if err := chat("convA"); err != nil {
 		t.Fatalf("A3: %v", err)
 	}
 	newCalls = newCallsSince(before)
-	if !hasCall(newCalls, "save", cacheFile("convB")) {
-		t.Fatalf("A3 must save the prior conversation (convB), new calls = %v", newCalls)
-	}
 	if !hasCall(newCalls, "restore", cacheFile("convA")) {
 		t.Fatalf("A3 must re-restore cache_conv_convA.bin, new calls = %v", newCalls)
 	}
-	if hasCall(newCalls, "save", cacheFile("convA")) {
-		t.Fatalf("A3 must NOT re-save convA's cache (not a new conversation, cadence not hit), new calls = %v", newCalls)
+	if !hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("A3 (a completed assistant message) must save cache_conv_convA.bin, new calls = %v", newCalls)
+	}
+	if hasCall(newCalls, "save", cacheFile("convB")) {
+		t.Fatalf("A3 must NOT save convB (its file is already current), new calls = %v", newCalls)
 	}
 	if len(newCalls) != 2 {
-		t.Fatalf("A3 must make exactly two cache actions (save prior, restore), new calls = %v", newCalls)
-	}
-
-	// 8k resave: the same conversation (match > 50% → no restore) but >= 8000
-	// completion tokens triggers the periodic re-save.
-	setRatio(0.9)
-	mu.Lock()
-	completionTokens = 8000
-	mu.Unlock()
-	before = len(snapshot())
-	if err := chat("convA"); err != nil {
-		t.Fatalf("A4: %v", err)
-	}
-	newCalls = newCallsSince(before)
-	if !hasCall(newCalls, "save", cacheFile("convA")) {
-		t.Fatalf("A4 (8k tokens) must re-save cache_conv_convA.bin, new calls = %v", newCalls)
-	}
-	if hasCall(newCalls, "restore", cacheFile("convA")) {
-		t.Fatalf("A4 (match > 50%%) must NOT restore, new calls = %v", newCalls)
-	}
-	if len(newCalls) != 1 {
-		t.Fatalf("A4 must make exactly one cache action (the 8k re-save), new calls = %v", newCalls)
+		t.Fatalf("A3 must make exactly two cache actions (restore, completion save), new calls = %v", newCalls)
 	}
 
 	// Best-effort: a failing cache-hit check (500) falls back to the safe
-	// load (a fresh conversation on the slot → save the prior + restore this,
-	// then the first-turn save).
+	// load (a fresh conversation on the slot → restore this, then the
+	// completion save). No save of the prior conversation (the always-save
+	// rule made it redundant).
 	mu.Lock()
 	failCacheHit = true
-	completionTokens = 100
 	mu.Unlock()
 	before = len(snapshot())
 	if err := chat("convC"); err != nil {
@@ -542,8 +530,11 @@ func TestLlamaSlotCache(t *testing.T) {
 	if !hasCall(newCalls, "restore", cacheFile("convC")) {
 		t.Fatalf("a failing cache-hit check must fall back to restoring convC, new calls = %v", newCalls)
 	}
-	if !hasCall(newCalls, "save", cacheFile("convA")) {
-		t.Fatalf("a failing cache-hit check must save the prior (convA) before restoring, new calls = %v", newCalls)
+	if !hasCall(newCalls, "save", cacheFile("convC")) {
+		t.Fatalf("the completed turn must still save convC, new calls = %v", newCalls)
+	}
+	if hasCall(newCalls, "save", cacheFile("convA")) {
+		t.Fatalf("the fallback must NOT save the prior conversation (always-save), new calls = %v", newCalls)
 	}
 
 	// Best-effort: a failing save/restore (500) never breaks the request.
@@ -557,7 +548,7 @@ func TestLlamaSlotCache(t *testing.T) {
 	}
 }
 
-// TestLlamaConversationCacheDelete verifies the conversation-delete KV-cache
+// // TestLlamaConversationCacheDelete verifies the conversation-delete KV-cache
 // cleanup on the llama provider: deleting a conversation issues the slot's
 // delete action on the slot the conversation was pinned to (clearing the
 // in-memory cache + removing the on-disk file) AND clears bevin's slot tracking

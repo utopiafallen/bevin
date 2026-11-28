@@ -69,7 +69,7 @@ func (l *Llama) Chat(ctx context.Context, model string, req ChatRequest) (*Resul
 		return nil, err
 	}
 	res := decodeOAIResult(cr)
-	l.noteTurnCompletion(ctx, req.ConversationID, slot, completionTokens(res))
+	l.noteTurnCompletion(ctx, req.ConversationID, slot)
 	return res, nil
 }
 
@@ -145,8 +145,14 @@ func (l *Llama) Stream(ctx context.Context, model string, req ChatRequest, emit 
 		}
 	}
 	res.ToolCalls = acc.Result()
-	l.noteTurnCompletion(ctx, req.ConversationID, slot, completionTokens(&res))
-	return &res, scanner.Err()
+	// Save only on a COMPLETED stream: a mid-stream failure leaves a partial
+	// message whose KV must never become the conversation's on-disk state.
+	// (The always-save rule makes stream completion the exact save trigger.)
+	if err := scanner.Err(); err != nil {
+		return &res, err
+	}
+	l.noteTurnCompletion(ctx, req.ConversationID, slot)
+	return &res, nil
 }
 
 // authorize sets the bearer auth header on a request when the provider has an
