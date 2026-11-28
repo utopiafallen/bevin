@@ -341,8 +341,11 @@
             </div>
           </section>
 
-          <!-- The skill view modal (the content, markdown-rendered). -->
-          <div id="skillModal" hidden style="position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; background:rgba(51,41,28,.35);">
+          <!-- The skill view modal (the content, markdown-rendered). The
+               visibility is the `hidden` attribute — its display lives in
+               brand.css with an explicit [hidden] guard: the UA [hidden]
+               rule loses to any author display rule (the .btn pitfall). -->
+          <div id="skillModal" hidden>
             <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); max-width:min(52rem, 92vw); max-height:85vh; display:flex; flex-direction:column; box-shadow:0 8px 30px rgba(51,41,28,.18);">
               <div style="display:flex; align-items:baseline; gap:.6rem; padding:1rem 1.2rem .4rem; flex-wrap:wrap;">
                 <span id="skillModalName" style="font-family:var(--font-mono); font-weight:700; font-size:1.02rem;"></span>

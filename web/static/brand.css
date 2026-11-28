@@ -306,3 +306,15 @@ input:focus, textarea:focus, select:focus {
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 1.1rem 0; }
 .muted { color: var(--text-muted); }
 .eyebrow { font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.72rem; color: var(--brand-strong); }
+
+/* ---- skill view modal (the skills page) ----
+   Visibility is the `hidden` attribute. The overlay's display lives HERE
+   (never inline): an inline/author display rule beats the UA
+   [hidden]{display:none} rule (the .btn pitfall), so the explicit
+   [hidden] guard is required or the modal is always visible. */
+#skillModal {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(51, 41, 28, .35);
+}
+#skillModal[hidden] { display: none; }
