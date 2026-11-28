@@ -224,7 +224,7 @@ func wireTurnMessages(msgs []store.Message, tcMap map[int64][]store.ToolCall, in
 // reasoning, how the summary is framed, the estimate factor, the verbatim
 // tail) all come from it, so a model-specific profile changes the request
 // without the harness special-casing the model.
-func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.Profile, tcMap map[int64][]store.ToolCall) (provider.ChatRequest, int) {
+func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.Profile, tcMap map[int64][]store.ToolCall, skillBlock string) (provider.ChatRequest, int) {
 	// Latest summary (role=summary) — the last one in seq order (summaries are
 	// chained; the builder uses only the latest, which already folds in the rest).
 	latestSummarySeq := -1
@@ -280,6 +280,24 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	// reasoning for continuity).
 	includeReasoning := prof.ReasoningInTranscript
 	reqMsgs := wireTurnMessages(messages, tcMap, includeReasoning)
+	// The ACTIVE SKILL SET's block rides the END of the message list — see
+	// activeSkillBlock for why it must not enter the system prompt (prefix
+	// caching). It is inserted before the current turn's user message, so
+	// the reference material precedes the trigger; a request with no user
+	// message (the send path always ends with one — a defensive append)
+	// gets it at the tail.
+	if skillBlock != "" {
+		insert := len(reqMsgs)
+		for i := len(reqMsgs) - 1; i >= 0; i-- {
+			if reqMsgs[i].Role == provider.RoleUser {
+				insert = i
+				break
+			}
+		}
+		reqMsgs = append(reqMsgs, provider.Message{})
+		copy(reqMsgs[insert+1:], reqMsgs[insert:])
+		reqMsgs[insert] = provider.Message{Role: provider.RoleUser, Text: skillBlock}
+	}
 	for _, pm := range reqMsgs {
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)
 		// The tool-call ARGUMENTS ride on the assistant message's tool_calls

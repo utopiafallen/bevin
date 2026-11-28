@@ -251,12 +251,16 @@ func (a *App) routes() {
 	// chatGate: regular users only (same as everything above).
 	mux.HandleFunc("GET /api/workspaces", a.chatGate(a.listWorkspaces))
 	mux.HandleFunc("POST /api/workspaces", a.chatGate(a.diskGate(a.createWorkspace)))
+	mux.HandleFunc("GET /api/skills", a.chatGate(a.listSkills))
+	mux.HandleFunc("DELETE /api/skills", a.chatGate(a.deleteSkill))
 	mux.HandleFunc("PATCH /api/workspaces/{id}", a.chatGate(a.patchWorkspace))
 	mux.HandleFunc("DELETE /api/workspaces/{id}", a.chatGate(a.deleteWorkspace))
 	mux.HandleFunc("GET /api/workspaces/{id}/files", a.chatGate(a.workspaceFiles))
 	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.diskGate(a.uploadWorkspaceFile)))
 	mux.HandleFunc("GET /api/workspaces/{id}/files/raw", a.chatGate(a.workspaceFileRaw))
 	mux.HandleFunc("DELETE /api/workspaces/{id}/files", a.chatGate(a.deleteWorkspaceFile))
+	mux.HandleFunc("GET /api/workspaces/{id}/skills", a.chatGate(a.workspaceSkills))
+	mux.HandleFunc("DELETE /api/workspaces/{id}/skills", a.chatGate(a.deleteWorkspaceSkill))
 	// Disk usage: the user's storage against their cap + the cleanup page.
 	// NOT behind diskGate (a frozen user must reach the disk page + the
 	// deletes to get back under the cap). chatGate: regular users only.

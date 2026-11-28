@@ -200,20 +200,21 @@ func (a *Agent) evictWorkspaceSkills(convID, workspaceID string) []string {
 	return evicted
 }
 
-// activeSkillsFor returns the conversation with its active skill set's
-// content appended to the frozen prompt — the loaded skills' re-injection
-// (every request carries the current set; the frozen row itself is never
-// touched, so a compaction re-bake needs nothing from this). conv is
-// copied; unresolved keys (a skill deleted, or its workspace gone) are
-// skipped rather than failing the request.
-func (a *Agent) activeSkillsFor(us *store.UserStore, handle, convID string) *store.Conversation {
-	conv, err := us.GetConversation(convID)
-	if err != nil {
-		return nil
-	}
+// activeSkillBlock renders the conversation's ACTIVE SKILL SET as the block
+// every request carries (the SKILL SYSTEM section's re-injection): one
+// section per loaded skill. It is injected at the TAIL of the message list
+// (buildRequest), NOT into the system prompt — the system prompt is the
+// prefix-cached head of every request (the 2026-11-25 cache-neutrality
+// rule), and had the block lived there, every skill load/unload
+// mid-conversation would diverge the prefix at its head and force a
+// re-encode of the ENTIRE conversation history. At the tail, the previous
+// request stays a byte-prefix of the next: the KV cache survives, and only
+// the block itself (a few KB) is new. Unresolved keys (a skill deleted, or
+// its workspace gone) are skipped rather than failing the request.
+func (a *Agent) activeSkillBlock(us *store.UserStore, handle, convID string) string {
 	keys := a.activeSkillKeys(convID)
 	if len(keys) == 0 {
-		return conv
+		return ""
 	}
 	var b strings.Builder
 	b.WriteString("Loaded skills (this conversation):\n")
@@ -251,11 +252,9 @@ func (a *Agent) activeSkillsFor(us *store.UserStore, handle, convID string) *sto
 		wroteAny = true
 	}
 	if !wroteAny {
-		return conv
+		return ""
 	}
-	out := *conv
-	out.FrozenSystemPrompt = conv.FrozenSystemPrompt + "\n\n" + b.String()
-	return &out
+	return b.String()
 }
 
 // ---- tier resolution ----

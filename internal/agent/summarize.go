@@ -119,8 +119,9 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, handle
 	}
 	tokens := actualTokens
 	if tokens <= 0 {
-		// No API usage — fall back to the buildRequest char/4 estimate.
-		_, tokens = buildRequest(conv, hist, prof, tcMap)
+		// No API usage — fall back to the buildRequest char/4 estimate
+		// (the live request carries the skill block — count it).
+		_, tokens = buildRequest(conv, hist, prof, tcMap, a.activeSkillBlock(us, handle, conv.ID))
 	}
 	if !force && tokens <= summarizeBudget(a.modelMaxContext(conv.ActiveModelID), prof) {
 		// Under budget (and not a forced overflow backstop) — nothing to do.
@@ -184,7 +185,7 @@ func (a *Agent) compactIfNeeded(ctx context.Context, us *store.UserStore, handle
 	to := 0
 	if newHist, e := us.ListMessages(conv.ID); e == nil {
 		if newTcMap, e := toolCallsForMessages(us, newHist); e == nil {
-			_, to = buildRequest(conv, newHist, prof, newTcMap)
+			_, to = buildRequest(conv, newHist, prof, newTcMap, a.activeSkillBlock(us, handle, conv.ID))
 		}
 	}
 	// Stamp the persistent marker on the summary row (survives a reload —

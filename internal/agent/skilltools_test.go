@@ -91,15 +91,13 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if len(keys) != 1 || keys[0] != "ws:"+w1+":build-notes" {
 		t.Fatalf("active keys = %v", keys)
 	}
-	conv := a.activeSkillsFor(us, "u1", convID)
-	if conv == nil {
-		t.Fatal("activeSkillsFor returned nil")
+	// The loaded skill's block rides every request's TAIL (activeSkillBlock
+	// — see TestBuildRequestSkillBlockTailStable for the prefix-cache
+	// placement) — and the frozen row on disk is never touched.
+	block := a.activeSkillBlock(us, "u1", convID)
+	if !strings.Contains(block, "Loaded skills (this conversation)") || !strings.Contains(block, "the build recipe") {
+		t.Fatalf("the skill block lacks the loaded skill:\n%s", block)
 	}
-	if !strings.Contains(conv.FrozenSystemPrompt, "Loaded skills (this conversation)") || !strings.Contains(conv.FrozenSystemPrompt, "the build recipe") {
-		t.Fatalf("the request prompt lacks the loaded skill:\n%s", conv.FrozenSystemPrompt)
-	}
-	// The frozen ROW on disk is untouched (only the request copy carries
-	// the section).
 	row, err := us.GetConversation(convID)
 	if err != nil {
 		t.Fatal(err)

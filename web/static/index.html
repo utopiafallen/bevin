@@ -284,6 +284,15 @@
               and bevin works with them for you.
             </p>
             <div id="wsList" class="ws-list"></div>
+            <div id="skillsGlobal" style="margin-top:.8rem;">
+              <div style="font-size:.85rem; font-weight:600;">Global skills</div>
+              <p class="muted" style="font-size:.78rem; margin:.2rem 0 .4rem;">
+                How-tos bevin has written down for itself — read them, and
+                delete the ones that have gone stale. bevin writes and
+                rewrites these itself; you never have to.
+              </p>
+              <div id="skillsGlobalList"></div>
+            </div>
             <form id="wsCreateForm" style="display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.8rem;">
               <input id="wsTitle" placeholder="Workspace title" autocomplete="off" maxlength="120" style="flex:1; min-width:10rem;">
               <input id="wsDesc" placeholder="What is it for? (optional)" autocomplete="off" maxlength="500" style="flex:1; min-width:10rem;">
@@ -302,6 +311,10 @@
                   <input id="wsDescInput" placeholder="What is this workspace for? (optional)" autocomplete="off" maxlength="500" style="flex:1; min-width:12rem;">
                   <button class="btn btn-primary" id="wsDescSaveBtn" type="button">Save</button>
                   <button class="btn btn-ghost" id="wsDescCancelBtn" type="button">Cancel</button>
+                </div>
+                <div id="wsSkillsBox" style="margin-top:.5rem;">
+                  <div style="font-size:.85rem; font-weight:600;">This workspace's skills</div>
+                  <div id="wsSkillsList" style="margin-top:.3rem;"></div>
                 </div>
                 <div style="display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:.5rem;">
                   <input id="wsFilter" placeholder="Filter files&hellip;" autocomplete="off" style="flex:1; min-width:10rem;">
@@ -452,7 +465,7 @@
       $("workspaceBtn").classList.toggle("active", name === "workspace");
       $("profileBtn").classList.toggle("active", name === "profile");
       if (name === "search") { loadScopes(); loadConvScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
-      if (name === "workspace") loadWorkspaces();
+      if (name === "workspace") { loadWorkspaces(); loadSkillsGlobal(); }
       if (name === "profile") loadProfilePage();
       if (name === "chat" && syncPending) doSync(); // a nudge arrived while off the page
     }
@@ -3056,6 +3069,93 @@
       $("wsDetailTitle").textContent = title || "Workspace";
       await loadWorkspaces(); // refresh the active card (+ description row)
       await loadWsFiles();
+      loadWsSkills();
+    }
+
+    // ---- Skills (the user's review + delete surface — the design log's
+    //      SKILL SYSTEM section: bevin AUTHORS the skills, the user reads
+    //      them and deletes the ones that have gone stale; the user never
+    //      creates or edits) ----
+    function skillRow(scope, s) {
+      var row = document.createElement("div");
+      row.style.cssText = "border:1px solid rgba(127,127,127,.18); border-radius:8px; padding:.4rem .6rem; margin-bottom:.4rem;";
+      var head = document.createElement("div");
+      head.style.cssText = "display:flex; gap:.5rem; align-items:baseline; cursor:pointer;";
+      var name = document.createElement("span");
+      name.textContent = s.name;
+      name.style.cssText = "font-family:ui-monospace,monospace; font-size:.85rem; font-weight:600;";
+      var desc = document.createElement("span");
+      desc.textContent = s.description || "";
+      desc.className = "muted";
+      desc.style.fontSize = ".8rem";
+      var del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "\u00d7";
+      del.title = "Delete " + s.name;
+      del.style.cssText = "margin-left:auto; border:none; background:none; color:#b00020; cursor:pointer; font-size:1rem; padding:0 .2rem;";
+      del.addEventListener("click", function (e) {
+        e.stopPropagation();
+        deleteSkill(scope, s.name);
+      });
+      head.appendChild(name);
+      head.appendChild(desc);
+      head.appendChild(del);
+      var body = document.createElement("pre");
+      body.textContent = s.content;
+      body.style.cssText = "white-space:pre-wrap; font-size:.8rem; margin:.4rem 0 0; max-height:14rem; overflow-y:auto;";
+      body.hidden = true;
+      head.addEventListener("click", function () { body.hidden = !body.hidden; });
+      row.appendChild(head);
+      row.appendChild(body);
+      return row;
+    }
+
+    async function loadSkillsGlobal() {
+      var box = $("skillsGlobalList");
+      if (!box) return;
+      box.innerHTML = "";
+      try {
+        var d = await (await fetch("/api/skills")).json();
+        var sks = d.skills || [];
+        if (sks.length === 0) {
+          box.innerHTML = '<div class="muted" style="font-size:.82rem;">None yet — bevin writes one whenever it learns a how-to worth keeping.</div>';
+          return;
+        }
+        sks.forEach(function (s) { box.appendChild(skillRow("global", s)); });
+      } catch (err) {
+        wsMsg("\u26a0 " + err.message, true);
+      }
+    }
+
+    async function loadWsSkills() {
+      var box = $("wsSkillsList");
+      if (!ws.current || !box) return;
+      box.innerHTML = "";
+      try {
+        var d = await (await fetch("/api/workspaces/" + ws.current + "/skills")).json();
+        var sks = d.skills || [];
+        if (sks.length === 0) {
+          box.innerHTML = '<div class="muted" style="font-size:.82rem;">None in this workspace yet.</div>';
+          return;
+        }
+        sks.forEach(function (s) { box.appendChild(skillRow(ws.current, s)); });
+      } catch (err) {
+        wsMsg("\u26a0 " + err.message, true);
+      }
+    }
+
+    async function deleteSkill(scope, name) {
+      if (!confirm("Delete the skill \u201c" + name + "\u201d? bevin can write it again if it needs it.")) return;
+      try {
+        var url = scope === "global"
+          ? "/api/skills?name=" + encodeURIComponent(name)
+          : "/api/workspaces/" + scope + "/skills?name=" + encodeURIComponent(name);
+        var r = await fetch(url, { method: "DELETE" });
+        if (!r.ok) throw new Error((await r.json().catch(function () { return {}; })).error || ("HTTP " + r.status));
+        if (scope === "global") loadSkillsGlobal(); else loadWsSkills();
+      } catch (err) {
+        wsMsg("\u26a0 " + err.message, true);
+      }
     }
 
     function renderWsFiles() {

@@ -160,7 +160,7 @@ func TestBuildRequestNilTCMapUnchanged(t *testing.T) {
 		{Role: roleUser, Content: "hello", Seq: 0},
 		{Role: roleAssistant, Content: "hi", Seq: 1},
 	}
-	req, _ := buildRequest(conv, msgs, profile.Default(), nil)
+	req, _ := buildRequest(conv, msgs, profile.Default(), nil, "")
 	if len(req.Messages) != 2 {
 		t.Fatalf("Messages = %d, want 2", len(req.Messages))
 	}

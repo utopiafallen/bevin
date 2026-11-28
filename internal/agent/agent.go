@@ -88,7 +88,7 @@ type Agent struct {
 	ptySessions map[string]map[string]bool
 	// skillLoaded is the per-conversation ACTIVE SKILL SET (the design
 	// log's SKILL SYSTEM section): the skills the conversation has loaded
-	// — their content is re-injected into every request (activeSkillsFor)
+	// — their content rides every request's message tail (activeSkillBlock)
 	// until skill_unload drops them or the conversation's workspace
 	// pointer changes (evictWorkspaceSkills). Conversation id -> set of
 	// "global:<name>" / "ws:<workspaceID>:<name>". In-memory runtime
@@ -1572,11 +1572,8 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 		return nil, err
 	}
 	// The context bar must count the ACTIVE SKILL SET the same way the
-	// live turn does (activeSkillsFor rides the frozen prompt per
-	// request).
-	if withSkills := a.activeSkillsFor(us, handle, convID); withSkills != nil {
-		c = withSkills
-	}
+	// live turn does (the block rides the request's message tail).
+	skillBlock := a.activeSkillBlock(us, handle, convID)
 	hist, err := us.ListMessages(convID)
 	if err != nil {
 		return nil, err
@@ -1591,7 +1588,7 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, tokens := buildRequest(c, hist, prof, tcMap)
+	_, tokens := buildRequest(c, hist, prof, tcMap, skillBlock)
 	return map[string]any{"tokens": tokens, "max_tokens": a.modelMaxContext(c.ActiveModelID)}, nil
 }
 
@@ -1806,12 +1803,10 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 	if err != nil {
 		return "", "", err
 	}
-	// The ACTIVE SKILL SET's content rides the frozen prompt for this
-	// request (the SKILL SYSTEM section's re-injection) — the conv is
-	// copied, the frozen row on disk is never touched.
-	if withSkills := a.activeSkillsFor(us, handle, convID); withSkills != nil {
-		conv = withSkills
-	}
+	// The ACTIVE SKILL SET's block rides the END of this request's message
+	// list (the SKILL SYSTEM section's re-injection — see activeSkillBlock
+	// for why it stays out of the prefix-cached system prompt).
+	skillBlock := a.activeSkillBlock(us, handle, convID)
 	p, ok := a.providerFor(conv.ActiveModelID)
 	if !ok {
 		return conv.ID, "", fmt.Errorf("no enabled provider for active model %q", conv.ActiveModelID)
@@ -1895,7 +1890,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 		if err != nil {
 			return conv.ID, "", err
 		}
-		req, tokens := buildRequest(conv, hist, prof, tcMap)
+		req, tokens := buildRequest(conv, hist, prof, tcMap, skillBlock)
 		req.Tools = tools
 		// Pre-compact trigger: the LARGER of the char/4 estimate and the
 		// previous model call's real API-reported usage (lastUsage). The
@@ -1930,7 +1925,7 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 			if err != nil {
 				return conv.ID, "", err
 			}
-			req, _ = buildRequest(conv, hist, prof, tcMap)
+			req, _ = buildRequest(conv, hist, prof, tcMap, skillBlock)
 			req.Tools = tools
 		}
 		// Call the model (non-streaming or streaming). The wire request carries
@@ -2111,7 +2106,9 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 	if herr == nil {
 		compTC, terr := toolCallsForMessages(us, compHist)
 		if terr == nil {
-			_, postTokens = buildRequest(conv, compHist, prof, compTC)
+			// The skill block rides the next turn's request too — count it
+			// or the post-compaction check undercounts.
+			_, postTokens = buildRequest(conv, compHist, prof, compTC, a.activeSkillBlock(us, handle, conv.ID))
 		}
 	}
 	actualTokens := postTokens

@@ -106,7 +106,7 @@ func TestBuildRequestCountsToolCallArguments(t *testing.T) {
 		{Role: roleAssistant, Content: "here is what I found", Seq: 2},
 	}
 	// Without tool calls (nil map): the baseline.
-	_, base := buildRequest(conv, msgs, profile.Default(), nil)
+	_, base := buildRequest(conv, msgs, profile.Default(), nil, "")
 	// With a tool call on the first assistant message (a large argument + a
 	// result). Build the tcMap the way toolCallsForMessages would.
 	tcMap := map[int64][]store.ToolCall{}
@@ -115,9 +115,67 @@ func TestBuildRequestCountsToolCallArguments(t *testing.T) {
 	// giving it an ID and keying the map on it.
 	msgs[1].ID = 7
 	tcMap[7] = []store.ToolCall{{ID: 1, MessageID: 7, Tool: "web_search", Args: bigArgs, Result: strings.Repeat("result. ", 100), Success: true}}
-	_, withTC := buildRequest(conv, msgs, profile.Default(), tcMap)
+	_, withTC := buildRequest(conv, msgs, profile.Default(), tcMap, "")
 	t.Logf("base=%d withTC=%d delta=%d", base, withTC, withTC-base)
 	if withTC <= base {
 		t.Fatalf("buildRequest with tool call = %d, baseline = %d — the tool args + result must raise the estimate", withTC, base)
+	}
+}
+
+// TestBuildRequestSkillBlockTailStable pins the PREFIX-CACHE invariant the
+// SKILL SYSTEM re-injection must obey: the loaded-skill block rides the END
+// of the message list (before the current turn's user message), never the
+// system prompt. A request with the block must keep the earlier blockless
+// request as an exact prefix (identical system parts, byte-identical
+// messages at every shared position) — otherwise every mid-conversation
+// skill load/unload would force a re-encode of the whole conversation.
+func TestBuildRequestSkillBlockTailStable(t *testing.T) {
+	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
+	block := "Loaded skills (this conversation):\n\n### Skill: deploy-cli (global)\ndeploys the app\n\nrun the script\n"
+	msgsOld := []store.Message{
+		{Role: roleUser, Content: "hello", Seq: 0},
+		{Role: roleAssistant, Content: "hi there", Seq: 1},
+	}
+	msgsNew := append(append([]store.Message{}, msgsOld...), store.Message{Role: roleUser, Content: "deploy it", Seq: 2})
+	reqOld, _ := buildRequest(conv, msgsOld, profile.Default(), nil, "")
+	reqNew, _ := buildRequest(conv, msgsNew, profile.Default(), nil, block)
+	// The system prompt is untouched by the block.
+	if len(reqOld.System) != len(reqNew.System) || len(reqOld.System) == 0 || reqOld.System[0].Text != reqNew.System[0].Text {
+		t.Fatalf("the skill block changed the system prompt (old %q / new %q) — the prefix cache breaks",
+			reqOld.System[0].Text, reqNew.System[0].Text)
+	}
+	// Exactly one extra message beyond the plain history (the block).
+	if len(reqNew.Messages) != len(msgsNew)+1 {
+		t.Fatalf("messages: new=%d, want %d (history %d + the block)", len(reqNew.Messages), len(msgsNew)+1, len(msgsNew))
+	}
+	for i, m := range reqOld.Messages {
+		if reqNew.Messages[i].Role != m.Role || reqNew.Messages[i].Text != m.Text {
+			t.Fatalf("message %d diverged: old %q/%q vs new %q/%q — the prefix breaks", i, m.Role, m.Text, reqNew.Messages[i].Role, reqNew.Messages[i].Text)
+		}
+	}
+	// The block sits immediately before the current user message, which
+	// stays the last message (the trigger comes after the reference
+	// material).
+	last := len(reqNew.Messages)
+	if string(reqNew.Messages[last-1].Role) != "user" || reqNew.Messages[last-1].Text != "deploy it" {
+		t.Fatalf("the current user message must stay last, got role=%q text=%q", reqNew.Messages[last-1].Role, reqNew.Messages[last-1].Text)
+	}
+	if reqNew.Messages[last-2].Text != block {
+		t.Fatalf("the block must sit immediately before the user message, got %q", reqNew.Messages[last-2].Text)
+	}
+	// No block → no extra message at all.
+	reqNone, _ := buildRequest(conv, msgsNew, profile.Default(), nil, "")
+	if len(reqNone.Messages) != len(msgsNew) {
+		t.Fatalf("a blockless request must carry no extra message: %d vs %d", len(reqNone.Messages), len(msgsNew))
+	}
+	// And the block's tokens are counted (the compaction trigger sees the
+	// same prompt the model does).
+	reqBlockTokens := 0
+	{
+		_, reqBlockTokens = buildRequest(conv, msgsNew, profile.Default(), nil, block)
+		_, reqNoneTokens := buildRequest(conv, msgsNew, profile.Default(), nil, "")
+		if reqBlockTokens <= reqNoneTokens {
+			t.Fatalf("the block's tokens must raise the estimate: with=%d without=%d", reqBlockTokens, reqNoneTokens)
+		}
 	}
 }
