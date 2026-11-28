@@ -37,7 +37,7 @@ const (
 func registerSearchTool(r *ToolRegistry, a *Agent) error {
 	return r.Register(Tool{
 		Name:        "user_data_search",
-		Description: `Search the user's own data for additional context: their past conversation messages (by meaning), bevin's stored memories (by meaning, confidence and recency), the user's profile, and workspace file names/paths. Use it to recall what was said or decided in earlier conversations, what you remember about the user, or which files exist in a workspace. Memory results carry the memory id (#N) — the id forget and remember's supersede_id need. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace. This is the user's own data, not the web — web_search is for web content.`,
+		Description: `Search the user's own data. Memory results carry the memory id (#N) — the id forget and remember's supersede_id need. Optional scopes: "conversation" (a conversation id) restricts the conversation and memory results to that conversation; "workspace" (a workspace id) restricts the file results to that workspace.`,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
