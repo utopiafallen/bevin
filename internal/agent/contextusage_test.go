@@ -122,60 +122,73 @@ func TestBuildRequestCountsToolCallArguments(t *testing.T) {
 	}
 }
 
-// TestBuildRequestSkillBlockTailStable pins the PREFIX-CACHE invariant the
-// SKILL SYSTEM re-injection must obey: the loaded-skill block rides the END
-// of the message list (before the current turn's user message), never the
-// system prompt. A request with the block must keep the earlier blockless
-// request as an exact prefix (identical system parts, byte-identical
-// messages at every shared position) — otherwise every mid-conversation
-// skill load/unload would force a re-encode of the whole conversation.
-func TestBuildRequestSkillBlockTailStable(t *testing.T) {
+// TestBuildRequestSkillBlockStable pins the PREFIX-CACHE invariant the
+// SKILL SYSTEM re-injection must obey: the loaded-skill block floats at
+// the HEAD of the message list as one ephemeral user message, injected
+// right after the compaction message (the summary's framing rides the
+// system part) — never the system prompt itself. Because the block is
+// anchored to the top of the window, history GROWS BELOW it: with the
+// same active set, every request is an exact prefix extension of the
+// previous one and the KV cache survives all turns. Only a load/unload
+// (the block appears/disappears) or a compaction (the summary changes)
+// re-encodes.
+func TestBuildRequestSkillBlockStable(t *testing.T) {
 	conv := &store.Conversation{ID: "c1", FrozenSystemPrompt: "You are Bevin."}
 	block := "Loaded skills (this conversation):\n\n### Skill: deploy-cli (global)\ndeploys the app\n\nrun the script\n"
-	msgsOld := []store.Message{
+	// Turn 1: the skill is already loaded; the block floats above the
+	// first user message.
+	msgs1 := []store.Message{
 		{Role: roleUser, Content: "hello", Seq: 0},
-		{Role: roleAssistant, Content: "hi there", Seq: 1},
 	}
-	msgsNew := append(append([]store.Message{}, msgsOld...), store.Message{Role: roleUser, Content: "deploy it", Seq: 2})
-	reqOld, _ := buildRequest(conv, msgsOld, profile.Default(), nil, "")
-	reqNew, _ := buildRequest(conv, msgsNew, profile.Default(), nil, block)
+	// Turn 2 (same active set): the transcript grew below the block.
+	msgs2 := append(append([]store.Message{}, msgs1...),
+		store.Message{Role: roleAssistant, Content: "hi there", Seq: 1},
+		store.Message{Role: roleUser, Content: "deploy it", Seq: 2},
+	)
+	req1, _ := buildRequest(conv, msgs1, profile.Default(), nil, block)
+	req2, _ := buildRequest(conv, msgs2, profile.Default(), nil, block)
 	// The system prompt is untouched by the block.
-	if len(reqOld.System) != len(reqNew.System) || len(reqOld.System) == 0 || reqOld.System[0].Text != reqNew.System[0].Text {
-		t.Fatalf("the skill block changed the system prompt (old %q / new %q) — the prefix cache breaks",
-			reqOld.System[0].Text, reqNew.System[0].Text)
+	if len(req1.System) == 0 || req1.System[0].Text != req2.System[0].Text {
+		t.Fatalf("the system prompt changed between turns: %q vs %q", req1.System[0].Text, req2.System[0].Text)
 	}
-	// Exactly one extra message beyond the plain history (the block).
-	if len(reqNew.Messages) != len(msgsNew)+1 {
-		t.Fatalf("messages: new=%d, want %d (history %d + the block)", len(reqNew.Messages), len(msgsNew)+1, len(msgsNew))
+	// The block floats at the head of the message list (after the
+	// system part, where the compaction's summary framing sits).
+	if string(req1.Messages[0].Role) != "user" || req1.Messages[0].Text != block {
+		t.Fatalf("the block must be the FIRST message, got role=%q text=%q", req1.Messages[0].Role, req1.Messages[0].Text)
 	}
-	for i, m := range reqOld.Messages {
-		if reqNew.Messages[i].Role != m.Role || reqNew.Messages[i].Text != m.Text {
-			t.Fatalf("message %d diverged: old %q/%q vs new %q/%q — the prefix breaks", i, m.Role, m.Text, reqNew.Messages[i].Role, reqNew.Messages[i].Text)
+	// PREFIX EXTENSION: the whole previous request (block + history) is
+	// byte-identical at the head of the next one — the KV prefix cache
+	// survives the turn.
+	if len(req2.Messages) <= len(req1.Messages) {
+		t.Fatalf("messages: turn1=%d turn2=%d, the transcript must grow", len(req1.Messages), len(req2.Messages))
+	}
+	for i, m := range req1.Messages {
+		if req2.Messages[i].Role != m.Role || req2.Messages[i].Text != m.Text {
+			t.Fatalf("message %d diverged between turns: old %q/%q vs new %q/%q — the prefix cache breaks", i, m.Role, m.Text, req2.Messages[i].Role, req2.Messages[i].Text)
 		}
 	}
-	// The block sits immediately before the current user message, which
-	// stays the last message (the trigger comes after the reference
-	// material).
-	last := len(reqNew.Messages)
-	if string(reqNew.Messages[last-1].Role) != "user" || reqNew.Messages[last-1].Text != "deploy it" {
-		t.Fatalf("the current user message must stay last, got role=%q text=%q", reqNew.Messages[last-1].Role, reqNew.Messages[last-1].Text)
+	// And the transcript is exactly the block + the two turns' rows.
+	if len(req2.Messages) != len(msgs2)+1 {
+		t.Fatalf("turn2 messages = %d, want %d (block + history)", len(req2.Messages), len(msgs2)+1)
 	}
-	if reqNew.Messages[last-2].Text != block {
-		t.Fatalf("the block must sit immediately before the user message, got %q", reqNew.Messages[last-2].Text)
+	// Unload: the block disappears, the (blockless) request is clean.
+	reqNone, _ := buildRequest(conv, msgs2, profile.Default(), nil, "")
+	if len(reqNone.Messages) != len(msgs2) {
+		t.Fatalf("a blockless request must carry no extra message: %d vs %d", len(reqNone.Messages), len(msgs2))
 	}
-	// No block → no extra message at all.
-	reqNone, _ := buildRequest(conv, msgsNew, profile.Default(), nil, "")
-	if len(reqNone.Messages) != len(msgsNew) {
-		t.Fatalf("a blockless request must carry no extra message: %d vs %d", len(reqNone.Messages), len(msgsNew))
+	// A load mid-conversation re-encodes exactly once (the block appears
+	// at the head) — and from then on the requests extend again.
+	reqLoaded, _ := buildRequest(conv, msgs2, profile.Default(), nil, block)
+	if string(reqLoaded.Messages[0].Role) != "user" || reqLoaded.Messages[0].Text != block {
+		t.Fatal("the block must sit at the head after a mid-conversation load")
 	}
-	// And the block's tokens are counted (the compaction trigger sees the
+	// The block's tokens are counted (the compaction trigger sees the
 	// same prompt the model does).
-	reqBlockTokens := 0
 	{
-		_, reqBlockTokens = buildRequest(conv, msgsNew, profile.Default(), nil, block)
-		_, reqNoneTokens := buildRequest(conv, msgsNew, profile.Default(), nil, "")
-		if reqBlockTokens <= reqNoneTokens {
-			t.Fatalf("the block's tokens must raise the estimate: with=%d without=%d", reqBlockTokens, reqNoneTokens)
+		_, withTok := buildRequest(conv, msgs2, profile.Default(), nil, block)
+		_, withoutTok := buildRequest(conv, msgs2, profile.Default(), nil, "")
+		if withTok <= withoutTok {
+			t.Fatalf("the block's tokens must raise the estimate: with=%d without=%d", withTok, withoutTok)
 		}
 	}
 }

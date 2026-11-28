@@ -86,20 +86,25 @@ func TestSkillsEndpoints(t *testing.T) {
 	if err := os.WriteFile(skillFile, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The workspace-local skills (the design's second list, with the
+	// workspace column): the AGGREGATE endpoint walks every workspace.
 	w = httptest.NewRecorder()
-	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces/"+wsID+"/skills", bob, nil))
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces/skills", bob, nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("ws skills code = %d body=%s", w.Code, w.Body.String())
 	}
 	var wl struct {
 		Skills []struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
+			WorkspaceID    string `json:"workspace_id"`
+			WorkspaceTitle string `json:"workspace_title"`
+			Name           string `json:"name"`
+			Content        string `json:"content"`
 		} `json:"skills"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &wl)
-	if len(wl.Skills) != 1 || wl.Skills[0].Name != "build-notes" || wl.Skills[0].Content != "make && test" {
-		t.Fatalf("ws skills = %+v, want the on-disk skill", wl.Skills)
+	if len(wl.Skills) != 1 || wl.Skills[0].Name != "build-notes" || wl.Skills[0].Content != "make && test" ||
+		wl.Skills[0].WorkspaceID != wsID || wl.Skills[0].WorkspaceTitle != "Notes" {
+		t.Fatalf("ws skills = %+v, want the on-disk skill attributed to its workspace", wl.Skills)
 	}
 
 	// Validation: an unknown global skill is a 404, a missing name a 400.
@@ -139,17 +144,20 @@ func TestSkillsEndpoints(t *testing.T) {
 		t.Fatalf("the .SKILLS/ file survived the delete: %v", err)
 	}
 	w = httptest.NewRecorder()
-	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces/"+wsID+"/skills", bob, nil))
-	_ = json.Unmarshal(w.Body.Bytes(), &wl)
+	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces/skills", bob, nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &wl); err != nil {
+		t.Fatal(err)
+	}
 	if len(wl.Skills) != 0 {
 		t.Fatalf("ws skills after delete = %+v, want none", wl.Skills)
 	}
 
-	// Unknowns: an unknown workspace 404s, a nameless match 404s.
+	// Unknowns: an unknown workspace 404s (the per-workspace DELETE keeps
+	// its lookup), a nameless match 404s.
 	w = httptest.NewRecorder()
-	a.ServeHTTP(w, newRequestAs(http.MethodGet, "/api/workspaces/doesnotexist/skills", bob, nil))
+	a.ServeHTTP(w, newRequestAs(http.MethodDelete, "/api/workspaces/doesnotexist/skills?name=x", bob, nil))
 	if w.Code != http.StatusNotFound {
-		t.Fatalf("unknown ws skills code = %d, want 404", w.Code)
+		t.Fatalf("unknown ws skill delete code = %d, want 404", w.Code)
 	}
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequestAs(http.MethodDelete, "/api/workspaces/"+wsID+"/skills?name=ghost", bob, nil))

@@ -259,7 +259,7 @@ func (a *App) routes() {
 	mux.HandleFunc("POST /api/workspaces/{id}/files", a.chatGate(a.diskGate(a.uploadWorkspaceFile)))
 	mux.HandleFunc("GET /api/workspaces/{id}/files/raw", a.chatGate(a.workspaceFileRaw))
 	mux.HandleFunc("DELETE /api/workspaces/{id}/files", a.chatGate(a.deleteWorkspaceFile))
-	mux.HandleFunc("GET /api/workspaces/{id}/skills", a.chatGate(a.workspaceSkills))
+	mux.HandleFunc("GET /api/workspaces/skills", a.chatGate(a.allWorkspaceSkills))
 	mux.HandleFunc("DELETE /api/workspaces/{id}/skills", a.chatGate(a.deleteWorkspaceSkill))
 	// Disk usage: the user's storage against their cap + the cleanup page.
 	// NOT behind diskGate (a frozen user must reach the disk page + the

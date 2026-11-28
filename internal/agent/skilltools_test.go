@@ -91,9 +91,10 @@ func TestSkillSearchLoadUnload(t *testing.T) {
 	if len(keys) != 1 || keys[0] != "ws:"+w1+":build-notes" {
 		t.Fatalf("active keys = %v", keys)
 	}
-	// The loaded skill's block rides every request's TAIL (activeSkillBlock
-	// — see TestBuildRequestSkillBlockTailStable for the prefix-cache
-	// placement) — and the frozen row on disk is never touched.
+	// The loaded skill's block floats at the HEAD of every request's
+	// message list (activeSkillBlock — see TestBuildRequestSkillBlockStable
+	// for the placement + the prefix-cache invariant) — and the frozen row
+	// on disk is never touched.
 	block := a.activeSkillBlock(us, "u1", convID)
 	if !strings.Contains(block, "Loaded skills (this conversation)") || !strings.Contains(block, "the build recipe") {
 		t.Fatalf("the skill block lacks the loaded skill:\n%s", block)

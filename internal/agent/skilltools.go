@@ -202,15 +202,15 @@ func (a *Agent) evictWorkspaceSkills(convID, workspaceID string) []string {
 
 // activeSkillBlock renders the conversation's ACTIVE SKILL SET as the block
 // every request carries (the SKILL SYSTEM section's re-injection): one
-// section per loaded skill. It is injected at the TAIL of the message list
-// (buildRequest), NOT into the system prompt — the system prompt is the
-// prefix-cached head of every request (the 2026-11-25 cache-neutrality
-// rule), and had the block lived there, every skill load/unload
-// mid-conversation would diverge the prefix at its head and force a
-// re-encode of the ENTIRE conversation history. At the tail, the previous
-// request stays a byte-prefix of the next: the KV cache survives, and only
-// the block itself (a few KB) is new. Unresolved keys (a skill deleted, or
-// its workspace gone) are skipped rather than failing the request.
+// section per loaded skill. It floats at the HEAD of the message list as a
+// single ephemeral user message, injected right after the compaction
+// message (buildRequest) — never the system prompt, whose head is the
+// prefix-cached part of every request. Anchored to the top of the window,
+// history grows below it and every request is an exact extension of the
+// previous one, so the KV prefix cache survives all turns; only a
+// load/unload or a compaction re-encodes. Unresolved keys (a skill
+// deleted, or its workspace gone) are skipped rather than failing the
+// request.
 func (a *Agent) activeSkillBlock(us *store.UserStore, handle, convID string) string {
 	keys := a.activeSkillKeys(convID)
 	if len(keys) == 0 {

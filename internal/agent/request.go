@@ -280,23 +280,20 @@ func buildRequest(conv *store.Conversation, msgs []store.Message, prof profile.P
 	// reasoning for continuity).
 	includeReasoning := prof.ReasoningInTranscript
 	reqMsgs := wireTurnMessages(messages, tcMap, includeReasoning)
-	// The ACTIVE SKILL SET's block rides the END of the message list — see
-	// activeSkillBlock for why it must not enter the system prompt (prefix
-	// caching). It is inserted before the current turn's user message, so
-	// the reference material precedes the trigger; a request with no user
-	// message (the send path always ends with one — a defensive append)
-	// gets it at the tail.
+	// The ACTIVE SKILL SET's block FLOATS at the head of the message list —
+	// one ephemeral user message, re-injected every request, injected
+	// right AFTER the compaction message (the summary's framing rides the
+	// system part above, so the head of Messages is the position after
+	// it). Anchored there, it is part of the stable prefix: history
+	// GROWS BELOW the block, so every request is an exact extension of
+	// the previous one and the KV prefix cache survives all turns — only
+	// a load/unload (the block appears/disappears) or a compaction (the
+	// summary changes) re-encodes. Never the system prompt (the cached
+	// head of every request); never a per-turn insertion point either
+	// (a block inserted before the current user message moves every
+	// turn, re-encoding everything after the previous insertion).
 	if skillBlock != "" {
-		insert := len(reqMsgs)
-		for i := len(reqMsgs) - 1; i >= 0; i-- {
-			if reqMsgs[i].Role == provider.RoleUser {
-				insert = i
-				break
-			}
-		}
-		reqMsgs = append(reqMsgs, provider.Message{})
-		copy(reqMsgs[insert+1:], reqMsgs[insert:])
-		reqMsgs[insert] = provider.Message{Role: provider.RoleUser, Text: skillBlock}
+		reqMsgs = append([]provider.Message{{Role: provider.RoleUser, Text: skillBlock}}, reqMsgs...)
 	}
 	for _, pm := range reqMsgs {
 		tokens += estimateTokens(pm.Text+pm.Reasoning, prof)

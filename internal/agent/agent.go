@@ -88,9 +88,9 @@ type Agent struct {
 	ptySessions map[string]map[string]bool
 	// skillLoaded is the per-conversation ACTIVE SKILL SET (the design
 	// log's SKILL SYSTEM section): the skills the conversation has loaded
-	// — their content rides every request's message tail (activeSkillBlock)
-	// until skill_unload drops them or the conversation's workspace
-	// pointer changes (evictWorkspaceSkills). Conversation id -> set of
+	// — their content floats at the head of every request's message list
+	// (activeSkillBlock) until skill_unload drops them or the conversation's
+	// workspace pointer changes (evictWorkspaceSkills). Conversation id -> set of
 	// "global:<name>" / "ws:<workspaceID>:<name>". In-memory runtime
 	// state — a bevin restart clears the sets (v1), like ptySessions.
 	skillMu     sync.Mutex
@@ -1572,7 +1572,8 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 		return nil, err
 	}
 	// The context bar must count the ACTIVE SKILL SET the same way the
-	// live turn does (the block rides the request's message tail).
+	// live turn does (the block floats at the head of the request's
+	// messages).
 	skillBlock := a.activeSkillBlock(us, handle, convID)
 	hist, err := us.ListMessages(convID)
 	if err != nil {
@@ -1803,9 +1804,10 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 	if err != nil {
 		return "", "", err
 	}
-	// The ACTIVE SKILL SET's block rides the END of this request's message
-	// list (the SKILL SYSTEM section's re-injection — see activeSkillBlock
-	// for why it stays out of the prefix-cached system prompt).
+	// The ACTIVE SKILL SET's block floats at the head of this request's
+	// message list (the SKILL SYSTEM section's re-injection — see
+	// activeSkillBlock for the placement: after the compaction message,
+	// never the prefix-cached system prompt).
 	skillBlock := a.activeSkillBlock(us, handle, convID)
 	p, ok := a.providerFor(conv.ActiveModelID)
 	if !ok {

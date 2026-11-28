@@ -104,17 +104,49 @@ func listWsSkillFiles(folder string) []wsSkillFileWire {
 	return out
 }
 
-// GET /api/workspaces/{id}/skills — the workspace's local skills.
-func (a *App) workspaceSkills(w http.ResponseWriter, r *http.Request) {
+// wsSkillEntry is one workspace-local skill in the aggregate listing —
+// the .SKILLS/ file's fields plus the WORKSPACE it belongs to (the skills
+// page's second list carries a workspace column).
+type wsSkillEntry struct {
+	WorkspaceID    string `json:"workspace_id"`
+	WorkspaceTitle string `json:"workspace_title"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	Content        string `json:"content"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+// GET /api/workspaces/skills — EVERY workspace's local skills with
+// attribution (the skills page's "workspace-local" list — one row per
+// skill, the workspace column showing whose it is).
+func (a *App) allWorkspaceSkills(w http.ResponseWriter, r *http.Request) {
 	_, us, ok := a.workspaceStore(w, r)
 	if !ok {
 		return
 	}
-	ws, ok := a.workspaceFor(w, r, us)
-	if !ok {
+	wss, err := us.ListWorkspaces()
+	if err != nil {
+		log.Printf("list workspaces: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"skills": listWsSkillFiles(ws.FolderPath)})
+	var out []wsSkillEntry
+	for _, ws := range wss {
+		for _, f := range listWsSkillFiles(ws.FolderPath) {
+			out = append(out, wsSkillEntry{WorkspaceID: ws.ID, WorkspaceTitle: ws.Title, Name: f.Name, Description: f.Description, Content: f.Content, CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].WorkspaceTitle != out[j].WorkspaceTitle {
+			return out[i].WorkspaceTitle < out[j].WorkspaceTitle
+		}
+		return out[i].Name < out[j].Name
+	})
+	if out == nil {
+		out = []wsSkillEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": out})
 }
 
 // DELETE /api/workspaces/{id}/skills?name=... — remove one .SKILLS/ file
