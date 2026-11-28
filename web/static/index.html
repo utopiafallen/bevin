@@ -502,6 +502,11 @@
       showPage("search");
       if (isMobileNav()) closeNav();
     });
+    $("skillsBtn").addEventListener("click", function () {
+      if (!me) return;
+      showPage("skills");
+      if (isMobileNav()) closeNav();
+    });
     $("profileBtn").addEventListener("click", function () {
       if (!me) return;
       showPage("profile");
