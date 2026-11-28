@@ -717,31 +717,3 @@ func (b *windowsBackend) Remove(ctx context.Context, handle string) error {
 	}
 	return nil
 }
-
-// isNotFound / isAlreadyRunning / isAlreadyStopped classify HCS errors
-// without depending on a specific win32 error text.
-func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "cannot find the process") ||
-		strings.Contains(s, "The system cannot find the file") ||
-		strings.Contains(s, "not found")
-}
-
-func isAlreadyRunning(err error) bool {
-	if err == nil {
-		return true // Start on a running system is a no-op success
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "already") || strings.Contains(s, "running")
-}
-
-func isAlreadyStopped(err error) bool {
-	if err == nil {
-		return true
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "not running") || strings.Contains(s, "stopped") || strings.Contains(s, "terminated")
-}
