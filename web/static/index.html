@@ -2457,6 +2457,9 @@
         var d = await r.json();
         var convs = d.conversations || [];
         await loadWorkspaces(); // workspace labels for the rows
+        convSummaries = convs;
+        loadScopes(); // the search page's scope dropdowns (sanctioned sources)
+        loadConvScopes();
         box.innerHTML = "";
         if (!convs.length) {
           box.innerHTML = '<p class="muted" style="font-size:.85rem; margin:0;">no conversations yet.</p>';
@@ -2552,36 +2555,39 @@
     // the user's data (conversations semantically, memories + profile
     // lexically, the selected workspace's files by name/path) and the
     // results render grouped by source.
-    var lastWorkspaces = [];
-    var lastConvs = [];
+    // The scope dropdowns are populated from the SANCTIONED list
+    // endpoints — GET /api/workspaces (the picker's `workspaces` global,
+    // refreshed by refreshHistory) and /api/conversations (convSummaries,
+    // kept by the same routine) — so they are filled on first page load,
+    // not after a first search (the search response no longer echoes the
+    // lists).
+    var convSummaries = [];
     function loadScopes() {
-      // Populate the workspace scope selector (from the last search
-      // response — the default "all my data" scope needs none).
+      // Populate the workspace scope selector (the picker's list).
       var keep = $("scopeSelect").value;
       var sel = $("scopeSelect");
       while (sel.options.length > 1) sel.remove(1);
-      (lastWorkspaces || []).forEach(function (w) {
+      (workspaces || []).forEach(function (w) {
         var o = document.createElement("option");
         o.value = w.id;
         o.textContent = "workspace: " + (w.title || w.id);
         sel.appendChild(o);
       });
-      sel.value = (lastWorkspaces || []).some(function (w) { return w.id === keep; }) ? keep : "";
+      sel.value = (workspaces || []).some(function (w) { return w.id === keep; }) ? keep : "";
     }
     function loadConvScopes() {
-      // Populate the conversation scope selector (the same option list the
-      // search response returns in conversations_scope — the conversation
-      // list's labels: the rolling purpose in place of the title).
+      // Populate the conversation scope selector (the conversation list —
+      // its labels: the rolling purpose in place of the title).
       var keep = $("convScopeSelect").value;
       var sel = $("convScopeSelect");
       while (sel.options.length > 1) sel.remove(1);
-      (lastConvs || []).forEach(function (c) {
+      (convSummaries || []).forEach(function (c) {
         var o = document.createElement("option");
         o.value = c.id;
-        o.textContent = (c.label || c.id);
+        o.textContent = c.purpose || c.title || "(untitled)";
         sel.appendChild(o);
       });
-      sel.value = (lastConvs || []).some(function (c) { return c.id === keep; }) ? keep : "";
+      sel.value = (convSummaries || []).some(function (c) { return c.id === keep; }) ? keep : "";
     }
 
     function searchSection(label, items, render) {
@@ -2608,10 +2614,6 @@
         var r = await fetch("/api/search?q=" + encodeURIComponent(q) + "&limit=10" + (ws ? "&workspace=" + encodeURIComponent(ws) : "") + (conv ? "&conversation=" + encodeURIComponent(conv) : ""));
         if (!r.ok) { var je = {}; try { je = await r.json(); } catch (e) {} throw new Error(je.error || ("HTTP " + r.status)); }
         var d = await r.json();
-        lastWorkspaces = d.workspaces || [];
-        lastConvs = d.conversations_scope || [];
-        loadScopes();
-        loadConvScopes();
         box.innerHTML = "";
         var any = false;
         var convNote = conv ? " · this conversation" : "";

@@ -1251,12 +1251,10 @@ func (a *Agent) SearchAll(ctx context.Context, handle, query, conversationID, wo
 		limit = 10
 	}
 	out := map[string]any{
-		"conversations":       []any{},
-		"memories":            []any{},
-		"profile":             []any{},
-		"workspaces":          []any{},
-		"workspace":           []any{},
-		"conversations_scope": []any{},
+		"conversations": []any{},
+		"memories":      []any{},
+		"profile":       []any{},
+		"workspace":     []any{},
 	}
 	if conversationID != "" {
 		if hits, err := a.SearchConversationsInConversation(ctx, handle, conversationID, query, limit); err == nil {
@@ -1295,42 +1293,6 @@ func (a *Agent) SearchAll(ctx context.Context, handle, query, conversationID, wo
 		}
 	}
 	out["profile"] = profileHits
-	type wsRef struct {
-		ID    string `json:"id"`
-		Title string `json:"title"`
-	}
-	ws, err := us.ListWorkspaces()
-	if err != nil {
-		return nil, err
-	}
-	wsRefs := make([]wsRef, 0, len(ws))
-	for _, w := range ws {
-		wsRefs = append(wsRefs, wsRef{w.ID, w.Title})
-	}
-	wsRefsAny := make([]any, 0, len(wsRefs))
-	for _, w := range wsRefs {
-		wsRefsAny = append(wsRefsAny, w)
-	}
-	out["workspaces"] = wsRefsAny
-	// The conversation scope's option list (the search page's selector) —
-	// the same summaries the conversation list uses, most recently active
-	// first.
-	if convos, cerr := us.ListConversations(); cerr == nil {
-		type convRef struct {
-			ID             string `json:"id"`
-			Label          string `json:"label"` // the list label: the rolling purpose, else the title
-			LastActivityAt string `json:"last_activity_at"`
-		}
-		refs := make([]any, 0, len(convos))
-		for _, c := range convos {
-			label := c.Title
-			if c.Purpose != "" {
-				label = c.Purpose // the list label: the rolling purpose replaces the title
-			}
-			refs = append(refs, convRef{c.ID, label, c.LastActivityAt})
-		}
-		out["conversations_scope"] = refs
-	}
 	if workspaceID != "" {
 		if _, err := us.GetWorkspace(workspaceID); err != nil {
 			return nil, err

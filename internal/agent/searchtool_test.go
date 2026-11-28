@@ -89,13 +89,14 @@ func TestSearchAllScopes(t *testing.T) {
 	if convs := anySlice[SearchHit](out["conversations"]); len(convs) != 0 {
 		t.Fatalf("no vector index configured: conversations = %v, want empty", convs)
 	}
-	scopeConvs, ok := out["conversations_scope"].([]any)
-	if !ok || len(scopeConvs) != 2 {
-		t.Fatalf("conversations_scope = %v, want the 2 conversations", out["conversations_scope"])
+	// The search page's scope dropdowns come from the sanctioned list
+	// endpoints (/api/workspaces, /api/conversations) — the response no
+	// longer echoes the lists (that made the dropdowns need a first search).
+	if _, ok := out["conversations_scope"]; ok {
+		t.Fatal("conversations_scope in the response, want it gone (the dropdown uses /api/conversations)")
 	}
-	scopeWS, ok := out["workspaces"].([]any)
-	if !ok || len(scopeWS) != 1 {
-		t.Fatalf("workspaces = %v, want the 1 workspace", out["workspaces"])
+	if _, ok := out["workspaces"]; ok {
+		t.Fatal("workspaces in the response, want it gone (the dropdown uses /api/workspaces)")
 	}
 
 	// Conversation scope: the memory leg narrows to that conversation's
