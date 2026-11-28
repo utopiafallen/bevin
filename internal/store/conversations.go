@@ -28,6 +28,12 @@ type Conversation struct {
 	Purpose          string `json:"purpose"`
 	Topic            string `json:"topic"`
 	PurposeUpdatedAt string `json:"purpose_updated_at"`
+	// WorkspaceID: the workspace LOADED into this conversation (the design
+	// log's WORKSPACE LOADING section) — the pointer the conversation works
+	// in. "" = no workspace. Loading is the pointer, not an event: its
+	// derived effects are the workspace-local skill availability and the
+	// search tool's default workspace scope.
+	WorkspaceID string `json:"workspace_id"`
 }
 
 // ErrNotFound is returned when a row is missing.
@@ -45,10 +51,10 @@ func (s *UserStore) CreateConversation(title, activeModelID string) (*Conversati
 	return &Conversation{ID: id, Title: title, CreatedAt: now, LastActivityAt: now, State: "active", ActiveModelID: activeModelID}, nil
 }
 
-const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort, purpose, topic, purpose_updated_at`
+const convCols = `id, title, created_at, last_activity_at, state, frozen_system_prompt, prompt_input_versions, owner_task_id, active_model_id, reasoning_effort, purpose, topic, purpose_updated_at, workspace_id`
 
 func scanConv(rs interface{ Scan(...any) error }, c *Conversation) error {
-	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort, &c.Purpose, &c.Topic, &c.PurposeUpdatedAt)
+	return rs.Scan(&c.ID, &c.Title, &c.CreatedAt, &c.LastActivityAt, &c.State, &c.FrozenSystemPrompt, &c.PromptInputVersions, &c.OwnerTaskID, &c.ActiveModelID, &c.ReasoningEffort, &c.Purpose, &c.Topic, &c.PurposeUpdatedAt, &c.WorkspaceID)
 }
 
 func (s *UserStore) GetConversation(id string) (*Conversation, error) {
@@ -168,6 +174,22 @@ func (s *UserStore) SetConversationTitle(id, title string) error {
 // stores what it is told; the harness never sends an unsupported effort).
 func (s *UserStore) SetConversationReasoningEffort(id, effort string) error {
 	res, err := s.db.Exec(`UPDATE conversations SET reasoning_effort = ? WHERE id = ?`, effort, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetConversationWorkspace points the conversation at a workspace (the
+// design log's WORKSPACE LOADING section — loading IS the pointer) or
+// clears the pointer ("" = no workspace). The value is validated by the
+// caller (a non-empty id must be one of the user's workspaces); the store
+// stores what it is told.
+func (s *UserStore) SetConversationWorkspace(id, workspaceID string) error {
+	res, err := s.db.Exec(`UPDATE conversations SET workspace_id = ? WHERE id = ?`, workspaceID, id)
 	if err != nil {
 		return err
 	}

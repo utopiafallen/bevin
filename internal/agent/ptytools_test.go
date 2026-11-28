@@ -24,7 +24,13 @@ func ptyCall(name, args string) provider.Result {
 // done); the completion summary lands in the user's conversation; the task
 // settle closes the session it started (the task-bound lifetime).
 func TestInteractiveExecSpawnsBackgroundTask(t *testing.T) {
-	a, _, _ := newTestAgent(t)
+	a, cfg, _ := newTestAgent(t)
+	// The task model gets a wide window: this lifecycle's prompt is
+	// legitimately past the 1000-token test config's compaction budget, and
+	// a mid-run compaction would CONSUME a scripted response (the fake
+	// provider can't "re-decide" after a summary the way a real model
+	// would). The test exercises the pty/task path, not compaction.
+	cfg.Models[1].MaxContext = 8000
 	defer a.Close()
 	// The user's model (m1 — the default): one tool call (interactive_exec)
 	// then the final text. The task lands on m2 (m1's slot is held by the

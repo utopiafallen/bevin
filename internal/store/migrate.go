@@ -142,6 +142,18 @@ ALTER TABLE tasks ADD COLUMN memory_end INTEGER;
 		ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT 'system';
 		`,
 	},
+	{
+		// v10 (2026-11-27): conversations.workspace_id — the workspace
+		// LOADED into the conversation (the design log's WORKSPACE
+		// LOADING section): the pointer the conversation works in. Empty =
+		// no workspace. Loading IS the pointer — no runtime event; its
+		// derived effects are the workspace-local skill availability and
+		// the search tool's default workspace scope.
+		version: 10,
+		up: `
+		ALTER TABLE conversations ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+		`,
+	},
 }
 
 // currentSchemaVersion is the schema this build produces: the base (v1) plus

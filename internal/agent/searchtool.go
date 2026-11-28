@@ -78,6 +78,13 @@ func (a *Agent) execSearch(ctx context.Context, handle string, args json.RawMess
 	if q == "" {
 		return "user_data_search needs a query (\"q\").", nil
 	}
+	// The conversation's loaded workspace is the DEFAULT file scope (the
+	// design log's WORKSPACE LOADING section) — an explicit "workspace"
+	// arg still overrides; no loaded workspace = today's behavior (no
+	// file leg).
+	if p.Workspace == "" {
+		p.Workspace = a.loadedWorkspace(handle, conversationFromContext(ctx))
+	}
 	limit := p.Limit
 	if limit <= 0 {
 		limit = searchToolDefaultTop

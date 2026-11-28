@@ -86,6 +86,15 @@ type Agent struct {
 	// here; the task runner's settle path closes them).
 	ptySessMu   sync.Mutex
 	ptySessions map[string]map[string]bool
+	// skillLoaded is the per-conversation ACTIVE SKILL SET (the design
+	// log's SKILL SYSTEM section): the skills the conversation has loaded
+	// — their content is re-injected into every request (activeSkillsFor)
+	// until skill_unload drops them or the conversation's workspace
+	// pointer changes (evictWorkspaceSkills). Conversation id -> set of
+	// "global:<name>" / "ws:<workspaceID>:<name>". In-memory runtime
+	// state — a bevin restart clears the sets (v1), like ptySessions.
+	skillMu     sync.Mutex
+	skillLoaded map[string]map[string]bool
 
 	// NotifyMessage, if set, is called after EVERY row persisted into a
 	// user's conversation (any role — user, assistant, checkin, summary).
@@ -136,6 +145,7 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 		providers:   map[string]provider.Provider{},
 		users:       map[string]*store.UserStore{},
 		ptySessions: map[string]map[string]bool{},
+		skillLoaded: map[string]map[string]bool{},
 	}
 	a.sched = NewScheduler(a.modelSlots)
 	for _, m := range cfg.Models {
@@ -188,6 +198,12 @@ func New(cfg *config.ServerConfig, dataDir string) (*Agent, error) {
 	// workspaces have no admin toggle).
 	if err := registerWorkspaceTools(a.tools, a); err != nil {
 		return nil, fmt.Errorf("register workspace tools: %w", err)
+	}
+	// The skill system (the design log's SKILL SYSTEM + WORKSPACE LOADING
+	// sections): the six skill tools + set_workspace. Registered
+	// unconditionally — the user's own data, like the workspace tools.
+	if err := registerSkillTools(a.tools, a); err != nil {
+		return nil, fmt.Errorf("register skill tools: %w", err)
 	}
 	// exec (the design log's AGENT SANDBOX TOOL section): the blocking
 	// one-shot command in the user's persistent environment (auto-ensured
@@ -1427,13 +1443,17 @@ type ConversationSummary struct {
 	// pre-purpose fallback (the first ~7 turns, before the first purpose
 	// check lands).
 	Purpose string `json:"purpose"`
+	// WorkspaceID: the workspace this conversation is loaded into (the
+	// WORKSPACE LOADING section) — the UI renders it on the list row +
+	// the conversation's workspace picker. "" = no workspace.
+	WorkspaceID string `json:"workspace_id"`
 }
 
 // conversationSummary builds a ConversationSummary from a store conversation,
 // resolving the display name (the user-facing model identity) from the
 // concrete active model ID.
 func (a *Agent) conversationSummary(c store.Conversation) ConversationSummary {
-	return ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, DisplayName: a.displayNameFor(c.ActiveModelID), ReasoningEffort: c.ReasoningEffort, Purpose: c.Purpose}
+	return ConversationSummary{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt, ActiveModelID: c.ActiveModelID, DisplayName: a.displayNameFor(c.ActiveModelID), ReasoningEffort: c.ReasoningEffort, Purpose: c.Purpose, WorkspaceID: c.WorkspaceID}
 }
 
 // Conversations lists the user's conversations, most recently active first
@@ -1478,12 +1498,13 @@ func (a *Agent) Conversation(handle, convID string) (*ConversationSummary, error
 // turn keeps the model + effort it started on (the scheduler already queued
 // it in that model's pool). Returns the updated summary. store.ErrNotFound
 // when the conversation is not in the user's store.
-func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reasoningEffort *string) (*ConversationSummary, error) {
+func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reasoningEffort, workspaceID *string) (*ConversationSummary, error) {
 	us, err := a.userStore(handle)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := us.GetConversation(convID); err != nil {
+	cur, err := us.GetConversation(convID)
+	if err != nil {
 		return nil, err
 	}
 	if modelID != nil && *modelID != "" {
@@ -1514,6 +1535,18 @@ func (a *Agent) UpdateConversation(handle, convID string, modelID, title, reason
 			return nil, err
 		}
 	}
+	// The workspace pointer (WORKSPACE LOADING section): the caller
+	// validated existence ("" clears). A change away from a workspace
+	// evicts that workspace's loaded skills from this conversation's
+	// active set — the switch rule (the user's decision).
+	if workspaceID != nil && *workspaceID != cur.WorkspaceID {
+		if err := us.SetConversationWorkspace(convID, *workspaceID); err != nil {
+			return nil, err
+		}
+		if cur.WorkspaceID != "" {
+			a.evictWorkspaceSkills(convID, cur.WorkspaceID)
+		}
+	}
 	c, err := us.GetConversation(convID)
 	if err != nil {
 		return nil, err
@@ -1537,6 +1570,12 @@ func (a *Agent) ContextUsage(handle, convID string) (map[string]any, error) {
 	c, err := us.GetConversation(convID)
 	if err != nil {
 		return nil, err
+	}
+	// The context bar must count the ACTIVE SKILL SET the same way the
+	// live turn does (activeSkillsFor rides the frozen prompt per
+	// request).
+	if withSkills := a.activeSkillsFor(us, handle, convID); withSkills != nil {
+		c = withSkills
 	}
 	hist, err := us.ListMessages(convID)
 	if err != nil {
@@ -1766,6 +1805,12 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 	conv, err := us.GetConversation(convID)
 	if err != nil {
 		return "", "", err
+	}
+	// The ACTIVE SKILL SET's content rides the frozen prompt for this
+	// request (the SKILL SYSTEM section's re-injection) — the conv is
+	// copied, the frozen row on disk is never touched.
+	if withSkills := a.activeSkillsFor(us, handle, convID); withSkills != nil {
+		conv = withSkills
 	}
 	p, ok := a.providerFor(conv.ActiveModelID)
 	if !ok {

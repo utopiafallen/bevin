@@ -677,10 +677,22 @@ func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
 		ModelID         *string `json:"model_id"`
 		Title           *string `json:"title"`
 		ReasoningEffort *string `json:"reasoning_effort"`
+		WorkspaceID     *string `json:"workspace_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ModelID == nil && req.Title == nil && req.ReasoningEffort == nil) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide model_id and/or title and/or reasoning_effort"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.ModelID == nil && req.Title == nil && req.ReasoningEffort == nil && req.WorkspaceID == nil) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provide model_id and/or title and/or reasoning_effort and/or workspace_id"})
 		return
+	}
+	if req.WorkspaceID != nil && *req.WorkspaceID != "" {
+		// The pointer names a real workspace or clears ("") — a dangling
+		// pointer would 404 the .SKILLS read (WORKSPACE LOADING section).
+		if us, err := a.ag.UserStoreFor(u.Handle); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not open the user's store"})
+			return
+		} else if _, err := us.GetWorkspace(*req.WorkspaceID); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("workspace %s does not exist", *req.WorkspaceID)})
+			return
+		}
 	}
 	if req.ModelID != nil && !a.ag.ModelAvailable(*req.ModelID) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model not available"})
@@ -721,7 +733,7 @@ func (a *App) updateConversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	summary, err := a.ag.UpdateConversation(u.Handle, r.PathValue("id"), req.ModelID, req.Title, req.ReasoningEffort)
+	summary, err := a.ag.UpdateConversation(u.Handle, r.PathValue("id"), req.ModelID, req.Title, req.ReasoningEffort, req.WorkspaceID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
 		return

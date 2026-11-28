@@ -778,6 +778,39 @@ func TestConversationManagement(t *testing.T) {
 		t.Fatalf("renamed = %+v, want title 'renamed' still on m2", up.Conversation)
 	}
 
+	// The workspace pointer (the design log's WORKSPACE LOADING section):
+	// an existing workspace sets it, a bad id is a 400 (the row would 404
+	// the .SKILLS read — it is validated, not stored), and "" clears it.
+	wsRec := httptest.NewRecorder()
+	a.ServeHTTP(wsRec, newRequestAs(http.MethodPost, "/api/workspaces", "tok-bob", map[string]any{"title": "W"}))
+	if wsRec.Code != http.StatusCreated {
+		t.Fatalf("workspace create code = %d body=%s", wsRec.Code, wsRec.Body.String())
+	}
+	wsid := ""
+	{
+		var wres struct {
+			Workspace struct {
+				ID string `json:"id"`
+			} `json:"workspace"`
+		}
+		_ = json.Unmarshal(wsRec.Body.Bytes(), &wres)
+		wsid = wres.Workspace.ID
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": wsid}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("workspace patch code = %d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": "nope"}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad workspace id code = %d, want 400", w.Code)
+	}
+	w = httptest.NewRecorder()
+	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"workspace_id": ""}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("clear workspace code = %d body=%s", w.Code, w.Body.String())
+	}
 	// A blank title is rejected.
 	w = httptest.NewRecorder()
 	a.ServeHTTP(w, newRequestAs(http.MethodPatch, "/api/conversations/"+cNew, "tok-bob", map[string]any{"title": "   "}))

@@ -201,6 +201,11 @@
                    scores). The card is normal flow — it pushes the
                    composer down while open. -->
               <button id="modelChip" class="model-chip" type="button" disabled aria-haspopup="true" aria-expanded="false" title="This conversation's model — Reasoning / Knowledge / Speed, each scored 1-10. Changes apply from the next message."></button>
+              <!-- The workspace picker: the workspace this conversation is
+                   LOADED into (its skills are available; it's the search
+                   tool's default file scope). Same chip + inline card
+                   pattern as the model picker. -->
+              <button id="workspaceChip" class="model-chip" type="button" disabled aria-haspopup="true" aria-expanded="false" title="The workspace this conversation works in — its skills are available and it's the default file scope for search."></button>
               <select id="effortSelect" hidden title="Reasoning effort — how hard the model thinks (this model's supported levels)"></select>
               <div class="ctx-viz" id="ctxViz" hidden title="Context window usage for this conversation">
                 <div class="ctx-bar"><div class="ctx-fill" id="ctxFill"></div></div>
@@ -214,6 +219,11 @@
             <div id="modelCard" class="model-card" hidden>
               <input id="modelFilter" type="text" placeholder="Filter models…" autocomplete="off">
               <div id="modelList" class="model-list"></div>
+            </div>
+            <!-- The workspace card (open picker): "No workspace" + one row
+                 per user workspace. -->
+            <div id="workspaceCard" class="model-card" hidden>
+              <div id="workspaceList" class="model-list"></div>
             </div>
             <form id="chat">
               <!-- The composer is a textarea (not an input): Enter sends,
@@ -1063,7 +1073,7 @@
     async function loadConvMeta() {
       pendingModelID = ""; // the conversation's own model (or the fresh
       // default) now decides — a pre-create pick is spent.
-      if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); setRoomLabel(""); return; }
+      if (!convID) { buildModelSelect(null, ""); updateCtx(0, 0); setRoomLabel(""); currentWorkspaceID = ""; buildWorkspaceChip(); return; }
       try {
         var r = await fetch("/api/conversations/" + convID);
         if (r.status === 404) {
@@ -1072,6 +1082,8 @@
           buildModelSelect(null, "");
           updateCtx(0, 0);
           setRoomLabel("");
+          currentWorkspaceID = "";
+          buildWorkspaceChip();
           return;
         }
         if (!r.ok) return;
@@ -1081,6 +1093,11 @@
         // — active_model_id is the concrete provider (an internal detail; a
         // display name maps one-to-many to providers).
         buildModelSelect(c.display_name || null, c.reasoning_effort || "");
+        // The conversation's loaded workspace (the WORKSPACE LOADING
+        // section) — the chip shows it; switching here is the user's
+        // surface for the pointer (the agent's is set_workspace).
+        currentWorkspaceID = c.workspace_id || "";
+        buildWorkspaceChip();
         // The rolling purpose is the conversation's label (it replaces the
         // title in the top bar, as in the list) — the title is the
         // pre-purpose fallback.
@@ -1169,6 +1186,109 @@
       var t = e.target;
       if (t && t.closest && (t.closest("#modelCard") || t.closest("#modelChip"))) return;
       closeModelCard();
+    });
+
+    // ---- The workspace picker (WORKSPACE LOADING) ----
+    // The conversation's loaded workspace: its skills become available and
+    // it's the search tool's default file scope. PATCH
+    // /api/conversations/{id} {workspace_id} ("" = clear). v1: existing
+    // conversations only (no pre-create pick).
+    var workspaces = [];
+    var wsTitles = {};
+    var currentWorkspaceID = "";
+    var workspaceCardOpen = false;
+
+    async function loadWorkspaces() {
+      try {
+        var r = await fetch("/api/workspaces");
+        if (!r.ok) return;
+        var j = await r.json();
+        workspaces = j.workspaces || [];
+        wsTitles = {};
+        workspaces.forEach(function (w) { wsTitles[w.id] = w.title; });
+      } catch (e) { /* best-effort — the picker degrades to ids */ }
+    }
+
+    function buildWorkspaceChip() {
+      var chip = $("workspaceChip");
+      chip.textContent = currentWorkspaceID ? (wsTitles[currentWorkspaceID] || currentWorkspaceID) : "no workspace";
+      chip.disabled = !convID;
+      if (workspaceCardOpen) buildWorkspaceRows();
+    }
+
+    function buildWorkspaceRows() {
+      var list = $("workspaceList");
+      list.innerHTML = "";
+      var mk = function (label, id, active) {
+        var row = document.createElement("div");
+        row.style.cssText = "padding:.35rem .5rem; border-radius:6px; cursor:pointer; font-size:.9rem;";
+        if (active) row.style.background = "var(--hover, rgba(127,127,127,.08));";
+        row.textContent = label;
+        row.addEventListener("click", function () { pickWorkspace(id); });
+        return row;
+      };
+      list.appendChild(mk("No workspace", "", currentWorkspaceID === ""));
+      workspaces.forEach(function (w) {
+        list.appendChild(mk((w.title || w.id) + "  (" + w.id + ")", w.id, currentWorkspaceID === w.id));
+      });
+    }
+
+    function openWorkspaceCard() {
+      var card = $("workspaceCard");
+      if (!card.hidden || $("workspaceChip").disabled) return;
+      card.hidden = false;
+      workspaceCardOpen = true;
+      $("workspaceChip").setAttribute("aria-expanded", "true");
+      buildWorkspaceRows();
+      var s = $("chatScroll");
+      if (s.scrollHeight - s.scrollTop - s.clientHeight < 60) {
+        s.scrollTop = s.scrollHeight;
+      }
+    }
+
+    function closeWorkspaceCard() {
+      var card = $("workspaceCard");
+      if (!card.hidden) {
+        card.hidden = true;
+        workspaceCardOpen = false;
+        $("workspaceChip").setAttribute("aria-expanded", "false");
+        $("workspaceChip").focus();
+      }
+    }
+
+    async function pickWorkspace(id) {
+      if (!convID) return;
+      closeWorkspaceCard();
+      var chip = $("workspaceChip");
+      chip.disabled = true;
+      try {
+        var r = await fetch("/api/conversations/" + convID, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: id })
+        });
+        if (!r.ok) {
+          var je = {}; try { je = await r.json(); } catch (e) {}
+          addNote(je.error || "Could not set the workspace.");
+        } else {
+          currentWorkspaceID = id;
+          buildWorkspaceChip();
+        }
+      } finally {
+        chip.disabled = !convID;
+      }
+    }
+
+    $("workspaceChip").addEventListener("click", function () {
+      if (this.disabled) return;
+      if (workspaceCardOpen) closeWorkspaceCard();
+      else openWorkspaceCard();
+    });
+    document.addEventListener("click", function (e) {
+      if (!workspaceCardOpen) return;
+      var t = e.target;
+      if (t && t.closest && (t.closest("#workspaceCard") || t.closest("#workspaceChip"))) return;
+      closeWorkspaceCard();
     });
 
     // Reasoning-effort switch: PATCH the conversation's stored choice ("" =
@@ -2295,6 +2415,7 @@
         if (!r.ok) throw new Error("HTTP " + r.status);
         var d = await r.json();
         var convs = d.conversations || [];
+        await loadWorkspaces(); // workspace labels for the rows
         box.innerHTML = "";
         if (!convs.length) {
           box.innerHTML = '<p class="muted" style="font-size:.85rem; margin:0;">no conversations yet.</p>';
@@ -2364,6 +2485,15 @@
             if (isMobileNav()) closeNav(); // picking a conversation returns to the chat (mobile drawer)
           });
           row.appendChild(title);
+          if (c.workspace_id) {
+            // The loaded workspace (WORKSPACE LOADING) — the label the
+            // list shows; the chat's picker is the control.
+            var ws = document.createElement("div");
+            ws.style.cssText = "font-size:.72rem; color:var(--muted, #666); white-space:nowrap; max-width:9rem; overflow:hidden; text-overflow:ellipsis;";
+            ws.textContent = wsTitles[c.workspace_id] || c.workspace_id;
+            ws.title = "Workspace: " + ws.textContent;
+            row.appendChild(ws);
+          }
           row.appendChild(when);
           row.appendChild(del);
           box.appendChild(row);

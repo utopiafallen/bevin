@@ -214,6 +214,21 @@ func (s *UserStore) UpdateSkill(name, description, content string) error {
 	return nil
 }
 
+// DeleteSkill removes a global skill by name (its memory refs cascade via
+// the FK). ErrNotFound when no skill has the name. The user's delete is a
+// hard delete in v1 (the design log's SKILL SYSTEM section — the
+// zombie-skill guard is deferred).
+func (s *UserStore) DeleteSkill(name string) error {
+	res, err := s.db.Exec(`DELETE FROM skills WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ---- P11 workspace ----
 
 type Workspace struct {
@@ -326,11 +341,28 @@ func (s *UserStore) SetWorkspaceEmbedding(id string, emb []float32) error {
 }
 
 // DeleteWorkspace removes the workspace (its file metadata rows cascade
-// via the FK). The on-disk folder is the server's job (it owns the
+// via the FK) and clears the pointer on every conversation loaded into it
+// (a dangling pointer would 404 the .SKILLS read — the folder is the
+// source of truth, the workspace-create precedent). Both halves run in one
+// transaction. The on-disk folder is the server's job (it owns the
 // filesystem); this is the database half of a delete.
 func (s *UserStore) DeleteWorkspace(id string) error {
-	_, err := s.db.Exec(`DELETE FROM workspaces WHERE id = ?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`DELETE FROM workspaces WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET workspace_id = '' WHERE workspace_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- P12 workspace file ----
