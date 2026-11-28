@@ -492,7 +492,7 @@
       $("skillsBtn").classList.toggle("active", name === "skills");
       $("profileBtn").classList.toggle("active", name === "profile");
       if (name === "search") { loadScopes(); loadConvScopes(); setTimeout(function () { $("searchInput").focus(); }, 120); }
-      if (name === "workspace") loadWorkspaces();
+      if (name === "workspace") loadWorkspaceCards();
       if (name === "skills") loadSkillsPage();
       if (name === "profile") loadProfilePage();
       if (name === "chat" && syncPending) doSync(); // a nudge arrived while off the page
@@ -3015,7 +3015,7 @@
       if (text) setTimeout(function () { if (el.textContent === text) el.textContent = ""; }, 4000);
     }
 
-    async function loadWorkspaces() {
+    async function loadWorkspaceCards() {
       var d;
       try {
         d = await (await fetch("/api/workspaces")).json();
@@ -3077,7 +3077,7 @@
           if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
         }
         closeWsDescEdit();
-        await loadWorkspaces();
+        await loadWorkspaceCards();
         wsMsg("Description saved.");
       } catch (err) {
         wsMsg("⚠ " + err.message, true);
@@ -3095,7 +3095,7 @@
       ws.current = id;
       $("wsDetail").hidden = false;
       $("wsDetailTitle").textContent = title || "Workspace";
-      await loadWorkspaces(); // refresh the active card (+ description row)
+      await loadWorkspaceCards(); // refresh the active card (+ description row)
       await loadWsFiles();
     }
 
@@ -3295,7 +3295,7 @@
         if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
         $("wsTitle").value = "";
         $("wsDesc").value = "";
-        await loadWorkspaces();
+        await loadWorkspaceCards();
         openWorkspace(d.workspace.id, d.workspace.title);
       } catch (err) {
         wsMsg("⚠ " + err.message, true);
@@ -3332,7 +3332,7 @@
         ws.current = null;
         ws.files = [];
         $("wsDetail").hidden = true;
-        await loadWorkspaces();
+        await loadWorkspaceCards();
       } catch (err) {
         wsMsg("⚠ " + err.message, true);
       }
