@@ -2128,6 +2128,20 @@ func (a *Agent) runTurn(ctx context.Context, handle, convID, userText string, im
 				return conv.ID, "", err
 			}
 		}
+		// Tier-2 cooperative yield (2026-11-27): the tool batch is done and
+		// every P7 row is persisted — the transcript is durable through this
+		// step, and nothing in the turn is blocked on the model. If other work
+		// is waiting in this pool, release the slot and re-queue at the tail
+		// so it runs; the turn resumes when a slot comes back (the loop state
+		// is this goroutine's locals — parking preserves them). With an empty
+		// queue a yield would just bounce the slot back, so keep going. The
+		// final-answer path breaks out of the loop above: no yield after the
+		// last message.
+		if yield := YieldFromContext(ctx); yield != nil && a.sched.QueueLen(conv.ActiveModelID) > 0 {
+			if yerr := yield(); yerr != nil {
+				return conv.ID, "", yerr
+			}
+		}
 	}
 	if persistedInLoop {
 		// The reply row (narration + the "stopped, not done" notice) was
